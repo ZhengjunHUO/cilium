@@ -8,9 +8,9 @@ import (
 	"net"
 	"testing"
 
+	. "github.com/cilium/checkmate"
 	"golang.org/x/sys/unix"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
-	. "gopkg.in/check.v1"
 
 	"github.com/cilium/cilium/pkg/checker"
 	"github.com/cilium/cilium/pkg/cidr"
@@ -81,8 +81,7 @@ func containsIP(allowedIPs []net.IPNet, ipnet *net.IPNet) bool {
 
 func newTestAgent(ctx context.Context) (*Agent, *ipcache.IPCache) {
 	ipCache := ipcache.NewIPCache(&ipcache.Configuration{
-		Context:     ctx,
-		NodeHandler: &mockNodeHandler{},
+		Context: ctx,
 	})
 	wgAgent := &Agent{
 		wgClient:         &fakeWgClient{},
@@ -211,7 +210,7 @@ func (a *AgentSuite) TestAgent_PeerConfig_WithEncryptNode(c *C) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	wgAgent, ipCache := newTestAgent(ctx)
-	wgAgent.nodeToNodeEncryption = true
+	wgAgent.requireNodesInPeerList = true
 	defer ipCache.Shutdown()
 
 	ipCache.Upsert(pod1IPv4Str, k8s1NodeIPv4, 0, nil, ipcache.Identity{ID: 1, Source: source.Kubernetes})
@@ -230,10 +229,4 @@ func (a *AgentSuite) TestAgent_PeerConfig_WithEncryptNode(c *C) {
 	c.Assert(containsIP(k8s1.allowedIPs, pod2IPv4), Equals, true)
 	c.Assert(containsIP(k8s1.allowedIPs, iputil.IPToPrefix(k8s1NodeIPv4)), Equals, true)
 	c.Assert(containsIP(k8s1.allowedIPs, iputil.IPToPrefix(k8s1NodeIPv6)), Equals, true)
-}
-
-type mockNodeHandler struct{}
-
-func (m *mockNodeHandler) AllocateNodeID(_ net.IP) uint16 {
-	return 0
 }

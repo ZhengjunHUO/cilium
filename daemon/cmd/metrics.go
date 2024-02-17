@@ -5,27 +5,17 @@ package cmd
 
 import (
 	"fmt"
-	"time"
 
 	"github.com/go-openapi/runtime/middleware"
 
 	restapi "github.com/cilium/cilium/api/v1/server/restapi/metrics"
 	"github.com/cilium/cilium/pkg/api"
 	"github.com/cilium/cilium/pkg/metrics"
-	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/spanstat"
+	"github.com/cilium/cilium/pkg/time"
 )
 
-type getMetrics struct {
-	daemon *Daemon
-}
-
-// NewGetMetricsHandler returns the metrics handler
-func NewGetMetricsHandler(d *Daemon) restapi.GetMetricsHandler {
-	return &getMetrics{daemon: d}
-}
-
-func (h *getMetrics) Handle(params restapi.GetMetricsParams) middleware.Responder {
+func getMetricsHandler(_ *Daemon, params restapi.GetMetricsParams) middleware.Responder {
 	metrics, err := metrics.DumpMetrics()
 	if err != nil {
 		return api.Error(
@@ -34,17 +24,6 @@ func (h *getMetrics) Handle(params restapi.GetMetricsParams) middleware.Responde
 	}
 
 	return restapi.NewGetMetricsOK().WithPayload(metrics)
-}
-
-func initMetrics() <-chan error {
-	var errs <-chan error
-
-	if option.Config.PrometheusServeAddr != "" {
-		log.Infof("Serving prometheus metrics on %s", option.Config.PrometheusServeAddr)
-		errs = metrics.Enable(option.Config.PrometheusServeAddr)
-	}
-
-	return errs
 }
 
 type bootstrapStatistics struct {
@@ -63,7 +42,6 @@ type bootstrapStatistics struct {
 	daemonInit      spanstat.SpanStat
 	mapsInit        spanstat.SpanStat
 	workloadsInit   spanstat.SpanStat
-	proxyStart      spanstat.SpanStat
 	fqdn            spanstat.SpanStat
 	enableConntrack spanstat.SpanStat
 	kvstore         spanstat.SpanStat
@@ -71,7 +49,7 @@ type bootstrapStatistics struct {
 }
 
 func (b *bootstrapStatistics) updateMetrics() {
-	if !option.Config.MetricsConfig.BootstrapTimesEnabled {
+	if !metrics.BootstrapTimes.IsEnabled() {
 		return
 	}
 
@@ -102,7 +80,6 @@ func (b *bootstrapStatistics) getMap() map[string]*spanstat.SpanStat {
 		"daemonInit":      &b.daemonInit,
 		"mapsInit":        &b.mapsInit,
 		"workloadsInit":   &b.workloadsInit,
-		"proxyStart":      &b.proxyStart,
 		"fqdn":            &b.fqdn,
 		"enableConntrack": &b.enableConntrack,
 		"kvstore":         &b.kvstore,

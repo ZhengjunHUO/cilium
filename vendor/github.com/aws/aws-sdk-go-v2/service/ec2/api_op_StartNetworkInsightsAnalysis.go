@@ -32,8 +32,8 @@ func (c *Client) StartNetworkInsightsAnalysis(ctx context.Context, params *Start
 type StartNetworkInsightsAnalysisInput struct {
 
 	// Unique, case-sensitive identifier that you provide to ensure the idempotency of
-	// the request. For more information, see How to ensure idempotency
-	// (https://docs.aws.amazon.com/AWSEC2/latest/APIReference/Run_Instance_Idempotency.html).
+	// the request. For more information, see How to ensure idempotency (https://docs.aws.amazon.com/AWSEC2/latest/APIReference/Run_Instance_Idempotency.html)
+	// .
 	//
 	// This member is required.
 	ClientToken *string
@@ -43,12 +43,13 @@ type StartNetworkInsightsAnalysisInput struct {
 	// This member is required.
 	NetworkInsightsPathId *string
 
+	// The member accounts that contain resources that the path can traverse.
 	AdditionalAccounts []string
 
 	// Checks whether you have the required permissions for the action, without
 	// actually making the request, and provides an error response. If you have the
-	// required permissions, the error response is DryRunOperation. Otherwise, it is
-	// UnauthorizedOperation.
+	// required permissions, the error response is DryRunOperation . Otherwise, it is
+	// UnauthorizedOperation .
 	DryRun *bool
 
 	// The Amazon Resource Names (ARN) of the resources that the path must traverse.
@@ -72,12 +73,22 @@ type StartNetworkInsightsAnalysisOutput struct {
 }
 
 func (c *Client) addOperationStartNetworkInsightsAnalysisMiddlewares(stack *middleware.Stack, options Options) (err error) {
+	if err := stack.Serialize.Add(&setOperationInputMiddleware{}, middleware.After); err != nil {
+		return err
+	}
 	err = stack.Serialize.Add(&awsEc2query_serializeOpStartNetworkInsightsAnalysis{}, middleware.After)
 	if err != nil {
 		return err
 	}
 	err = stack.Deserialize.Add(&awsEc2query_deserializeOpStartNetworkInsightsAnalysis{}, middleware.After)
 	if err != nil {
+		return err
+	}
+	if err := addProtocolFinalizerMiddlewares(stack, options, "StartNetworkInsightsAnalysis"); err != nil {
+		return fmt.Errorf("add protocol finalizers: %v", err)
+	}
+
+	if err = addlegacyEndpointContextSetter(stack, options); err != nil {
 		return err
 	}
 	if err = addSetLoggerMiddleware(stack, options); err != nil {
@@ -98,22 +109,22 @@ func (c *Client) addOperationStartNetworkInsightsAnalysisMiddlewares(stack *midd
 	if err = addRetryMiddlewares(stack, options); err != nil {
 		return err
 	}
-	if err = addHTTPSignerV4Middleware(stack, options); err != nil {
-		return err
-	}
 	if err = awsmiddleware.AddRawResponseToMetadata(stack); err != nil {
 		return err
 	}
 	if err = awsmiddleware.AddRecordResponseTiming(stack); err != nil {
 		return err
 	}
-	if err = addClientUserAgent(stack); err != nil {
+	if err = addClientUserAgent(stack, options); err != nil {
 		return err
 	}
 	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
 		return err
 	}
 	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
+		return err
+	}
+	if err = addSetLegacyContextSigningOptionsMiddleware(stack); err != nil {
 		return err
 	}
 	if err = addIdempotencyToken_opStartNetworkInsightsAnalysisMiddleware(stack, options); err != nil {
@@ -125,6 +136,9 @@ func (c *Client) addOperationStartNetworkInsightsAnalysisMiddlewares(stack *midd
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opStartNetworkInsightsAnalysis(options.Region), middleware.Before); err != nil {
 		return err
 	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
+		return err
+	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
 		return err
 	}
@@ -132,6 +146,9 @@ func (c *Client) addOperationStartNetworkInsightsAnalysisMiddlewares(stack *midd
 		return err
 	}
 	if err = addRequestResponseLogging(stack, options); err != nil {
+		return err
+	}
+	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
 		return err
 	}
 	return nil
@@ -174,7 +191,6 @@ func newServiceMetadataMiddleware_opStartNetworkInsightsAnalysis(region string) 
 	return &awsmiddleware.RegisterServiceMetadata{
 		Region:        region,
 		ServiceID:     ServiceID,
-		SigningName:   "ec2",
 		OperationName: "StartNetworkInsightsAnalysis",
 	}
 }

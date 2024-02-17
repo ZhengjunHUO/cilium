@@ -16,8 +16,7 @@ It adds `protoc` and plugins and the Go toolchain.
 ### [`runtime`](runtime/Dockerfile)
 
 This image is based on [`bpftool`](https://github.com/cilium/image-tools#imagesbpftool),
-[`iproute2`](https://github.com/cilium/image-tools#imagesiproute2) and
-[`llvm`](https://github.com/cilium/image-tools#imagesllvm) from `cilium/image-tools`.
+and [`llvm`](https://github.com/cilium/image-tools#imagesllvm) from `cilium/image-tools`.
 
 At present, it also includes [`gops`](https://github.com/google/gops) for
 debugging as well as Ubuntu user-space for troubleshooting.
@@ -93,7 +92,7 @@ tool (see [`cilium/image-tools` docs for details](https://github.com/cilium/imag
 
 A multi-platform `Dockerfile` pattern applied to Cilium images is as follows:
 ```
-## select host platfrom as linux/amd64, since that's that is what's currently
+## select host platform as linux/amd64, since that's that is what's currently
 ## available in GitHub Actions;
 ## it's possible to use `--platform=${BUILDPLATFORM}`, but that requires more
 ## logic to decide which target is built natively and which one is
@@ -128,5 +127,5 @@ WORKDIR /home/cilium
 RUN groupadd -f cilium \
     && echo ". /etc/profile.d/bash_completion.sh" >> /etc/bash.bashrc
 
-CMD ["/usr/bin/cilium"]
+CMD ["/usr/bin/cilium-dbg"]
 ```

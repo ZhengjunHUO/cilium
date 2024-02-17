@@ -9,7 +9,8 @@ import (
 
 	"github.com/sirupsen/logrus"
 
-	"github.com/cilium/cilium/pkg/bandwidth"
+	"github.com/cilium/cilium/pkg/datapath/linux/bandwidth"
+	datapath "github.com/cilium/cilium/pkg/datapath/types"
 	"github.com/cilium/cilium/pkg/eventqueue"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/maps/bwmap"
@@ -65,7 +66,6 @@ func (ev *EndpointRegenerationEvent) Handle(res chan interface{}) {
 	res <- &EndpointRegenerationResult{
 		err: err,
 	}
-	return
 }
 
 // EndpointRegenerationResult contains the results of an endpoint regeneration.
@@ -182,7 +182,6 @@ func (ev *EndpointNoTrackEvent) Handle(res chan interface{}) {
 	res <- &EndpointRegenerationResult{
 		err: nil,
 	}
-	return
 }
 
 // EndpointPolicyVisibilityEvent contains all fields necessary to update the
@@ -228,6 +227,15 @@ func (ev *EndpointPolicyVisibilityEvent) Handle(res chan interface{}) {
 		return
 	}
 	if proxyVisibility != "" {
+		if e.IsProxyDisabled() {
+			e.getLogger().
+				WithField(logfields.EndpointID, e.GetID()).
+				Warn("ignoring L7 proxy visibility policy as L7 proxy is disabled")
+			res <- &EndpointRegenerationResult{
+				err: nil,
+			}
+			return
+		}
 		e.getLogger().Debug("creating visibility policy")
 		nvp, err = policy.NewVisibilityPolicy(proxyVisibility)
 		if err != nil {
@@ -248,12 +256,12 @@ func (ev *EndpointPolicyVisibilityEvent) Handle(res chan interface{}) {
 	res <- &EndpointRegenerationResult{
 		err: nil,
 	}
-	return
 }
 
 // EndpointPolicyBandwidthEvent contains all fields necessary to update
 // the Pod's bandwidth policy.
 type EndpointPolicyBandwidthEvent struct {
+	bwm    datapath.BandwidthManager
 	ep     *Endpoint
 	annoCB AnnotationsResolverCB
 }
@@ -261,6 +269,13 @@ type EndpointPolicyBandwidthEvent struct {
 // Handle handles the policy bandwidth update.
 func (ev *EndpointPolicyBandwidthEvent) Handle(res chan interface{}) {
 	var bps uint64
+
+	if !ev.bwm.Enabled() {
+		res <- &EndpointRegenerationResult{
+			err: nil,
+		}
+		return
+	}
 
 	e := ev.ep
 	if err := e.lockAlive(); err != nil {
@@ -276,7 +291,7 @@ func (ev *EndpointPolicyBandwidthEvent) Handle(res chan interface{}) {
 	}()
 
 	bandwidthEgress, err := ev.annoCB(e.K8sNamespace, e.K8sPodName)
-	if err != nil || !option.Config.EnableBandwidthManager {
+	if err != nil {
 		res <- &EndpointRegenerationResult{
 			err: err,
 		}

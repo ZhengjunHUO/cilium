@@ -35,30 +35,24 @@ type DescribeCapacityReservationFleetsInput struct {
 
 	// Checks whether you have the required permissions for the action, without
 	// actually making the request, and provides an error response. If you have the
-	// required permissions, the error response is DryRunOperation. Otherwise, it is
-	// UnauthorizedOperation.
+	// required permissions, the error response is DryRunOperation . Otherwise, it is
+	// UnauthorizedOperation .
 	DryRun *bool
 
 	// One or more filters.
-	//
-	// * state - The state of the Fleet (submitted | modifying |
-	// active | partially_fulfilled | expiring | expired | cancelling | cancelled |
-	// failed).
-	//
-	// * instance-match-criteria - The instance matching criteria for the
-	// Fleet. Only open is supported.
-	//
-	// * tenancy - The tenancy of the Fleet (default |
-	// dedicated).
-	//
-	// * allocation-strategy - The allocation strategy used by the Fleet.
-	// Only prioritized is supported.
+	//   - state - The state of the Fleet ( submitted | modifying | active |
+	//   partially_fulfilled | expiring | expired | cancelling | cancelled | failed ).
+	//   - instance-match-criteria - The instance matching criteria for the Fleet. Only
+	//   open is supported.
+	//   - tenancy - The tenancy of the Fleet ( default | dedicated ).
+	//   - allocation-strategy - The allocation strategy used by the Fleet. Only
+	//   prioritized is supported.
 	Filters []types.Filter
 
-	// The maximum number of results to return for the request in a single page. The
-	// remaining results can be seen by sending another request with the returned
-	// nextToken value. This value can be between 5 and 500. If maxResults is given a
-	// larger value than 500, you receive an error.
+	// The maximum number of items to return for this request. To get the next page of
+	// items, make another request with the token returned in the output. For more
+	// information, see Pagination (https://docs.aws.amazon.com/AWSEC2/latest/APIReference/Query-Requests.html#api-pagination)
+	// .
 	MaxResults *int32
 
 	// The token to use to retrieve the next page of results.
@@ -83,12 +77,22 @@ type DescribeCapacityReservationFleetsOutput struct {
 }
 
 func (c *Client) addOperationDescribeCapacityReservationFleetsMiddlewares(stack *middleware.Stack, options Options) (err error) {
+	if err := stack.Serialize.Add(&setOperationInputMiddleware{}, middleware.After); err != nil {
+		return err
+	}
 	err = stack.Serialize.Add(&awsEc2query_serializeOpDescribeCapacityReservationFleets{}, middleware.After)
 	if err != nil {
 		return err
 	}
 	err = stack.Deserialize.Add(&awsEc2query_deserializeOpDescribeCapacityReservationFleets{}, middleware.After)
 	if err != nil {
+		return err
+	}
+	if err := addProtocolFinalizerMiddlewares(stack, options, "DescribeCapacityReservationFleets"); err != nil {
+		return fmt.Errorf("add protocol finalizers: %v", err)
+	}
+
+	if err = addlegacyEndpointContextSetter(stack, options); err != nil {
 		return err
 	}
 	if err = addSetLoggerMiddleware(stack, options); err != nil {
@@ -109,16 +113,13 @@ func (c *Client) addOperationDescribeCapacityReservationFleetsMiddlewares(stack 
 	if err = addRetryMiddlewares(stack, options); err != nil {
 		return err
 	}
-	if err = addHTTPSignerV4Middleware(stack, options); err != nil {
-		return err
-	}
 	if err = awsmiddleware.AddRawResponseToMetadata(stack); err != nil {
 		return err
 	}
 	if err = awsmiddleware.AddRecordResponseTiming(stack); err != nil {
 		return err
 	}
-	if err = addClientUserAgent(stack); err != nil {
+	if err = addClientUserAgent(stack, options); err != nil {
 		return err
 	}
 	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
@@ -127,7 +128,13 @@ func (c *Client) addOperationDescribeCapacityReservationFleetsMiddlewares(stack 
 	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
 		return err
 	}
+	if err = addSetLegacyContextSigningOptionsMiddleware(stack); err != nil {
+		return err
+	}
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opDescribeCapacityReservationFleets(options.Region), middleware.Before); err != nil {
+		return err
+	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
@@ -137,6 +144,9 @@ func (c *Client) addOperationDescribeCapacityReservationFleetsMiddlewares(stack 
 		return err
 	}
 	if err = addRequestResponseLogging(stack, options); err != nil {
+		return err
+	}
+	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
 		return err
 	}
 	return nil
@@ -153,10 +163,10 @@ var _ DescribeCapacityReservationFleetsAPIClient = (*Client)(nil)
 // DescribeCapacityReservationFleetsPaginatorOptions is the paginator options for
 // DescribeCapacityReservationFleets
 type DescribeCapacityReservationFleetsPaginatorOptions struct {
-	// The maximum number of results to return for the request in a single page. The
-	// remaining results can be seen by sending another request with the returned
-	// nextToken value. This value can be between 5 and 500. If maxResults is given a
-	// larger value than 500, you receive an error.
+	// The maximum number of items to return for this request. To get the next page of
+	// items, make another request with the token returned in the output. For more
+	// information, see Pagination (https://docs.aws.amazon.com/AWSEC2/latest/APIReference/Query-Requests.html#api-pagination)
+	// .
 	Limit int32
 
 	// Set to true if pagination should stop if the service returns a pagination token
@@ -242,7 +252,6 @@ func newServiceMetadataMiddleware_opDescribeCapacityReservationFleets(region str
 	return &awsmiddleware.RegisterServiceMetadata{
 		Region:        region,
 		ServiceID:     ServiceID,
-		SigningName:   "ec2",
 		OperationName: "DescribeCapacityReservationFleets",
 	}
 }

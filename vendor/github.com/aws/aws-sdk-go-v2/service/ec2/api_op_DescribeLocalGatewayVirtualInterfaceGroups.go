@@ -32,23 +32,17 @@ type DescribeLocalGatewayVirtualInterfaceGroupsInput struct {
 
 	// Checks whether you have the required permissions for the action, without
 	// actually making the request, and provides an error response. If you have the
-	// required permissions, the error response is DryRunOperation. Otherwise, it is
-	// UnauthorizedOperation.
+	// required permissions, the error response is DryRunOperation . Otherwise, it is
+	// UnauthorizedOperation .
 	DryRun *bool
 
 	// One or more filters.
-	//
-	// * local-gateway-id - The ID of a local gateway.
-	//
-	// *
-	// local-gateway-virtual-interface-group-id - The ID of the virtual interface
-	// group.
-	//
-	// * local-gateway-virtual-interface-id - The ID of the virtual
-	// interface.
-	//
-	// * owner-id - The ID of the Amazon Web Services account that owns the
-	// local gateway virtual interface group.
+	//   - local-gateway-id - The ID of a local gateway.
+	//   - local-gateway-virtual-interface-group-id - The ID of the virtual interface
+	//   group.
+	//   - local-gateway-virtual-interface-id - The ID of the virtual interface.
+	//   - owner-id - The ID of the Amazon Web Services account that owns the local
+	//   gateway virtual interface group.
 	Filters []types.Filter
 
 	// The IDs of the virtual interface groups.
@@ -80,12 +74,22 @@ type DescribeLocalGatewayVirtualInterfaceGroupsOutput struct {
 }
 
 func (c *Client) addOperationDescribeLocalGatewayVirtualInterfaceGroupsMiddlewares(stack *middleware.Stack, options Options) (err error) {
+	if err := stack.Serialize.Add(&setOperationInputMiddleware{}, middleware.After); err != nil {
+		return err
+	}
 	err = stack.Serialize.Add(&awsEc2query_serializeOpDescribeLocalGatewayVirtualInterfaceGroups{}, middleware.After)
 	if err != nil {
 		return err
 	}
 	err = stack.Deserialize.Add(&awsEc2query_deserializeOpDescribeLocalGatewayVirtualInterfaceGroups{}, middleware.After)
 	if err != nil {
+		return err
+	}
+	if err := addProtocolFinalizerMiddlewares(stack, options, "DescribeLocalGatewayVirtualInterfaceGroups"); err != nil {
+		return fmt.Errorf("add protocol finalizers: %v", err)
+	}
+
+	if err = addlegacyEndpointContextSetter(stack, options); err != nil {
 		return err
 	}
 	if err = addSetLoggerMiddleware(stack, options); err != nil {
@@ -106,16 +110,13 @@ func (c *Client) addOperationDescribeLocalGatewayVirtualInterfaceGroupsMiddlewar
 	if err = addRetryMiddlewares(stack, options); err != nil {
 		return err
 	}
-	if err = addHTTPSignerV4Middleware(stack, options); err != nil {
-		return err
-	}
 	if err = awsmiddleware.AddRawResponseToMetadata(stack); err != nil {
 		return err
 	}
 	if err = awsmiddleware.AddRecordResponseTiming(stack); err != nil {
 		return err
 	}
-	if err = addClientUserAgent(stack); err != nil {
+	if err = addClientUserAgent(stack, options); err != nil {
 		return err
 	}
 	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
@@ -124,7 +125,13 @@ func (c *Client) addOperationDescribeLocalGatewayVirtualInterfaceGroupsMiddlewar
 	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
 		return err
 	}
+	if err = addSetLegacyContextSigningOptionsMiddleware(stack); err != nil {
+		return err
+	}
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opDescribeLocalGatewayVirtualInterfaceGroups(options.Region), middleware.Before); err != nil {
+		return err
+	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
@@ -134,6 +141,9 @@ func (c *Client) addOperationDescribeLocalGatewayVirtualInterfaceGroupsMiddlewar
 		return err
 	}
 	if err = addRequestResponseLogging(stack, options); err != nil {
+		return err
+	}
+	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
 		return err
 	}
 	return nil
@@ -237,7 +247,6 @@ func newServiceMetadataMiddleware_opDescribeLocalGatewayVirtualInterfaceGroups(r
 	return &awsmiddleware.RegisterServiceMetadata{
 		Region:        region,
 		ServiceID:     ServiceID,
-		SigningName:   "ec2",
 		OperationName: "DescribeLocalGatewayVirtualInterfaceGroups",
 	}
 }

@@ -4,21 +4,20 @@
 package ingestion
 
 import (
-	"fmt"
 	"sort"
+
+	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 
 	"github.com/cilium/cilium/operator/pkg/ingress/annotations"
 	"github.com/cilium/cilium/operator/pkg/model"
-	corev1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/core/v1"
-	slim_networkingv1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/networking/v1"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 )
 
 // Ingress translates an Ingress resource to a HTTPListener.
 // This function does not check IngressClass (via field or annotation).
 // It's expected that only relevant Ingresses will have this function called on them.
-func Ingress(ing slim_networkingv1.Ingress) []model.HTTPListener {
-
+func Ingress(ing networkingv1.Ingress, defaultSecretNamespace, defaultSecretName string, enforcedHTTPS bool) []model.HTTPListener {
 	// First, we make a map of HTTPListeners, with the hostname
 	// as the key, so that we can make sure we match up any
 	// TLS config with rules that match it.
@@ -64,7 +63,8 @@ func Ingress(ing slim_networkingv1.Ingress) []model.HTTPListener {
 					Backends: []model.Backend{
 						backend,
 					},
-				}},
+				},
+			},
 			Port:    80,
 			Service: getService(ing),
 		}
@@ -87,20 +87,26 @@ func Ingress(ing slim_networkingv1.Ingress) []model.HTTPListener {
 		l.Port = 80
 		l.Sources = model.AddSource(l.Sources, sourceResource)
 		if !ok {
-			l.Name = fmt.Sprintf("ing-%s-%s-%s", ing.Name, ing.Namespace, host)
+			l.Name = "ing-" + ing.Name + "-" + ing.Namespace + "-" + host
 		}
 
 		l.Hostname = host
+		if rule.HTTP == nil {
+			log.WithField(logfields.Ingress, ing.Namespace+"/"+ing.Name).
+				Warn("Invalid Ingress rule without spec.rules.HTTP defined, skipping rule")
+			continue
+		}
+
 		for _, path := range rule.HTTP.Paths {
 
 			route := model.HTTPRoute{}
 
 			switch *path.PathType {
-			case slim_networkingv1.PathTypeExact:
+			case networkingv1.PathTypeExact:
 				route.PathMatch.Exact = path.Path
-			case slim_networkingv1.PathTypePrefix:
+			case networkingv1.PathTypePrefix:
 				route.PathMatch.Prefix = path.Path
-			case slim_networkingv1.PathTypeImplementationSpecific:
+			case networkingv1.PathTypeImplementationSpecific:
 				route.PathMatch.Regex = path.Path
 			}
 
@@ -127,9 +133,18 @@ func Ingress(ing slim_networkingv1.Ingress) []model.HTTPListener {
 
 	secureListenerMap := make(map[string]model.HTTPListener)
 
+	// Before we check for TLS config, we need to see if the force-https annotation
+	// is set.
+	forceHTTPsannotation := annotations.GetAnnotationForceHTTPSEnabled(&ing)
+	forceHTTPs := false
+
+	// We only care about enforcedHTTPS if the annotation is unset
+	if (forceHTTPsannotation == nil && enforcedHTTPS) || (forceHTTPsannotation != nil && *forceHTTPsannotation) {
+		forceHTTPs = true
+	}
+
 	// First, we check for TLS config, and set them up with Listeners to return.
 	for _, tlsConfig := range ing.Spec.TLS {
-
 		for _, host := range tlsConfig.Hosts {
 
 			l, ok := secureListenerMap[host]
@@ -151,11 +166,19 @@ func Ingress(ing slim_networkingv1.Ingress) []model.HTTPListener {
 						Namespace: ing.Namespace,
 					},
 				}
-
+			} else if defaultSecretNamespace != "" && defaultSecretName != "" {
+				l.TLS = []model.TLSSecret{
+					{
+						Name:      defaultSecretName,
+						Namespace: defaultSecretNamespace,
+					},
+				}
 			}
+
 			l.Port = 443
 			l.Hostname = host
 			l.Service = getService(ing)
+			l.ForceHTTPtoHTTPSRedirect = forceHTTPs
 			secureListenerMap[host] = l
 
 			defaultListener, ok := insecureListenerMap["*"]
@@ -170,6 +193,13 @@ func Ingress(ing slim_networkingv1.Ingress) []model.HTTPListener {
 							Namespace: ing.Namespace,
 						},
 					}
+				} else if defaultSecretNamespace != "" && defaultSecretName != "" {
+					defaultListener.TLS = []model.TLSSecret{
+						{
+							Name:      defaultSecretName,
+							Namespace: defaultSecretNamespace,
+						},
+					}
 				}
 				defaultListener.Hostname = host
 				defaultListener.Port = 443
@@ -177,7 +207,6 @@ func Ingress(ing slim_networkingv1.Ingress) []model.HTTPListener {
 
 			}
 		}
-
 	}
 
 	listenerSlice := make([]model.HTTPListener, 0, len(insecureListenerMap)+len(secureListenerMap))
@@ -185,10 +214,116 @@ func Ingress(ing slim_networkingv1.Ingress) []model.HTTPListener {
 	listenerSlice = appendValuesInKeyOrder(secureListenerMap, listenerSlice)
 
 	return listenerSlice
-
 }
 
-func getService(ing slim_networkingv1.Ingress) *model.Service {
+// IngressPassthrough translates an Ingress resource with the tls-passthrough annotation to a TLSListener.
+// This function does not check IngressClass (via field or annotation).
+// It's expected that only relevant Ingresses will have this function called on them.
+//
+// Ingress objects with SSL Passthrough enabled have the following properties:
+//
+// * must have a host set
+// * rules with paths other than '/' are ignored
+// * default backends are ignored
+func IngressPassthrough(ing networkingv1.Ingress, defaultSecretNamespace, defaultSecretName string) []model.TLSListener {
+	// First, we make a map of TLSListeners, with the hostname
+	// as the key, so that we can make sure we match up any
+	// TLS config with rules that match it.
+	// This is to approximate a set, keyed by hostname, so we can
+	// coalesce the config from a single Ingress.
+	// Coalescing the config from multiple Ingress resources is left for
+	// the transform component that takes a model and outputs CiliumEnvoyConfig
+	// or other resources.
+	tlsListenerMap := make(map[string]model.TLSListener)
+
+	sourceResource := model.FullyQualifiedResource{
+		Name:      ing.Name,
+		Namespace: ing.Namespace,
+		Group:     "",
+		Version:   "v1",
+		Kind:      "Ingress",
+		UID:       string(ing.UID),
+	}
+
+	// Note that there's no support for default backends in SSL Passthrough
+	// mode.
+	if ing.Spec.DefaultBackend != nil {
+		log.WithField(logfields.Ingress, ing.Namespace+"/"+ing.Name).
+			Warn("Invalid SSL Passthrough Ingress rule with a default backend, skipping default backend config")
+	}
+
+	// Now, we range across the rules, adding them in as listeners.
+	for _, rule := range ing.Spec.Rules {
+
+		// SSL Passthrough Ingress objects must have a host set.
+		if rule.Host == "" {
+			log.WithField(logfields.Ingress, ing.Namespace+"/"+ing.Name).
+				Warn("Invalid SSL Passthrough Ingress rule without spec.rules.host defined, skipping rule")
+			continue
+		}
+
+		host := rule.Host
+
+		l, ok := tlsListenerMap[host]
+		l.Port = 443
+		l.Sources = model.AddSource(l.Sources, sourceResource)
+		if !ok {
+			l.Name = "ing-" + ing.Name + "-" + ing.Namespace + "-" + host
+		}
+
+		l.Hostname = host
+
+		if rule.HTTP == nil {
+			log.WithField(logfields.Ingress, ing.Namespace+"/"+ing.Name).
+				Warn("Invalid SSL Passthrough Ingress rule without spec.rules.HTTP defined, skipping rule")
+			continue
+		}
+
+		for _, path := range rule.HTTP.Paths {
+			// SSL Passthrough objects must only have path of '/'
+			if path.Path != "/" {
+				log.WithField(logfields.Ingress, ing.Namespace+"/"+ing.Name).
+					Warn("Invalid SSL Passthrough Ingress rule with path not equal to '/', skipping rule")
+				continue
+			}
+
+			route := model.TLSRoute{}
+
+			backend := model.Backend{
+				Name:      path.Backend.Service.Name,
+				Namespace: ing.Namespace,
+			}
+			if path.Backend.Service != nil {
+				backend.Port = &model.BackendPort{}
+				if path.Backend.Service.Port.Name != "" {
+					backend.Port.Name = path.Backend.Service.Port.Name
+				}
+				if path.Backend.Service.Port.Number != 0 {
+					backend.Port.Port = uint32(path.Backend.Service.Port.Number)
+				}
+			}
+			route.Backends = append(route.Backends, backend)
+			l.Routes = append(l.Routes, route)
+			l.Service = getService(ing)
+		}
+
+		// If there aren't any routes, then don't add the Listener
+		if len(l.Routes) == 0 {
+			log.WithField(logfields.Ingress, ing.Namespace+"/"+ing.Name).
+				Warn("Invalid SSL Passthrough Ingress with no valid rules, skipping")
+			continue
+		}
+
+		tlsListenerMap[host] = l
+	}
+
+	listenerSlice := make([]model.TLSListener, 0, len(tlsListenerMap))
+	listenerSlice = appendValuesInKeyOrder(tlsListenerMap, listenerSlice)
+
+	return listenerSlice
+}
+
+func getService(ing networkingv1.Ingress) *model.Service {
 	if annotations.GetAnnotationServiceType(&ing) != string(corev1.ServiceTypeNodePort) {
 		return nil
 	}
@@ -216,8 +351,7 @@ func getService(ing slim_networkingv1.Ingress) *model.Service {
 
 // appendValuesInKeyOrder ensures that the slice of listeners is stably sorted by
 // appending the values of the map in order of the keys to the appendSlice.
-func appendValuesInKeyOrder(listenerMap map[string]model.HTTPListener, appendSlice []model.HTTPListener) []model.HTTPListener {
-
+func appendValuesInKeyOrder[T model.HTTPListener | model.TLSListener](listenerMap map[string]T, appendSlice []T) []T {
 	var keys []string
 
 	for key := range listenerMap {

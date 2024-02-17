@@ -1,10 +1,9 @@
-
 ---
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.7.0
+    controller-gen.kubebuilder.io/version: v0.14.0
   creationTimestamp: null
   name: ciliumclusterwidenetworkpolicies.cilium.io
 spec:
@@ -63,31 +62,31 @@ spec:
                 items:
                   description: "EgressRule contains all rule types which can be applied
                     at egress, i.e. network traffic that originates inside the endpoint
-                    and exits the endpoint selected by the endpointSelector. \n   -
+                    and exits the endpoint selected by the endpointSelector. \n -
                     All members of this structure are optional. If omitted or empty,
-                    the     member will have no effect on the rule. \n   - If multiple
-                    members of the structure are specified, then all members     must
-                    match in order for the rule to take effect. The exception to this
-                    \    rule is the ToRequires member; the effects of any Requires
-                    field in any     rule will apply to all other rules as well. \n
-                    \  - ToEndpoints, ToCIDR, ToCIDRSet, ToEntities, ToServices and
-                    ToGroups are     mutually exclusive. Only one of these members
-                    may be present within an     individual rule."
+                    the member will have no effect on the rule. \n - If multiple members
+                    of the structure are specified, then all members must match in
+                    order for the rule to take effect. The exception to this rule
+                    is the ToRequires member; the effects of any Requires field in
+                    any rule will apply to all other rules as well. \n - ToEndpoints,
+                    ToCIDR, ToCIDRSet, ToEntities, ToServices and ToGroups are mutually
+                    exclusive. Only one of these members may be present within an
+                    individual rule."
                   properties:
-                    auth:
-                      description: Auth is the required authentication type for the
-                        allowed traffic, if any.
+                    authentication:
+                      description: Authentication is the required authentication type
+                        for the allowed traffic, if any.
                       properties:
-                        type:
-                          description: Type is the required authentication type for
+                        mode:
+                          description: Mode is the required authentication mode for
                             the allowed traffic, if any.
                           enum:
-                          - "null"
-                          - mtls-spiffe
-                          - always-fail
+                          - disabled
+                          - required
+                          - test-always-fail
                           type: string
                       required:
-                      - type
+                      - mode
                       type: object
                     icmps:
                       description: "ICMPs is a list of ICMP rule identified by type
@@ -279,7 +278,7 @@ spec:
                         type: string
                       type: array
                     toFQDNs:
-                      description: "ToFQDN allows whitelisting DNS names in place
+                      description: 'ToFQDN allows whitelisting DNS names in place
                         of IPs. The IPs that result from DNS resolution of `ToFQDN.MatchName`s
                         are added to the same EgressRule object as ToCIDRSet entries,
                         and behave accordingly. Any L4 and L7 rules within this EgressRule
@@ -292,15 +291,7 @@ spec:
                         egress policy when PolicyEnforcment=default. Note: If the
                         resolved IPs are IPs within the kubernetes cluster, the ToFQDN
                         rule will not apply to that IP. Note: ToFQDN cannot occur
-                        in the same policy as other To* rules. \n The current implementation
-                        has a number of limitations: - The DNS resolution originates
-                        from cilium-agent, and not from the pods. Differences between
-                        the responses seen by cilium agent and a particular pod will
-                        whitelist the incorrect IP. - DNS TTLs are ignored, and cilium-agent
-                        will repoll on a short interval (5 seconds). Each change to
-                        the DNS data will trigger a policy regeneration. This may
-                        result in delayed updates to the policy for an endpoint when
-                        the data changes often or the system is under load."
+                        in the same policy as other To* rules.'
                       items:
                         properties:
                           matchName:
@@ -317,14 +308,14 @@ spec:
                               \".\" matches all subdomains as well as the name to
                               the right. A trailing \".\" is automatically added when
                               missing. \n Examples: `*.cilium.io` matches subomains
-                              of cilium at that level   www.cilium.io and blog.cilium.io
+                              of cilium at that level www.cilium.io and blog.cilium.io
                               match, cilium.io and google.com do not `*cilium.io`
                               matches cilium.io and all subdomains ends with \"cilium.io\"
-                              \  except those containing \".\" separator, subcilium.io
-                              and sub-cilium.io match,   www.cilium.io and blog.cilium.io
+                              except those containing \".\" separator, subcilium.io
+                              and sub-cilium.io match, www.cilium.io and blog.cilium.io
                               does not sub*.cilium.io matches subdomains of cilium
-                              where the subdomain component begins with \"sub\"   sub.cilium.io
-                              and subdomain.cilium.io match, www.cilium.io,   blog.cilium.io,
+                              where the subdomain component begins with \"sub\" sub.cilium.io
+                              and subdomain.cilium.io match, www.cilium.io, blog.cilium.io,
                               cilium.io and google.com do not"
                             pattern: ^([-a-zA-Z0-9_*]+[.]?)+$
                             type: string
@@ -334,7 +325,7 @@ spec:
                       description: "ToGroups is a directive that allows the integration
                         with multiple outside providers. Currently, only AWS is supported,
                         and the rule can select by multiple sub directives: \n Example:
-                        toGroups: - aws:     securityGroupsIds:     - 'sg-XXXXXXXXXXXXX'"
+                        toGroups: - aws: securityGroupsIds: - 'sg-XXXXXXXXXXXXX'"
                       items:
                         description: ToGroups structure to store all kinds of new
                           integrations that needs a new derivative policy.
@@ -360,6 +351,64 @@ spec:
                             type: object
                         type: object
                       type: array
+                    toNodes:
+                      description: ToNodes is a list of nodes identified by an EndpointSelector
+                        to which endpoints subject to the rule is allowed to communicate.
+                      items:
+                        description: EndpointSelector is a wrapper for k8s LabelSelector.
+                        properties:
+                          matchExpressions:
+                            description: matchExpressions is a list of label selector
+                              requirements. The requirements are ANDed.
+                            items:
+                              description: A label selector requirement is a selector
+                                that contains values, a key, and an operator that
+                                relates the key and values.
+                              properties:
+                                key:
+                                  description: key is the label key that the selector
+                                    applies to.
+                                  type: string
+                                operator:
+                                  description: operator represents a key's relationship
+                                    to a set of values. Valid operators are In, NotIn,
+                                    Exists and DoesNotExist.
+                                  enum:
+                                  - In
+                                  - NotIn
+                                  - Exists
+                                  - DoesNotExist
+                                  type: string
+                                values:
+                                  description: values is an array of string values.
+                                    If the operator is In or NotIn, the values array
+                                    must be non-empty. If the operator is Exists or
+                                    DoesNotExist, the values array must be empty.
+                                    This array is replaced during a strategic merge
+                                    patch.
+                                  items:
+                                    type: string
+                                  type: array
+                              required:
+                              - key
+                              - operator
+                              type: object
+                            type: array
+                          matchLabels:
+                            additionalProperties:
+                              description: MatchLabelsValue represents the value from
+                                the MatchLabels {key,value} pair.
+                              maxLength: 63
+                              pattern: ^(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?$
+                              type: string
+                            description: matchLabels is a map of {key,value} pairs.
+                              A single {key,value} in the matchLabels map is equivalent
+                              to an element of matchExpressions, whose key field is
+                              "key", the operator is "In", and the values array contains
+                              only "value". The requirements are ANDed.
+                            type: object
+                        type: object
+                      type: array
                     toPorts:
                       description: "ToPorts is a list of destination ports identified
                         by port number and protocol which the endpoint subject to
@@ -377,7 +426,7 @@ spec:
                             properties:
                               envoyConfig:
                                 description: EnvoyConfig is a reference to the CEC
-                                  or CCNP resource in which the listener is defined.
+                                  or CCEC resource in which the listener is defined.
                                 properties:
                                   kind:
                                     description: Kind is the resource type being referred
@@ -405,6 +454,14 @@ spec:
                                 description: Name is the name of the listener.
                                 minLength: 1
                                 type: string
+                              priority:
+                                description: Priority for this Listener that is used
+                                  when multiple rules would apply different listeners
+                                  to a policy map entry. Behavior of this is implementation
+                                  dependent.
+                                maximum: 100
+                                minimum: 1
+                                type: integer
                             required:
                             - envoyConfig
                             - name
@@ -434,11 +491,11 @@ spec:
                                 description: 'Secret is the secret that contains the
                                   certificates and private key for the TLS context.
                                   By default, Cilium will search in this secret for
-                                  the following items:  - ''ca.crt''  - Which represents
-                                  the trusted CA to verify remote source.  - ''tls.crt''
-                                  - Which represents the public key certificate.  -
+                                  the following items: - ''ca.crt''  - Which represents
+                                  the trusted CA to verify remote source. - ''tls.crt''
+                                  - Which represents the public key certificate. -
                                   ''tls.key'' - Which represents the private key matching
-                                  the public key                certificate.'
+                                  the public key certificate.'
                                 properties:
                                   name:
                                     description: Name is the name of the secret.
@@ -523,16 +580,16 @@ spec:
                                         well as the name to the right. A trailing
                                         \".\" is automatically added when missing.
                                         \n Examples: `*.cilium.io` matches subomains
-                                        of cilium at that level   www.cilium.io and
+                                        of cilium at that level www.cilium.io and
                                         blog.cilium.io match, cilium.io and google.com
                                         do not `*cilium.io` matches cilium.io and
-                                        all subdomains ends with \"cilium.io\"   except
+                                        all subdomains ends with \"cilium.io\" except
                                         those containing \".\" separator, subcilium.io
-                                        and sub-cilium.io match,   www.cilium.io and
+                                        and sub-cilium.io match, www.cilium.io and
                                         blog.cilium.io does not sub*.cilium.io matches
                                         subdomains of cilium where the subdomain component
-                                        begins with \"sub\"   sub.cilium.io and subdomain.cilium.io
-                                        match, www.cilium.io,   blog.cilium.io, cilium.io
+                                        begins with \"sub\" sub.cilium.io and subdomain.cilium.io
+                                        match, www.cilium.io, blog.cilium.io, cilium.io
                                         and google.com do not"
                                       pattern: ^([-a-zA-Z0-9_*]+[.]?)+$
                                       type: string
@@ -692,15 +749,15 @@ spec:
                                         such as \"produce\" or \"consume\". A Role
                                         automatically expands into all APIKeys required
                                         to perform the specified higher-level operation.
-                                        \n The following values are supported:  -
-                                        \"produce\": Allow producing to the topics
-                                        specified in the rule  - \"consume\": Allow
-                                        consuming from the topics specified in the
-                                        rule \n This field is incompatible with the
-                                        APIKey field, i.e APIKey and Role cannot both
-                                        be specified in the same rule. \n If omitted
-                                        or empty, and if APIKey is not specified,
-                                        then all keys are allowed."
+                                        \n The following values are supported: - \"produce\":
+                                        Allow producing to the topics specified in
+                                        the rule - \"consume\": Allow consuming from
+                                        the topics specified in the rule \n This field
+                                        is incompatible with the APIKey field, i.e
+                                        APIKey and Role cannot both be specified in
+                                        the same rule. \n If omitted or empty, and
+                                        if APIKey is not specified, then all keys
+                                        are allowed."
                                       enum:
                                       - produce
                                       - consume
@@ -773,11 +830,11 @@ spec:
                                 description: 'Secret is the secret that contains the
                                   certificates and private key for the TLS context.
                                   By default, Cilium will search in this secret for
-                                  the following items:  - ''ca.crt''  - Which represents
-                                  the trusted CA to verify remote source.  - ''tls.crt''
-                                  - Which represents the public key certificate.  -
+                                  the following items: - ''ca.crt''  - Which represents
+                                  the trusted CA to verify remote source. - ''tls.crt''
+                                  - Which represents the public key certificate. -
                                   ''tls.key'' - Which represents the private key matching
-                                  the public key                certificate.'
+                                  the public key certificate.'
                                 properties:
                                   name:
                                     description: Name is the name of the secret.
@@ -962,15 +1019,15 @@ spec:
                   description: "EgressDenyRule contains all rule types which can be
                     applied at egress, i.e. network traffic that originates inside
                     the endpoint and exits the endpoint selected by the endpointSelector.
-                    \n   - All members of this structure are optional. If omitted
-                    or empty, the     member will have no effect on the rule. \n   -
-                    If multiple members of the structure are specified, then all members
-                    \    must match in order for the rule to take effect. The exception
-                    to this     rule is the ToRequires member; the effects of any
-                    Requires field in any     rule will apply to all other rules as
-                    well. \n   - ToEndpoints, ToCIDR, ToCIDRSet, ToEntities, ToServices
-                    and ToGroups are     mutually exclusive. Only one of these members
-                    may be present within an     individual rule."
+                    \n - All members of this structure are optional. If omitted or
+                    empty, the member will have no effect on the rule. \n - If multiple
+                    members of the structure are specified, then all members must
+                    match in order for the rule to take effect. The exception to this
+                    rule is the ToRequires member; the effects of any Requires field
+                    in any rule will apply to all other rules as well. \n - ToEndpoints,
+                    ToCIDR, ToCIDRSet, ToEntities, ToServices and ToGroups are mutually
+                    exclusive. Only one of these members may be present within an
+                    individual rule."
                   properties:
                     icmps:
                       description: "ICMPs is a list of ICMP rule identified by type
@@ -1165,7 +1222,7 @@ spec:
                       description: "ToGroups is a directive that allows the integration
                         with multiple outside providers. Currently, only AWS is supported,
                         and the rule can select by multiple sub directives: \n Example:
-                        toGroups: - aws:     securityGroupsIds:     - 'sg-XXXXXXXXXXXXX'"
+                        toGroups: - aws: securityGroupsIds: - 'sg-XXXXXXXXXXXXX'"
                       items:
                         description: ToGroups structure to store all kinds of new
                           integrations that needs a new derivative policy.
@@ -1188,6 +1245,64 @@ spec:
                                 items:
                                   type: string
                                 type: array
+                            type: object
+                        type: object
+                      type: array
+                    toNodes:
+                      description: ToNodes is a list of nodes identified by an EndpointSelector
+                        to which endpoints subject to the rule is allowed to communicate.
+                      items:
+                        description: EndpointSelector is a wrapper for k8s LabelSelector.
+                        properties:
+                          matchExpressions:
+                            description: matchExpressions is a list of label selector
+                              requirements. The requirements are ANDed.
+                            items:
+                              description: A label selector requirement is a selector
+                                that contains values, a key, and an operator that
+                                relates the key and values.
+                              properties:
+                                key:
+                                  description: key is the label key that the selector
+                                    applies to.
+                                  type: string
+                                operator:
+                                  description: operator represents a key's relationship
+                                    to a set of values. Valid operators are In, NotIn,
+                                    Exists and DoesNotExist.
+                                  enum:
+                                  - In
+                                  - NotIn
+                                  - Exists
+                                  - DoesNotExist
+                                  type: string
+                                values:
+                                  description: values is an array of string values.
+                                    If the operator is In or NotIn, the values array
+                                    must be non-empty. If the operator is Exists or
+                                    DoesNotExist, the values array must be empty.
+                                    This array is replaced during a strategic merge
+                                    patch.
+                                  items:
+                                    type: string
+                                  type: array
+                              required:
+                              - key
+                              - operator
+                              type: object
+                            type: array
+                          matchLabels:
+                            additionalProperties:
+                              description: MatchLabelsValue represents the value from
+                                the MatchLabels {key,value} pair.
+                              maxLength: 63
+                              pattern: ^(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?$
+                              type: string
+                            description: matchLabels is a map of {key,value} pairs.
+                              A single {key,value} in the matchLabels map is equivalent
+                              to an element of matchExpressions, whose key field is
+                              "key", the operator is "In", and the values array contains
+                              only "value". The requirements are ANDed.
                             type: object
                         type: object
                       type: array
@@ -1452,30 +1567,29 @@ spec:
                   description: "IngressRule contains all rule types which can be applied
                     at ingress, i.e. network traffic that originates outside of the
                     endpoint and is entering the endpoint selected by the endpointSelector.
-                    \n   - All members of this structure are optional. If omitted
-                    or empty, the     member will have no effect on the rule. \n   -
-                    If multiple members are set, all of them need to match in order
-                    for     the rule to take effect. The exception to this rule is
-                    FromRequires field;     the effects of any Requires field in any
-                    rule will apply to all other     rules as well. \n   - FromEndpoints,
-                    FromCIDR, FromCIDRSet and FromEntities are mutually     exclusive.
-                    Only one of these members may be present within an individual
-                    \    rule."
+                    \n - All members of this structure are optional. If omitted or
+                    empty, the member will have no effect on the rule. \n - If multiple
+                    members are set, all of them need to match in order for the rule
+                    to take effect. The exception to this rule is FromRequires field;
+                    the effects of any Requires field in any rule will apply to all
+                    other rules as well. \n - FromEndpoints, FromCIDR, FromCIDRSet
+                    and FromEntities are mutually exclusive. Only one of these members
+                    may be present within an individual rule."
                   properties:
-                    auth:
-                      description: Auth is the required authentication type for the
-                        allowed traffic, if any.
+                    authentication:
+                      description: Authentication is the required authentication type
+                        for the allowed traffic, if any.
                       properties:
-                        type:
-                          description: Type is the required authentication type for
+                        mode:
+                          description: Mode is the required authentication mode for
                             the allowed traffic, if any.
                           enum:
-                          - "null"
-                          - mtls-spiffe
-                          - always-fail
+                          - disabled
+                          - required
+                          - test-always-fail
                           type: string
                       required:
-                      - type
+                      - mode
                       type: object
                     fromCIDR:
                       description: "FromCIDR is a list of IP blocks which the endpoint
@@ -1633,6 +1747,65 @@ spec:
                         - kube-apiserver
                         type: string
                       type: array
+                    fromNodes:
+                      description: FromNodes is a list of nodes identified by an EndpointSelector
+                        which are allowed to communicate with the endpoint subject
+                        to the rule.
+                      items:
+                        description: EndpointSelector is a wrapper for k8s LabelSelector.
+                        properties:
+                          matchExpressions:
+                            description: matchExpressions is a list of label selector
+                              requirements. The requirements are ANDed.
+                            items:
+                              description: A label selector requirement is a selector
+                                that contains values, a key, and an operator that
+                                relates the key and values.
+                              properties:
+                                key:
+                                  description: key is the label key that the selector
+                                    applies to.
+                                  type: string
+                                operator:
+                                  description: operator represents a key's relationship
+                                    to a set of values. Valid operators are In, NotIn,
+                                    Exists and DoesNotExist.
+                                  enum:
+                                  - In
+                                  - NotIn
+                                  - Exists
+                                  - DoesNotExist
+                                  type: string
+                                values:
+                                  description: values is an array of string values.
+                                    If the operator is In or NotIn, the values array
+                                    must be non-empty. If the operator is Exists or
+                                    DoesNotExist, the values array must be empty.
+                                    This array is replaced during a strategic merge
+                                    patch.
+                                  items:
+                                    type: string
+                                  type: array
+                              required:
+                              - key
+                              - operator
+                              type: object
+                            type: array
+                          matchLabels:
+                            additionalProperties:
+                              description: MatchLabelsValue represents the value from
+                                the MatchLabels {key,value} pair.
+                              maxLength: 63
+                              pattern: ^(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?$
+                              type: string
+                            description: matchLabels is a map of {key,value} pairs.
+                              A single {key,value} in the matchLabels map is equivalent
+                              to an element of matchExpressions, whose key field is
+                              "key", the operator is "In", and the values array contains
+                              only "value". The requirements are ANDed.
+                            type: object
+                        type: object
+                      type: array
                     fromRequires:
                       description: "FromRequires is a list of additional constraints
                         which must be met in order for the selected endpoints to be
@@ -1747,7 +1920,7 @@ spec:
                             properties:
                               envoyConfig:
                                 description: EnvoyConfig is a reference to the CEC
-                                  or CCNP resource in which the listener is defined.
+                                  or CCEC resource in which the listener is defined.
                                 properties:
                                   kind:
                                     description: Kind is the resource type being referred
@@ -1775,6 +1948,14 @@ spec:
                                 description: Name is the name of the listener.
                                 minLength: 1
                                 type: string
+                              priority:
+                                description: Priority for this Listener that is used
+                                  when multiple rules would apply different listeners
+                                  to a policy map entry. Behavior of this is implementation
+                                  dependent.
+                                maximum: 100
+                                minimum: 1
+                                type: integer
                             required:
                             - envoyConfig
                             - name
@@ -1804,11 +1985,11 @@ spec:
                                 description: 'Secret is the secret that contains the
                                   certificates and private key for the TLS context.
                                   By default, Cilium will search in this secret for
-                                  the following items:  - ''ca.crt''  - Which represents
-                                  the trusted CA to verify remote source.  - ''tls.crt''
-                                  - Which represents the public key certificate.  -
+                                  the following items: - ''ca.crt''  - Which represents
+                                  the trusted CA to verify remote source. - ''tls.crt''
+                                  - Which represents the public key certificate. -
                                   ''tls.key'' - Which represents the private key matching
-                                  the public key                certificate.'
+                                  the public key certificate.'
                                 properties:
                                   name:
                                     description: Name is the name of the secret.
@@ -1893,16 +2074,16 @@ spec:
                                         well as the name to the right. A trailing
                                         \".\" is automatically added when missing.
                                         \n Examples: `*.cilium.io` matches subomains
-                                        of cilium at that level   www.cilium.io and
+                                        of cilium at that level www.cilium.io and
                                         blog.cilium.io match, cilium.io and google.com
                                         do not `*cilium.io` matches cilium.io and
-                                        all subdomains ends with \"cilium.io\"   except
+                                        all subdomains ends with \"cilium.io\" except
                                         those containing \".\" separator, subcilium.io
-                                        and sub-cilium.io match,   www.cilium.io and
+                                        and sub-cilium.io match, www.cilium.io and
                                         blog.cilium.io does not sub*.cilium.io matches
                                         subdomains of cilium where the subdomain component
-                                        begins with \"sub\"   sub.cilium.io and subdomain.cilium.io
-                                        match, www.cilium.io,   blog.cilium.io, cilium.io
+                                        begins with \"sub\" sub.cilium.io and subdomain.cilium.io
+                                        match, www.cilium.io, blog.cilium.io, cilium.io
                                         and google.com do not"
                                       pattern: ^([-a-zA-Z0-9_*]+[.]?)+$
                                       type: string
@@ -2062,15 +2243,15 @@ spec:
                                         such as \"produce\" or \"consume\". A Role
                                         automatically expands into all APIKeys required
                                         to perform the specified higher-level operation.
-                                        \n The following values are supported:  -
-                                        \"produce\": Allow producing to the topics
-                                        specified in the rule  - \"consume\": Allow
-                                        consuming from the topics specified in the
-                                        rule \n This field is incompatible with the
-                                        APIKey field, i.e APIKey and Role cannot both
-                                        be specified in the same rule. \n If omitted
-                                        or empty, and if APIKey is not specified,
-                                        then all keys are allowed."
+                                        \n The following values are supported: - \"produce\":
+                                        Allow producing to the topics specified in
+                                        the rule - \"consume\": Allow consuming from
+                                        the topics specified in the rule \n This field
+                                        is incompatible with the APIKey field, i.e
+                                        APIKey and Role cannot both be specified in
+                                        the same rule. \n If omitted or empty, and
+                                        if APIKey is not specified, then all keys
+                                        are allowed."
                                       enum:
                                       - produce
                                       - consume
@@ -2143,11 +2324,11 @@ spec:
                                 description: 'Secret is the secret that contains the
                                   certificates and private key for the TLS context.
                                   By default, Cilium will search in this secret for
-                                  the following items:  - ''ca.crt''  - Which represents
-                                  the trusted CA to verify remote source.  - ''tls.crt''
-                                  - Which represents the public key certificate.  -
+                                  the following items: - ''ca.crt''  - Which represents
+                                  the trusted CA to verify remote source. - ''tls.crt''
+                                  - Which represents the public key certificate. -
                                   ''tls.key'' - Which represents the private key matching
-                                  the public key                certificate.'
+                                  the public key certificate.'
                                 properties:
                                   name:
                                     description: Name is the name of the secret.
@@ -2182,15 +2363,14 @@ spec:
                   description: "IngressDenyRule contains all rule types which can
                     be applied at ingress, i.e. network traffic that originates outside
                     of the endpoint and is entering the endpoint selected by the endpointSelector.
-                    \n   - All members of this structure are optional. If omitted
-                    or empty, the     member will have no effect on the rule. \n   -
-                    If multiple members are set, all of them need to match in order
-                    for     the rule to take effect. The exception to this rule is
-                    FromRequires field;     the effects of any Requires field in any
-                    rule will apply to all other     rules as well. \n   - FromEndpoints,
-                    FromCIDR, FromCIDRSet and FromEntities are mutually     exclusive.
-                    Only one of these members may be present within an individual
-                    \    rule."
+                    \n - All members of this structure are optional. If omitted or
+                    empty, the member will have no effect on the rule. \n - If multiple
+                    members are set, all of them need to match in order for the rule
+                    to take effect. The exception to this rule is FromRequires field;
+                    the effects of any Requires field in any rule will apply to all
+                    other rules as well. \n - FromEndpoints, FromCIDR, FromCIDRSet
+                    and FromEntities are mutually exclusive. Only one of these members
+                    may be present within an individual rule."
                   properties:
                     fromCIDR:
                       description: "FromCIDR is a list of IP blocks which the endpoint
@@ -2347,6 +2527,65 @@ spec:
                         - none
                         - kube-apiserver
                         type: string
+                      type: array
+                    fromNodes:
+                      description: FromNodes is a list of nodes identified by an EndpointSelector
+                        which are allowed to communicate with the endpoint subject
+                        to the rule.
+                      items:
+                        description: EndpointSelector is a wrapper for k8s LabelSelector.
+                        properties:
+                          matchExpressions:
+                            description: matchExpressions is a list of label selector
+                              requirements. The requirements are ANDed.
+                            items:
+                              description: A label selector requirement is a selector
+                                that contains values, a key, and an operator that
+                                relates the key and values.
+                              properties:
+                                key:
+                                  description: key is the label key that the selector
+                                    applies to.
+                                  type: string
+                                operator:
+                                  description: operator represents a key's relationship
+                                    to a set of values. Valid operators are In, NotIn,
+                                    Exists and DoesNotExist.
+                                  enum:
+                                  - In
+                                  - NotIn
+                                  - Exists
+                                  - DoesNotExist
+                                  type: string
+                                values:
+                                  description: values is an array of string values.
+                                    If the operator is In or NotIn, the values array
+                                    must be non-empty. If the operator is Exists or
+                                    DoesNotExist, the values array must be empty.
+                                    This array is replaced during a strategic merge
+                                    patch.
+                                  items:
+                                    type: string
+                                  type: array
+                              required:
+                              - key
+                              - operator
+                              type: object
+                            type: array
+                          matchLabels:
+                            additionalProperties:
+                              description: MatchLabelsValue represents the value from
+                                the MatchLabels {key,value} pair.
+                              maxLength: 63
+                              pattern: ^(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?$
+                              type: string
+                            description: matchLabels is a map of {key,value} pairs.
+                              A single {key,value} in the matchLabels map is equivalent
+                              to an element of matchExpressions, whose key field is
+                              "key", the operator is "In", and the values array contains
+                              only "value". The requirements are ANDed.
+                            type: object
+                        type: object
                       type: array
                     fromRequires:
                       description: "FromRequires is a list of additional constraints
@@ -2604,31 +2843,30 @@ spec:
                     description: "EgressRule contains all rule types which can be
                       applied at egress, i.e. network traffic that originates inside
                       the endpoint and exits the endpoint selected by the endpointSelector.
-                      \n   - All members of this structure are optional. If omitted
-                      or empty, the     member will have no effect on the rule. \n
-                      \  - If multiple members of the structure are specified, then
-                      all members     must match in order for the rule to take effect.
-                      The exception to this     rule is the ToRequires member; the
-                      effects of any Requires field in any     rule will apply to
-                      all other rules as well. \n   - ToEndpoints, ToCIDR, ToCIDRSet,
-                      ToEntities, ToServices and ToGroups are     mutually exclusive.
-                      Only one of these members may be present within an     individual
-                      rule."
+                      \n - All members of this structure are optional. If omitted
+                      or empty, the member will have no effect on the rule. \n - If
+                      multiple members of the structure are specified, then all members
+                      must match in order for the rule to take effect. The exception
+                      to this rule is the ToRequires member; the effects of any Requires
+                      field in any rule will apply to all other rules as well. \n
+                      - ToEndpoints, ToCIDR, ToCIDRSet, ToEntities, ToServices and
+                      ToGroups are mutually exclusive. Only one of these members may
+                      be present within an individual rule."
                     properties:
-                      auth:
-                        description: Auth is the required authentication type for
-                          the allowed traffic, if any.
+                      authentication:
+                        description: Authentication is the required authentication
+                          type for the allowed traffic, if any.
                         properties:
-                          type:
-                            description: Type is the required authentication type
+                          mode:
+                            description: Mode is the required authentication mode
                               for the allowed traffic, if any.
                             enum:
-                            - "null"
-                            - mtls-spiffe
-                            - always-fail
+                            - disabled
+                            - required
+                            - test-always-fail
                             type: string
                         required:
-                        - type
+                        - mode
                         type: object
                       icmps:
                         description: "ICMPs is a list of ICMP rule identified by type
@@ -2821,7 +3059,7 @@ spec:
                           type: string
                         type: array
                       toFQDNs:
-                        description: "ToFQDN allows whitelisting DNS names in place
+                        description: 'ToFQDN allows whitelisting DNS names in place
                           of IPs. The IPs that result from DNS resolution of `ToFQDN.MatchName`s
                           are added to the same EgressRule object as ToCIDRSet entries,
                           and behave accordingly. Any L4 and L7 rules within this
@@ -2834,16 +3072,7 @@ spec:
                           and will enforce egress policy when PolicyEnforcment=default.
                           Note: If the resolved IPs are IPs within the kubernetes
                           cluster, the ToFQDN rule will not apply to that IP. Note:
-                          ToFQDN cannot occur in the same policy as other To* rules.
-                          \n The current implementation has a number of limitations:
-                          - The DNS resolution originates from cilium-agent, and not
-                          from the pods. Differences between the responses seen by
-                          cilium agent and a particular pod will whitelist the incorrect
-                          IP. - DNS TTLs are ignored, and cilium-agent will repoll
-                          on a short interval (5 seconds). Each change to the DNS
-                          data will trigger a policy regeneration. This may result
-                          in delayed updates to the policy for an endpoint when the
-                          data changes often or the system is under load."
+                          ToFQDN cannot occur in the same policy as other To* rules.'
                         items:
                           properties:
                             matchName:
@@ -2860,16 +3089,16 @@ spec:
                                 without a following \".\" matches all subdomains as
                                 well as the name to the right. A trailing \".\" is
                                 automatically added when missing. \n Examples: `*.cilium.io`
-                                matches subomains of cilium at that level   www.cilium.io
+                                matches subomains of cilium at that level www.cilium.io
                                 and blog.cilium.io match, cilium.io and google.com
                                 do not `*cilium.io` matches cilium.io and all subdomains
-                                ends with \"cilium.io\"   except those containing
-                                \".\" separator, subcilium.io and sub-cilium.io match,
-                                \  www.cilium.io and blog.cilium.io does not sub*.cilium.io
-                                matches subdomains of cilium where the subdomain component
-                                begins with \"sub\"   sub.cilium.io and subdomain.cilium.io
-                                match, www.cilium.io,   blog.cilium.io, cilium.io
-                                and google.com do not"
+                                ends with \"cilium.io\" except those containing \".\"
+                                separator, subcilium.io and sub-cilium.io match, www.cilium.io
+                                and blog.cilium.io does not sub*.cilium.io matches
+                                subdomains of cilium where the subdomain component
+                                begins with \"sub\" sub.cilium.io and subdomain.cilium.io
+                                match, www.cilium.io, blog.cilium.io, cilium.io and
+                                google.com do not"
                               pattern: ^([-a-zA-Z0-9_*]+[.]?)+$
                               type: string
                           type: object
@@ -2878,8 +3107,7 @@ spec:
                         description: "ToGroups is a directive that allows the integration
                           with multiple outside providers. Currently, only AWS is
                           supported, and the rule can select by multiple sub directives:
-                          \n Example: toGroups: - aws:     securityGroupsIds:     -
-                          'sg-XXXXXXXXXXXXX'"
+                          \n Example: toGroups: - aws: securityGroupsIds: - 'sg-XXXXXXXXXXXXX'"
                         items:
                           description: ToGroups structure to store all kinds of new
                             integrations that needs a new derivative policy.
@@ -2905,6 +3133,64 @@ spec:
                               type: object
                           type: object
                         type: array
+                      toNodes:
+                        description: ToNodes is a list of nodes identified by an EndpointSelector
+                          to which endpoints subject to the rule is allowed to communicate.
+                        items:
+                          description: EndpointSelector is a wrapper for k8s LabelSelector.
+                          properties:
+                            matchExpressions:
+                              description: matchExpressions is a list of label selector
+                                requirements. The requirements are ANDed.
+                              items:
+                                description: A label selector requirement is a selector
+                                  that contains values, a key, and an operator that
+                                  relates the key and values.
+                                properties:
+                                  key:
+                                    description: key is the label key that the selector
+                                      applies to.
+                                    type: string
+                                  operator:
+                                    description: operator represents a key's relationship
+                                      to a set of values. Valid operators are In,
+                                      NotIn, Exists and DoesNotExist.
+                                    enum:
+                                    - In
+                                    - NotIn
+                                    - Exists
+                                    - DoesNotExist
+                                    type: string
+                                  values:
+                                    description: values is an array of string values.
+                                      If the operator is In or NotIn, the values array
+                                      must be non-empty. If the operator is Exists
+                                      or DoesNotExist, the values array must be empty.
+                                      This array is replaced during a strategic merge
+                                      patch.
+                                    items:
+                                      type: string
+                                    type: array
+                                required:
+                                - key
+                                - operator
+                                type: object
+                              type: array
+                            matchLabels:
+                              additionalProperties:
+                                description: MatchLabelsValue represents the value
+                                  from the MatchLabels {key,value} pair.
+                                maxLength: 63
+                                pattern: ^(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?$
+                                type: string
+                              description: matchLabels is a map of {key,value} pairs.
+                                A single {key,value} in the matchLabels map is equivalent
+                                to an element of matchExpressions, whose key field
+                                is "key", the operator is "In", and the values array
+                                contains only "value". The requirements are ANDed.
+                              type: object
+                          type: object
+                        type: array
                       toPorts:
                         description: "ToPorts is a list of destination ports identified
                           by port number and protocol which the endpoint subject to
@@ -2922,7 +3208,7 @@ spec:
                               properties:
                                 envoyConfig:
                                   description: EnvoyConfig is a reference to the CEC
-                                    or CCNP resource in which the listener is defined.
+                                    or CCEC resource in which the listener is defined.
                                   properties:
                                     kind:
                                       description: Kind is the resource type being
@@ -2951,6 +3237,14 @@ spec:
                                   description: Name is the name of the listener.
                                   minLength: 1
                                   type: string
+                                priority:
+                                  description: Priority for this Listener that is
+                                    used when multiple rules would apply different
+                                    listeners to a policy map entry. Behavior of this
+                                    is implementation dependent.
+                                  maximum: 100
+                                  minimum: 1
+                                  type: integer
                               required:
                               - envoyConfig
                               - name
@@ -2981,11 +3275,11 @@ spec:
                                   description: 'Secret is the secret that contains
                                     the certificates and private key for the TLS context.
                                     By default, Cilium will search in this secret
-                                    for the following items:  - ''ca.crt''  - Which
-                                    represents the trusted CA to verify remote source.  -
-                                    ''tls.crt'' - Which represents the public key
-                                    certificate.  - ''tls.key'' - Which represents
-                                    the private key matching the public key                certificate.'
+                                    for the following items: - ''ca.crt''  - Which
+                                    represents the trusted CA to verify remote source.
+                                    - ''tls.crt'' - Which represents the public key
+                                    certificate. - ''tls.key'' - Which represents
+                                    the private key matching the public key certificate.'
                                   properties:
                                     name:
                                       description: Name is the name of the secret.
@@ -3070,17 +3364,17 @@ spec:
                                           as well as the name to the right. A trailing
                                           \".\" is automatically added when missing.
                                           \n Examples: `*.cilium.io` matches subomains
-                                          of cilium at that level   www.cilium.io
-                                          and blog.cilium.io match, cilium.io and
-                                          google.com do not `*cilium.io` matches cilium.io
-                                          and all subdomains ends with \"cilium.io\"
-                                          \  except those containing \".\" separator,
-                                          subcilium.io and sub-cilium.io match,   www.cilium.io
-                                          and blog.cilium.io does not sub*.cilium.io
-                                          matches subdomains of cilium where the subdomain
-                                          component begins with \"sub\"   sub.cilium.io
+                                          of cilium at that level www.cilium.io and
+                                          blog.cilium.io match, cilium.io and google.com
+                                          do not `*cilium.io` matches cilium.io and
+                                          all subdomains ends with \"cilium.io\" except
+                                          those containing \".\" separator, subcilium.io
+                                          and sub-cilium.io match, www.cilium.io and
+                                          blog.cilium.io does not sub*.cilium.io matches
+                                          subdomains of cilium where the subdomain
+                                          component begins with \"sub\" sub.cilium.io
                                           and subdomain.cilium.io match, www.cilium.io,
-                                          \  blog.cilium.io, cilium.io and google.com
+                                          blog.cilium.io, cilium.io and google.com
                                           do not"
                                         pattern: ^([-a-zA-Z0-9_*]+[.]?)+$
                                         type: string
@@ -3242,9 +3536,9 @@ spec:
                                           such as \"produce\" or \"consume\". A Role
                                           automatically expands into all APIKeys required
                                           to perform the specified higher-level operation.
-                                          \n The following values are supported:  -
+                                          \n The following values are supported: -
                                           \"produce\": Allow producing to the topics
-                                          specified in the rule  - \"consume\": Allow
+                                          specified in the rule - \"consume\": Allow
                                           consuming from the topics specified in the
                                           rule \n This field is incompatible with
                                           the APIKey field, i.e APIKey and Role cannot
@@ -3327,11 +3621,11 @@ spec:
                                   description: 'Secret is the secret that contains
                                     the certificates and private key for the TLS context.
                                     By default, Cilium will search in this secret
-                                    for the following items:  - ''ca.crt''  - Which
-                                    represents the trusted CA to verify remote source.  -
-                                    ''tls.crt'' - Which represents the public key
-                                    certificate.  - ''tls.key'' - Which represents
-                                    the private key matching the public key                certificate.'
+                                    for the following items: - ''ca.crt''  - Which
+                                    represents the trusted CA to verify remote source.
+                                    - ''tls.crt'' - Which represents the public key
+                                    certificate. - ''tls.key'' - Which represents
+                                    the private key matching the public key certificate.'
                                   properties:
                                     name:
                                       description: Name is the name of the secret.
@@ -3520,16 +3814,15 @@ spec:
                     description: "EgressDenyRule contains all rule types which can
                       be applied at egress, i.e. network traffic that originates inside
                       the endpoint and exits the endpoint selected by the endpointSelector.
-                      \n   - All members of this structure are optional. If omitted
-                      or empty, the     member will have no effect on the rule. \n
-                      \  - If multiple members of the structure are specified, then
-                      all members     must match in order for the rule to take effect.
-                      The exception to this     rule is the ToRequires member; the
-                      effects of any Requires field in any     rule will apply to
-                      all other rules as well. \n   - ToEndpoints, ToCIDR, ToCIDRSet,
-                      ToEntities, ToServices and ToGroups are     mutually exclusive.
-                      Only one of these members may be present within an     individual
-                      rule."
+                      \n - All members of this structure are optional. If omitted
+                      or empty, the member will have no effect on the rule. \n - If
+                      multiple members of the structure are specified, then all members
+                      must match in order for the rule to take effect. The exception
+                      to this rule is the ToRequires member; the effects of any Requires
+                      field in any rule will apply to all other rules as well. \n
+                      - ToEndpoints, ToCIDR, ToCIDRSet, ToEntities, ToServices and
+                      ToGroups are mutually exclusive. Only one of these members may
+                      be present within an individual rule."
                     properties:
                       icmps:
                         description: "ICMPs is a list of ICMP rule identified by type
@@ -3725,8 +4018,7 @@ spec:
                         description: "ToGroups is a directive that allows the integration
                           with multiple outside providers. Currently, only AWS is
                           supported, and the rule can select by multiple sub directives:
-                          \n Example: toGroups: - aws:     securityGroupsIds:     -
-                          'sg-XXXXXXXXXXXXX'"
+                          \n Example: toGroups: - aws: securityGroupsIds: - 'sg-XXXXXXXXXXXXX'"
                         items:
                           description: ToGroups structure to store all kinds of new
                             integrations that needs a new derivative policy.
@@ -3749,6 +4041,64 @@ spec:
                                   items:
                                     type: string
                                   type: array
+                              type: object
+                          type: object
+                        type: array
+                      toNodes:
+                        description: ToNodes is a list of nodes identified by an EndpointSelector
+                          to which endpoints subject to the rule is allowed to communicate.
+                        items:
+                          description: EndpointSelector is a wrapper for k8s LabelSelector.
+                          properties:
+                            matchExpressions:
+                              description: matchExpressions is a list of label selector
+                                requirements. The requirements are ANDed.
+                              items:
+                                description: A label selector requirement is a selector
+                                  that contains values, a key, and an operator that
+                                  relates the key and values.
+                                properties:
+                                  key:
+                                    description: key is the label key that the selector
+                                      applies to.
+                                    type: string
+                                  operator:
+                                    description: operator represents a key's relationship
+                                      to a set of values. Valid operators are In,
+                                      NotIn, Exists and DoesNotExist.
+                                    enum:
+                                    - In
+                                    - NotIn
+                                    - Exists
+                                    - DoesNotExist
+                                    type: string
+                                  values:
+                                    description: values is an array of string values.
+                                      If the operator is In or NotIn, the values array
+                                      must be non-empty. If the operator is Exists
+                                      or DoesNotExist, the values array must be empty.
+                                      This array is replaced during a strategic merge
+                                      patch.
+                                    items:
+                                      type: string
+                                    type: array
+                                required:
+                                - key
+                                - operator
+                                type: object
+                              type: array
+                            matchLabels:
+                              additionalProperties:
+                                description: MatchLabelsValue represents the value
+                                  from the MatchLabels {key,value} pair.
+                                maxLength: 63
+                                pattern: ^(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?$
+                                type: string
+                              description: matchLabels is a map of {key,value} pairs.
+                                A single {key,value} in the matchLabels map is equivalent
+                                to an element of matchExpressions, whose key field
+                                is "key", the operator is "In", and the values array
+                                contains only "value". The requirements are ANDed.
                               type: object
                           type: object
                         type: array
@@ -4017,30 +4367,30 @@ spec:
                     description: "IngressRule contains all rule types which can be
                       applied at ingress, i.e. network traffic that originates outside
                       of the endpoint and is entering the endpoint selected by the
-                      endpointSelector. \n   - All members of this structure are optional.
-                      If omitted or empty, the     member will have no effect on the
-                      rule. \n   - If multiple members are set, all of them need to
-                      match in order for     the rule to take effect. The exception
-                      to this rule is FromRequires field;     the effects of any Requires
-                      field in any rule will apply to all other     rules as well.
-                      \n   - FromEndpoints, FromCIDR, FromCIDRSet and FromEntities
-                      are mutually     exclusive. Only one of these members may be
-                      present within an individual     rule."
+                      endpointSelector. \n - All members of this structure are optional.
+                      If omitted or empty, the member will have no effect on the rule.
+                      \n - If multiple members are set, all of them need to match
+                      in order for the rule to take effect. The exception to this
+                      rule is FromRequires field; the effects of any Requires field
+                      in any rule will apply to all other rules as well. \n - FromEndpoints,
+                      FromCIDR, FromCIDRSet and FromEntities are mutually exclusive.
+                      Only one of these members may be present within an individual
+                      rule."
                     properties:
-                      auth:
-                        description: Auth is the required authentication type for
-                          the allowed traffic, if any.
+                      authentication:
+                        description: Authentication is the required authentication
+                          type for the allowed traffic, if any.
                         properties:
-                          type:
-                            description: Type is the required authentication type
+                          mode:
+                            description: Mode is the required authentication mode
                               for the allowed traffic, if any.
                             enum:
-                            - "null"
-                            - mtls-spiffe
-                            - always-fail
+                            - disabled
+                            - required
+                            - test-always-fail
                             type: string
                         required:
-                        - type
+                        - mode
                         type: object
                       fromCIDR:
                         description: "FromCIDR is a list of IP blocks which the endpoint
@@ -4199,6 +4549,65 @@ spec:
                           - kube-apiserver
                           type: string
                         type: array
+                      fromNodes:
+                        description: FromNodes is a list of nodes identified by an
+                          EndpointSelector which are allowed to communicate with the
+                          endpoint subject to the rule.
+                        items:
+                          description: EndpointSelector is a wrapper for k8s LabelSelector.
+                          properties:
+                            matchExpressions:
+                              description: matchExpressions is a list of label selector
+                                requirements. The requirements are ANDed.
+                              items:
+                                description: A label selector requirement is a selector
+                                  that contains values, a key, and an operator that
+                                  relates the key and values.
+                                properties:
+                                  key:
+                                    description: key is the label key that the selector
+                                      applies to.
+                                    type: string
+                                  operator:
+                                    description: operator represents a key's relationship
+                                      to a set of values. Valid operators are In,
+                                      NotIn, Exists and DoesNotExist.
+                                    enum:
+                                    - In
+                                    - NotIn
+                                    - Exists
+                                    - DoesNotExist
+                                    type: string
+                                  values:
+                                    description: values is an array of string values.
+                                      If the operator is In or NotIn, the values array
+                                      must be non-empty. If the operator is Exists
+                                      or DoesNotExist, the values array must be empty.
+                                      This array is replaced during a strategic merge
+                                      patch.
+                                    items:
+                                      type: string
+                                    type: array
+                                required:
+                                - key
+                                - operator
+                                type: object
+                              type: array
+                            matchLabels:
+                              additionalProperties:
+                                description: MatchLabelsValue represents the value
+                                  from the MatchLabels {key,value} pair.
+                                maxLength: 63
+                                pattern: ^(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?$
+                                type: string
+                              description: matchLabels is a map of {key,value} pairs.
+                                A single {key,value} in the matchLabels map is equivalent
+                                to an element of matchExpressions, whose key field
+                                is "key", the operator is "In", and the values array
+                                contains only "value". The requirements are ANDed.
+                              type: object
+                          type: object
+                        type: array
                       fromRequires:
                         description: "FromRequires is a list of additional constraints
                           which must be met in order for the selected endpoints to
@@ -4314,7 +4723,7 @@ spec:
                               properties:
                                 envoyConfig:
                                   description: EnvoyConfig is a reference to the CEC
-                                    or CCNP resource in which the listener is defined.
+                                    or CCEC resource in which the listener is defined.
                                   properties:
                                     kind:
                                       description: Kind is the resource type being
@@ -4343,6 +4752,14 @@ spec:
                                   description: Name is the name of the listener.
                                   minLength: 1
                                   type: string
+                                priority:
+                                  description: Priority for this Listener that is
+                                    used when multiple rules would apply different
+                                    listeners to a policy map entry. Behavior of this
+                                    is implementation dependent.
+                                  maximum: 100
+                                  minimum: 1
+                                  type: integer
                               required:
                               - envoyConfig
                               - name
@@ -4373,11 +4790,11 @@ spec:
                                   description: 'Secret is the secret that contains
                                     the certificates and private key for the TLS context.
                                     By default, Cilium will search in this secret
-                                    for the following items:  - ''ca.crt''  - Which
-                                    represents the trusted CA to verify remote source.  -
-                                    ''tls.crt'' - Which represents the public key
-                                    certificate.  - ''tls.key'' - Which represents
-                                    the private key matching the public key                certificate.'
+                                    for the following items: - ''ca.crt''  - Which
+                                    represents the trusted CA to verify remote source.
+                                    - ''tls.crt'' - Which represents the public key
+                                    certificate. - ''tls.key'' - Which represents
+                                    the private key matching the public key certificate.'
                                   properties:
                                     name:
                                       description: Name is the name of the secret.
@@ -4462,17 +4879,17 @@ spec:
                                           as well as the name to the right. A trailing
                                           \".\" is automatically added when missing.
                                           \n Examples: `*.cilium.io` matches subomains
-                                          of cilium at that level   www.cilium.io
-                                          and blog.cilium.io match, cilium.io and
-                                          google.com do not `*cilium.io` matches cilium.io
-                                          and all subdomains ends with \"cilium.io\"
-                                          \  except those containing \".\" separator,
-                                          subcilium.io and sub-cilium.io match,   www.cilium.io
-                                          and blog.cilium.io does not sub*.cilium.io
-                                          matches subdomains of cilium where the subdomain
-                                          component begins with \"sub\"   sub.cilium.io
+                                          of cilium at that level www.cilium.io and
+                                          blog.cilium.io match, cilium.io and google.com
+                                          do not `*cilium.io` matches cilium.io and
+                                          all subdomains ends with \"cilium.io\" except
+                                          those containing \".\" separator, subcilium.io
+                                          and sub-cilium.io match, www.cilium.io and
+                                          blog.cilium.io does not sub*.cilium.io matches
+                                          subdomains of cilium where the subdomain
+                                          component begins with \"sub\" sub.cilium.io
                                           and subdomain.cilium.io match, www.cilium.io,
-                                          \  blog.cilium.io, cilium.io and google.com
+                                          blog.cilium.io, cilium.io and google.com
                                           do not"
                                         pattern: ^([-a-zA-Z0-9_*]+[.]?)+$
                                         type: string
@@ -4634,9 +5051,9 @@ spec:
                                           such as \"produce\" or \"consume\". A Role
                                           automatically expands into all APIKeys required
                                           to perform the specified higher-level operation.
-                                          \n The following values are supported:  -
+                                          \n The following values are supported: -
                                           \"produce\": Allow producing to the topics
-                                          specified in the rule  - \"consume\": Allow
+                                          specified in the rule - \"consume\": Allow
                                           consuming from the topics specified in the
                                           rule \n This field is incompatible with
                                           the APIKey field, i.e APIKey and Role cannot
@@ -4719,11 +5136,11 @@ spec:
                                   description: 'Secret is the secret that contains
                                     the certificates and private key for the TLS context.
                                     By default, Cilium will search in this secret
-                                    for the following items:  - ''ca.crt''  - Which
-                                    represents the trusted CA to verify remote source.  -
-                                    ''tls.crt'' - Which represents the public key
-                                    certificate.  - ''tls.key'' - Which represents
-                                    the private key matching the public key                certificate.'
+                                    for the following items: - ''ca.crt''  - Which
+                                    represents the trusted CA to verify remote source.
+                                    - ''tls.crt'' - Which represents the public key
+                                    certificate. - ''tls.key'' - Which represents
+                                    the private key matching the public key certificate.'
                                   properties:
                                     name:
                                       description: Name is the name of the secret.
@@ -4758,15 +5175,15 @@ spec:
                     description: "IngressDenyRule contains all rule types which can
                       be applied at ingress, i.e. network traffic that originates
                       outside of the endpoint and is entering the endpoint selected
-                      by the endpointSelector. \n   - All members of this structure
-                      are optional. If omitted or empty, the     member will have
-                      no effect on the rule. \n   - If multiple members are set, all
-                      of them need to match in order for     the rule to take effect.
-                      The exception to this rule is FromRequires field;     the effects
-                      of any Requires field in any rule will apply to all other     rules
-                      as well. \n   - FromEndpoints, FromCIDR, FromCIDRSet and FromEntities
-                      are mutually     exclusive. Only one of these members may be
-                      present within an individual     rule."
+                      by the endpointSelector. \n - All members of this structure
+                      are optional. If omitted or empty, the member will have no effect
+                      on the rule. \n - If multiple members are set, all of them need
+                      to match in order for the rule to take effect. The exception
+                      to this rule is FromRequires field; the effects of any Requires
+                      field in any rule will apply to all other rules as well. \n
+                      - FromEndpoints, FromCIDR, FromCIDRSet and FromEntities are
+                      mutually exclusive. Only one of these members may be present
+                      within an individual rule."
                     properties:
                       fromCIDR:
                         description: "FromCIDR is a list of IP blocks which the endpoint
@@ -4924,6 +5341,65 @@ spec:
                           - none
                           - kube-apiserver
                           type: string
+                        type: array
+                      fromNodes:
+                        description: FromNodes is a list of nodes identified by an
+                          EndpointSelector which are allowed to communicate with the
+                          endpoint subject to the rule.
+                        items:
+                          description: EndpointSelector is a wrapper for k8s LabelSelector.
+                          properties:
+                            matchExpressions:
+                              description: matchExpressions is a list of label selector
+                                requirements. The requirements are ANDed.
+                              items:
+                                description: A label selector requirement is a selector
+                                  that contains values, a key, and an operator that
+                                  relates the key and values.
+                                properties:
+                                  key:
+                                    description: key is the label key that the selector
+                                      applies to.
+                                    type: string
+                                  operator:
+                                    description: operator represents a key's relationship
+                                      to a set of values. Valid operators are In,
+                                      NotIn, Exists and DoesNotExist.
+                                    enum:
+                                    - In
+                                    - NotIn
+                                    - Exists
+                                    - DoesNotExist
+                                    type: string
+                                  values:
+                                    description: values is an array of string values.
+                                      If the operator is In or NotIn, the values array
+                                      must be non-empty. If the operator is Exists
+                                      or DoesNotExist, the values array must be empty.
+                                      This array is replaced during a strategic merge
+                                      patch.
+                                    items:
+                                      type: string
+                                    type: array
+                                required:
+                                - key
+                                - operator
+                                type: object
+                              type: array
+                            matchLabels:
+                              additionalProperties:
+                                description: MatchLabelsValue represents the value
+                                  from the MatchLabels {key,value} pair.
+                                maxLength: 63
+                                pattern: ^(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?$
+                                type: string
+                              description: matchLabels is a map of {key,value} pairs.
+                                A single {key,value} in the matchLabels map is equivalent
+                                to an element of matchExpressions, whose key field
+                                is "key", the operator is "In", and the values array
+                                contains only "value". The requirements are ANDed.
+                              type: object
+                          type: object
                         type: array
                       fromRequires:
                         description: "FromRequires is a list of additional constraints

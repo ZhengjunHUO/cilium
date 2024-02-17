@@ -48,6 +48,9 @@ const (
 	// NetworkPolicyHostsTypeURL is the type URL of NetworkPolicyHosts resources.
 	NetworkPolicyHostsTypeURL = "type.googleapis.com/cilium.NetworkPolicyHosts"
 
+	// HealthCheckSinkPipeTypeURL is the type URL of NetworkPolicyHosts resources.
+	HealthCheckSinkPipeTypeURL = "type.googleapis.com/cilium.health_check.event_sink.pipe"
+
 	// DownstreamTlsContextURL is the type URL of DownstreamTlsContext
 	DownstreamTlsContextURL = "type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext"
 )
@@ -87,11 +90,6 @@ func (cache *NPHDSCache) HandleResourceVersionAck(ackVersion uint64, nackVersion
 	})
 }
 
-// OnIPIdentityCacheGC is required to implement IPIdentityMappingListener.
-func (cache *NPHDSCache) OnIPIdentityCacheGC() {
-	// We don't have anything to synchronize in this case.
-}
-
 // OnIPIdentityCacheChange pushes modifications to the IP<->Identity mapping
 // into the Network Policy Host Discovery Service (NPHDS).
 //
@@ -100,7 +98,7 @@ func (cache *NPHDSCache) OnIPIdentityCacheGC() {
 // IP/ID mappings.
 func (cache *NPHDSCache) OnIPIdentityCacheChange(modType ipcache.CacheModification, cidrCluster cmtypes.PrefixCluster,
 	oldHostIP, newHostIP net.IP, oldID *ipcache.Identity, newID ipcache.Identity,
-	encryptKey uint8, nodeID uint16, k8sMeta *ipcache.K8sMetadata) {
+	encryptKey uint8, k8sMeta *ipcache.K8sMetadata) {
 	cidr := cidrCluster.AsIPNet()
 
 	cidrStr := cidr.String()
@@ -130,7 +128,7 @@ func (cache *NPHDSCache) OnIPIdentityCacheChange(modType ipcache.CacheModificati
 		// but only if the old ID is different.
 		if oldID != nil && oldID.ID != newID.ID {
 			// Recursive call to delete the 'cidr' from the 'oldID'
-			cache.OnIPIdentityCacheChange(ipcache.Delete, cidrCluster, nil, nil, nil, *oldID, encryptKey, nodeID, k8sMeta)
+			cache.OnIPIdentityCacheChange(ipcache.Delete, cidrCluster, nil, nil, nil, *oldID, encryptKey, k8sMeta)
 		}
 		err := cache.handleIPUpsert(npHost, resourceName, cidrStr, newID.ID)
 		if err != nil {

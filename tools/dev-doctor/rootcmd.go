@@ -57,6 +57,13 @@ func readGoModGoVersion(rootDir string) (*semver.Version, error) {
 func rootCmdRun(cmd *cobra.Command, args []string) {
 	rootDir := goPath() + "/src/github.com/cilium/cilium"
 
+	// $GOPATH is optional to set with a module-based Go setup
+	// If we cannot find src path via `$GOPATH`, just look in
+	// the `make` dir for `go.mod`
+	if _, err := os.Stat(rootDir); os.IsNotExist(err) {
+		rootDir, _ = os.Getwd()
+	}
+
 	minGoVersion, err := readGoModGoVersion(rootDir)
 	if err != nil {
 		panic(fmt.Sprintf("cannot read go version from go.mod: %v", err))
@@ -149,13 +156,6 @@ func rootCmdRun(cmd *cobra.Command, args []string) {
 			minVersion:    &semver.Version{Major: 3, Minor: 6, Patch: 0},
 		},
 		&binaryCheck{
-			name:          "llc",
-			ifNotFound:    checkWarning,
-			versionArgs:   []string{"--version"},
-			versionRegexp: regexp.MustCompile(`LLVM\s+version\s+(\d+\.\d+\S*)`),
-			minVersion:    &semver.Version{Major: 10, Minor: 0, Patch: 0},
-		},
-		&binaryCheck{
 			name:          "vagrant",
 			ifNotFound:    checkInfo,
 			versionArgs:   []string{"--version"},
@@ -194,6 +194,29 @@ func rootCmdRun(cmd *cobra.Command, args []string) {
 			versionArgs:   []string{"-version"},
 			versionRegexp: regexp.MustCompile(`Version: (.*)`),
 			hint:          "See https://github.com/cloudflare/cfssl#installation.",
+		},
+		&binaryCheck{
+			name:          "kind",
+			ifNotFound:    checkWarning,
+			versionArgs:   []string{"--version"},
+			versionRegexp: regexp.MustCompile(`kind version (\d+\.\d+\.\d+)`),
+			minVersion:    &semver.Version{Major: 0, Minor: 7, Patch: 0},
+			hint:          "See https://kind.sigs.k8s.io/docs/user/quick-start/#installation.",
+		},
+		&binaryCheck{
+			name:          "kubectl",
+			ifNotFound:    checkWarning,
+			versionArgs:   []string{"version", "--output=yaml", "--client=true"},
+			versionRegexp: regexp.MustCompile(`gitVersion: v(\d+\.\d+\.\d+)`),
+			minVersion:    &semver.Version{Major: 1, Minor: 14, Patch: 0},
+			hint:          "See https://kubernetes.io/docs/tasks/tools/#kubectl.",
+		},
+		&binaryCheck{
+			name:          "cilium",
+			ifNotFound:    checkWarning,
+			versionArgs:   []string{"version", "--client"},
+			versionRegexp: regexp.MustCompile(`cilium-cli: v(\d+\.\d+\.\d+)`),
+			hint:          "See https://docs.cilium.io/en/stable/gettingstarted/k8s-install-default/#install-the-cilium-cli.",
 		},
 		dockerGroupCheck{},
 	}

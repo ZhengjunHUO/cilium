@@ -31,19 +31,15 @@ has_spelling_errors() {
     test -n "$(ls "${spelldir}" 2>/dev/null)"
 }
 
-# Filter out some undesirable warnings:
-#   - Spelling (we already have individual warnings for each word)
+# Filter out some undesirable warnings
 filter_warnings() {
-    [ -s "${warnings}" ] || return
-    grep -v -E \
-        -e 'Found .* misspelled words' \
-        -e "/_api/v1/.*/README\.md:[0-9]+: WARNING: 'myst' reference target not found:" \
-        "${warnings}"
+    test -s "${warnings}" || return
+    cat "${warnings}"
 }
 
 # Returns non-0 if we have relevant build warnings
 has_build_warnings() {
-    filter_warnings > /dev/null
+    test -s "${warnings}"
 }
 
 describe_spelling_errors() {
@@ -82,17 +78,13 @@ build_with_spellchecker() {
     set -o nounset
 
     rm -rf "${spelldir}"
-    # Call with -q -W --keep-going: suppresses regular output (keeps warning;
+    # Call with -W --keep-going: suppresses regular output (keeps warning;
     # -Q would suppress warnings as well including those we write to a file),
     # consider warnings as errors for exit status, but keep going on
     # warning/errors so that we get the full list of errors.
     sphinx-build -b spelling \
         -d "${build_dir}/doctrees" . "${spelldir}" \
-        -E -n --color -q -w "${warnings}" -W --keep-going 2>/dev/null
-}
-
-build_with_linkchecker() {
-    sphinx-build -b linkcheck -d "${build_dir}/doctrees" . "${spelldir}" -q -E
+        -E -n --color -w "${warnings}" -W --keep-going 2>/dev/null
 }
 
 run_linter() {
@@ -100,10 +92,13 @@ run_linter() {
 
     CONF_PY_ROLES=$(sed -n "/^extlinks = {$/,/^}$/ s/^ *'\([^']\+\)':.*/\1/p" conf.py | tr '\n' ',')
     CONF_PY_SUBSTITUTIONS="$(sed -n 's/^\.\. |\([^|]\+\)|.*/\1/p' conf.py | tr '\n' ',')release"
+    CONF_PY_TARGET_NAMES="(cilium slack)"
     ignored_messages="("
     ignored_messages="${ignored_messages}bpf/.*\.rst:.*: \(INFO/1\) Enumerated list start value not ordinal"
     ignored_messages="${ignored_messages}|Hyperlink target .*is not referenced\."
     ignored_messages="${ignored_messages}|Duplicate implicit target name:"
+    ignored_messages="${ignored_messages}|\(ERROR/3\) Indirect hyperlink target \".*\"  refers to target \"${CONF_PY_TARGET_NAMES}\", which does not exist."
+    ignored_messages="${ignored_messages}|\(ERROR/3\) Unknown target name: \"${CONF_PY_TARGET_NAMES}\"."
     ignored_messages="${ignored_messages})"
     # Filter out the AttributeError reports that are due to a bug in rstcheck,
     # see https://github.com/rstcheck/rstcheck-core/issues/3.
@@ -112,23 +107,28 @@ run_linter() {
         --ignore-languages "bash,c" \
         --ignore-messages "${ignored_messages}" \
         --ignore-directives "tabs,openapi" \
-        --ignore-roles "${CONF_PY_ROLES}" \
+        --ignore-roles "${CONF_PY_ROLES},spelling:ignore" \
         --ignore-substitutions "${CONF_PY_SUBSTITUTIONS}" \
-       -r . 2>&1 | \
-       grep -v 'CRITICAL:rstcheck_core.checker:An `AttributeError` error occured. This is most propably due to a code block directive (code/code-block/sourcecode) without a specified language.'
+       -r . ../README.rst 2>&1 | \
+       grep -v 'WARNING:rstcheck_core.checker:An `AttributeError` error occured. This is most probably due to a code block directive (code/code-block/sourcecode) without a specified language.'
 }
 
 read_all_opt=""
 
 if [ -n "${SKIP_LINT-}" ]; then
-  # Read all files for final build if we don't read them all with linting
-  read_all_opt="-E"
+  if [ -z "${INCREMENTAL-}" ]; then
+    # Read all files for final build if we don't read them all with linting
+    read_all_opt="-E"
+  fi
 
+  echo ""
   echo "Skipping syntax and spelling validations..."
 else
+  echo ""
   echo "Running linter..."
   run_linter
 
+  echo ""
   echo "Validating documentation (syntax, spelling)..."
   if ! build_with_spellchecker ; then
     status_ok=0
@@ -150,17 +150,9 @@ else
   fi
 fi
 
-# TODO: Fix broken links and re-enable this
-# (https://github.com/cilium/cilium/issues/10601)
-# echo "Checking links..."
-# if ! build_with_linkchecker ; then
-#     echo "Link check failed!"
-#     exit 1
-# fi
-
 echo "Building documentation (${target})..."
 sphinx-build -M "${target}" "${script_dir}" "${build_dir}" $@ \
-    ${read_all_opt} -n --color -q -w "${warnings}" 2>/dev/null
+    ${read_all_opt} -n --color -w "${warnings}" 2>/dev/null
 
 # We can have warnings but no errors here, or sphinx-build would return non-0
 # and we would have exited because of "set -o errexit".

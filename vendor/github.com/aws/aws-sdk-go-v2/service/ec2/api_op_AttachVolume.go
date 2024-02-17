@@ -4,6 +4,7 @@ package ec2
 
 import (
 	"context"
+	"fmt"
 	awsmiddleware "github.com/aws/aws-sdk-go-v2/aws/middleware"
 	"github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
@@ -15,30 +16,20 @@ import (
 // Attaches an EBS volume to a running or stopped instance and exposes it to the
 // instance with the specified device name. Encrypted EBS volumes must be attached
 // to instances that support Amazon EBS encryption. For more information, see
-// Amazon EBS encryption
-// (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/EBSEncryption.html) in the
-// Amazon Elastic Compute Cloud User Guide. After you attach an EBS volume, you
-// must make it available. For more information, see Make an EBS volume available
-// for use
-// (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ebs-using-volumes.html). If
-// a volume has an Amazon Web Services Marketplace product code:
+// Amazon EBS encryption (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/EBSEncryption.html)
+// in the Amazon Elastic Compute Cloud User Guide. After you attach an EBS volume,
+// you must make it available. For more information, see Make an EBS volume
+// available for use (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ebs-using-volumes.html)
+// . If a volume has an Amazon Web Services Marketplace product code:
+//   - The volume can be attached only to a stopped instance.
+//   - Amazon Web Services Marketplace product codes are copied from the volume to
+//     the instance.
+//   - You must be subscribed to the product.
+//   - The instance type and operating system of the instance must support the
+//     product. For example, you can't detach a volume from a Windows instance and
+//     attach it to a Linux instance.
 //
-// * The volume can
-// be attached only to a stopped instance.
-//
-// * Amazon Web Services Marketplace
-// product codes are copied from the volume to the instance.
-//
-// * You must be
-// subscribed to the product.
-//
-// * The instance type and operating system of the
-// instance must support the product. For example, you can't detach a volume from a
-// Windows instance and attach it to a Linux instance.
-//
-// For more information, see
-// Attach an Amazon EBS volume to an instance
-// (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ebs-attaching-volume.html)
+// For more information, see Attach an Amazon EBS volume to an instance (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ebs-attaching-volume.html)
 // in the Amazon Elastic Compute Cloud User Guide.
 func (c *Client) AttachVolume(ctx context.Context, params *AttachVolumeInput, optFns ...func(*Options)) (*AttachVolumeOutput, error) {
 	if params == nil {
@@ -57,7 +48,7 @@ func (c *Client) AttachVolume(ctx context.Context, params *AttachVolumeInput, op
 
 type AttachVolumeInput struct {
 
-	// The device name (for example, /dev/sdh or xvdh).
+	// The device name (for example, /dev/sdh or xvdh ).
 	//
 	// This member is required.
 	Device *string
@@ -75,8 +66,8 @@ type AttachVolumeInput struct {
 
 	// Checks whether you have the required permissions for the action, without
 	// actually making the request, and provides an error response. If you have the
-	// required permissions, the error response is DryRunOperation. Otherwise, it is
-	// UnauthorizedOperation.
+	// required permissions, the error response is DryRunOperation . Otherwise, it is
+	// UnauthorizedOperation .
 	DryRun *bool
 
 	noSmithyDocumentSerde
@@ -85,17 +76,27 @@ type AttachVolumeInput struct {
 // Describes volume attachment details.
 type AttachVolumeOutput struct {
 
+	// The ARN of the Amazon ECS or Fargate task to which the volume is attached.
+	AssociatedResource *string
+
 	// The time stamp when the attachment initiated.
 	AttachTime *time.Time
 
 	// Indicates whether the EBS volume is deleted on instance termination.
 	DeleteOnTermination *bool
 
-	// The device name.
+	// The device name. If the volume is attached to a Fargate task, this parameter
+	// returns null .
 	Device *string
 
-	// The ID of the instance.
+	// The ID of the instance. If the volume is attached to a Fargate task, this
+	// parameter returns null .
 	InstanceId *string
+
+	// The service principal of Amazon Web Services service that owns the underlying
+	// instance to which the volume is attached. This parameter is returned only for
+	// volumes that are attached to Fargate tasks.
+	InstanceOwningService *string
 
 	// The attachment state of the volume.
 	State types.VolumeAttachmentState
@@ -110,12 +111,22 @@ type AttachVolumeOutput struct {
 }
 
 func (c *Client) addOperationAttachVolumeMiddlewares(stack *middleware.Stack, options Options) (err error) {
+	if err := stack.Serialize.Add(&setOperationInputMiddleware{}, middleware.After); err != nil {
+		return err
+	}
 	err = stack.Serialize.Add(&awsEc2query_serializeOpAttachVolume{}, middleware.After)
 	if err != nil {
 		return err
 	}
 	err = stack.Deserialize.Add(&awsEc2query_deserializeOpAttachVolume{}, middleware.After)
 	if err != nil {
+		return err
+	}
+	if err := addProtocolFinalizerMiddlewares(stack, options, "AttachVolume"); err != nil {
+		return fmt.Errorf("add protocol finalizers: %v", err)
+	}
+
+	if err = addlegacyEndpointContextSetter(stack, options); err != nil {
 		return err
 	}
 	if err = addSetLoggerMiddleware(stack, options); err != nil {
@@ -136,16 +147,13 @@ func (c *Client) addOperationAttachVolumeMiddlewares(stack *middleware.Stack, op
 	if err = addRetryMiddlewares(stack, options); err != nil {
 		return err
 	}
-	if err = addHTTPSignerV4Middleware(stack, options); err != nil {
-		return err
-	}
 	if err = awsmiddleware.AddRawResponseToMetadata(stack); err != nil {
 		return err
 	}
 	if err = awsmiddleware.AddRecordResponseTiming(stack); err != nil {
 		return err
 	}
-	if err = addClientUserAgent(stack); err != nil {
+	if err = addClientUserAgent(stack, options); err != nil {
 		return err
 	}
 	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
@@ -154,10 +162,16 @@ func (c *Client) addOperationAttachVolumeMiddlewares(stack *middleware.Stack, op
 	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
 		return err
 	}
+	if err = addSetLegacyContextSigningOptionsMiddleware(stack); err != nil {
+		return err
+	}
 	if err = addOpAttachVolumeValidationMiddleware(stack); err != nil {
 		return err
 	}
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opAttachVolume(options.Region), middleware.Before); err != nil {
+		return err
+	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
@@ -169,6 +183,9 @@ func (c *Client) addOperationAttachVolumeMiddlewares(stack *middleware.Stack, op
 	if err = addRequestResponseLogging(stack, options); err != nil {
 		return err
 	}
+	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -176,7 +193,6 @@ func newServiceMetadataMiddleware_opAttachVolume(region string) *awsmiddleware.R
 	return &awsmiddleware.RegisterServiceMetadata{
 		Region:        region,
 		ServiceID:     ServiceID,
-		SigningName:   "ec2",
 		OperationName: "AttachVolume",
 	}
 }

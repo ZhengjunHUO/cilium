@@ -23,6 +23,8 @@ import (
 	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/metrics"
+	"github.com/cilium/cilium/pkg/node"
+	"github.com/cilium/cilium/pkg/option"
 )
 
 var (
@@ -336,13 +338,29 @@ func (s *Server) runActiveServices() error {
 	prober := newProber(s, nodesAdded)
 	prober.MaxRTT = s.ProbeInterval
 	prober.OnIdle = func() {
-		// Fetch results and update set of nodes to probe every
-		// ProbeInterval
-		s.updateCluster(prober.getResults())
+		// OnIdle is called every ProbeInterval after sending out all icmp pings.
+		// There are a few important consideration here:
+		// (1) ICMP prober doesn't report failed probes
+		// (2) We can receive the same nodes multiple times in nodesAdded in case of updates
+		// (3) We need to clean icmp status to not retain stale probe results
+		// (4) We don't want to report stale nodes in metrics
+
 		if nodesAdded, nodesRemoved, err := s.getNodes(); err != nil {
+			// reset the cache by setting clientID to 0 and removing all current nodes
+			s.clientID = 0
+			prober.setNodes(nil, prober.nodes)
 			log.WithError(err).Error("unable to get cluster nodes")
+			return
 		} else {
+			// (1) Mark ips that did not receive ICMP as unreachable.
+			prober.updateIcmpStatus()
+			// (2) setNodes implementation doesn't override results for existing nodes.
+			// (4) Remove stale nodes so we don't report them in metrics before updating results
 			prober.setNodes(nodesAdded, nodesRemoved)
+			// (4) Update results without stale nodes
+			s.updateCluster(prober.getResults())
+			// (3) Cleanup icmp results for next iteration of probing
+			prober.clearIcmpStatus()
 		}
 	}
 	prober.RunLoop()
@@ -417,7 +435,38 @@ func NewServer(config Config) (*Server, error) {
 	server.Client = cl
 	server.Server = *server.newServer(config.HealthAPISpec)
 
-	server.httpPathServer = responder.NewServer(config.HTTPPathPort)
+	server.httpPathServer = responder.NewServers(getAddresses(), config.HTTPPathPort)
 
 	return server, nil
+}
+
+// Get internal node ipv4/ipv6 addresses based on config enabled.
+// If it fails to get either of internal node address, it returns "0.0.0.0" if ipv4 or "::" if ipv6.
+func getAddresses() []string {
+	addresses := make([]string, 0, 2)
+
+	// listen on all interfaces and all families in case of external-workloads
+	if option.Config.JoinCluster {
+		return []string{""}
+	}
+
+	if option.Config.EnableIPv4 {
+		if ipv4 := node.GetInternalIPv4(); ipv4 != nil {
+			addresses = append(addresses, ipv4.String())
+		} else {
+			// if Get ipv4 fails, then listen on all ipv4 addr.
+			addresses = append(addresses, "0.0.0.0")
+		}
+	}
+
+	if option.Config.EnableIPv6 {
+		if ipv6 := node.GetInternalIPv6(); ipv6 != nil {
+			addresses = append(addresses, ipv6.String())
+		} else {
+			// if Get ipv6 fails, then listen on all ipv6 addr.
+			addresses = append(addresses, "::")
+		}
+	}
+
+	return addresses
 }

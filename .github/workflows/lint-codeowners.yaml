@@ -1,4 +1,4 @@
-name: CODEOWNERS checks
+name: CODEOWNERS Checks
 
 # Any change in triggers needs to be reflected in the concurrency group.
 on:
@@ -23,7 +23,7 @@ jobs:
       codeowners-changed: ${{ steps.changes.outputs.codeowners-changed }}
     steps:
       - name: Check code changes
-        uses: dorny/paths-filter@4512585405083f25c027a35db413c2b3b9006d50 # v2.11.1
+        uses: dorny/paths-filter@0bc4621a3135347011ad047f9ecf449bf72ce2bd # v3.0.0
         id: changes
         with:
           filters: |
@@ -41,7 +41,8 @@ jobs:
     name: Check CODEOWNERS consistency
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@8e5e7e5ab8b370d6c329ec480221332ada57f0ab # v3.5.2
+      - name: Checkout
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
         with:
           persist-credentials: false
           # Hard-code the path instead of using ${{ github.repository }}

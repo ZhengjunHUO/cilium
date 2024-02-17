@@ -5,212 +5,91 @@ package ciliumendpointslice
 
 import (
 	"context"
-	"errors"
-	"strconv"
-	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
-	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/tools/cache"
 
-	v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
-	capi_v2a1 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2alpha1"
-	"github.com/cilium/cilium/pkg/k8s/client"
+	"github.com/cilium/cilium/operator/k8s"
+	tu "github.com/cilium/cilium/operator/pkg/ciliumendpointslice/testutils"
+	"github.com/cilium/cilium/pkg/hive"
+	"github.com/cilium/cilium/pkg/hive/cell"
+	cilium_v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
+	cilium_v2a1 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2alpha1"
+	k8sClient "github.com/cilium/cilium/pkg/k8s/client"
+	"github.com/cilium/cilium/pkg/k8s/resource"
 )
 
-func createManagerEndpoint(name string, identity int64) capi_v2a1.CoreCiliumEndpoint {
-	return capi_v2a1.CoreCiliumEndpoint{
-		Name:       name,
-		IdentityID: identity,
+func TestSyncCESsInLocalCache(t *testing.T) {
+	var r *reconciler
+	var fakeClient k8sClient.FakeClientset
+	m := newCESManagerFcfs(2, log).(*cesManagerFcfs)
+	var ciliumEndpoint resource.Resource[*cilium_v2.CiliumEndpoint]
+	var ciliumEndpointSlice resource.Resource[*cilium_v2a1.CiliumEndpointSlice]
+	var cesMetrics *Metrics
+	hive := hive.New(
+		k8sClient.FakeClientCell,
+		k8s.ResourcesCell,
+		cell.Metric(NewMetrics),
+		cell.Invoke(func(
+			c *k8sClient.FakeClientset,
+			cep resource.Resource[*cilium_v2.CiliumEndpoint],
+			ces resource.Resource[*cilium_v2a1.CiliumEndpointSlice],
+			metrics *Metrics,
+		) error {
+			fakeClient = *c
+			ciliumEndpoint = cep
+			ciliumEndpointSlice = ces
+			cesMetrics = metrics
+			return nil
+		}),
+	)
+	hive.Start(context.Background())
+	r = newReconciler(context.Background(), fakeClient.CiliumFakeClientset.CiliumV2alpha1(), m, log, ciliumEndpoint, ciliumEndpointSlice, cesMetrics)
+	cesStore, _ := ciliumEndpointSlice.Store(context.Background())
+	cesController := &Controller{
+		logger:              log,
+		clientset:           fakeClient.Clientset,
+		ciliumEndpoint:      ciliumEndpoint,
+		ciliumEndpointSlice: ciliumEndpointSlice,
+		reconciler:          r,
+		manager:             m,
+		rateLimit:           getRateLimitConfig(params{Cfg: Config{CESWriteQPSLimit: 2, CESWriteQPSBurst: 1}}),
+		enqueuedAt:          make(map[CESName]time.Time),
 	}
-}
+	cesController.initializeQueue()
 
-func createStoreEndpoint(name string, namespace string, identity int64) *v2.CiliumEndpoint {
-	return &v2.CiliumEndpoint{
-		ObjectMeta: meta_v1.ObjectMeta{
-			Name:      name,
-			Namespace: namespace,
-		},
-		Status: v2.EndpointStatus{
-			Identity: &v2.EndpointIdentity{
-				ID: identity,
-			},
-		},
-	}
-}
+	cep1 := tu.CreateManagerEndpoint("cep1", 1)
+	cep2 := tu.CreateManagerEndpoint("cep2", 1)
+	cep3 := tu.CreateManagerEndpoint("cep3", 2)
+	cep4 := tu.CreateManagerEndpoint("cep4", 2)
+	ces1 := tu.CreateStoreEndpointSlice("ces1", "ns", []cilium_v2a1.CoreCiliumEndpoint{cep1, cep2, cep3, cep4})
+	cesStore.CacheStore().Add(ces1)
+	cep5 := tu.CreateManagerEndpoint("cep5", 1)
+	cep6 := tu.CreateManagerEndpoint("cep6", 1)
+	cep7 := tu.CreateManagerEndpoint("cep7", 2)
+	ces2 := tu.CreateStoreEndpointSlice("ces2", "ns", []cilium_v2a1.CoreCiliumEndpoint{cep5, cep6, cep7})
+	cesStore.CacheStore().Add(ces2)
 
-func createStoreEndpointSlice(name string, namespace string, endpoints []capi_v2a1.CoreCiliumEndpoint) *capi_v2a1.CiliumEndpointSlice {
-	return &capi_v2a1.CiliumEndpointSlice{
-		ObjectMeta: meta_v1.ObjectMeta{
-			Name: name,
-		},
-		Namespace: namespace,
-		Endpoints: endpoints,
-	}
-}
+	cesController.syncCESsInLocalCache(context.Background())
 
-func TestRemoveStaleCEPEntries(t *testing.T) {
-	namespace := "ns"
-	testCases := []struct {
-		desc      string
-		storeCESs []*capi_v2a1.CiliumEndpointSlice
-		storeCEPs []*v2.CiliumEndpoint
-		want      map[string]string
-	}{
-		{
-			desc: "No stale CEPs",
-			storeCESs: []*capi_v2a1.CiliumEndpointSlice{
-				createStoreEndpointSlice("slice1", namespace, []capi_v2a1.CoreCiliumEndpoint{
-					createManagerEndpoint("cep1", 1)}),
-			},
-			storeCEPs: []*v2.CiliumEndpoint{createStoreEndpoint("cep1", namespace, 1)},
-			want:      map[string]string{"ns/cep1": "slice1"},
-		},
-		{
-			desc: "Remove stale CEP",
-			storeCESs: []*capi_v2a1.CiliumEndpointSlice{
-				createStoreEndpointSlice("slice1", namespace, []capi_v2a1.CoreCiliumEndpoint{
-					createManagerEndpoint("cep1", 1),
-					createManagerEndpoint("cep2", 2),
-				}),
-			},
-			storeCEPs: []*v2.CiliumEndpoint{createStoreEndpoint("cep1", namespace, 1)},
-			want:      map[string]string{"ns/cep1": "slice1"},
-		},
-		{
-			desc: "Remove duplicated CEP from single slice",
-			storeCESs: []*capi_v2a1.CiliumEndpointSlice{
-				createStoreEndpointSlice("slice1", namespace, []capi_v2a1.CoreCiliumEndpoint{
-					createManagerEndpoint("cep1", 1),
-					createManagerEndpoint("cep1", 1),
-				}),
-			},
-			storeCEPs: []*v2.CiliumEndpoint{createStoreEndpoint("cep1", namespace, 1)},
-			want:      map[string]string{"ns/cep1": "slice1"},
-		},
-		{
-			desc: "Remove duplicated CEP from separate slice",
-			storeCESs: []*capi_v2a1.CiliumEndpointSlice{
-				createStoreEndpointSlice("slice1", namespace, []capi_v2a1.CoreCiliumEndpoint{
-					createManagerEndpoint("cep1", 1),
-				}),
-				createStoreEndpointSlice("slice2", namespace, []capi_v2a1.CoreCiliumEndpoint{
-					createManagerEndpoint("cep1", 1),
-				}),
-			},
-			storeCEPs: []*v2.CiliumEndpoint{createStoreEndpoint("cep1", namespace, 1)},
-			want:      map[string]string{"ns/cep1": ""}, // empty ces name as any ces is ok
-		},
-		{
-			desc: "Remove old CEP from first slice",
-			storeCESs: []*capi_v2a1.CiliumEndpointSlice{
-				createStoreEndpointSlice("slice1", namespace, []capi_v2a1.CoreCiliumEndpoint{
-					createManagerEndpoint("cep1", 2),
-				}),
-				createStoreEndpointSlice("slice2", namespace, []capi_v2a1.CoreCiliumEndpoint{
-					createManagerEndpoint("cep1", 1),
-				}),
-			},
-			storeCEPs: []*v2.CiliumEndpoint{createStoreEndpoint("cep1", namespace, 1)},
-			want:      map[string]string{"ns/cep1": "slice2"},
-		},
-		{
-			desc: "Remove old CEP from second slice",
-			storeCESs: []*capi_v2a1.CiliumEndpointSlice{
-				createStoreEndpointSlice("slice1", namespace, []capi_v2a1.CoreCiliumEndpoint{
-					createManagerEndpoint("cep1", 1),
-				}),
-				createStoreEndpointSlice("slice2", namespace, []capi_v2a1.CoreCiliumEndpoint{
-					createManagerEndpoint("cep1", 2),
-				}),
-			},
-			storeCEPs: []*v2.CiliumEndpoint{createStoreEndpoint("cep1", namespace, 1)},
-			want:      map[string]string{"ns/cep1": "slice1"},
-		},
-		{
-			desc: "Big remove case with multiple stale and duplicated CEPs from multiple slices",
-			storeCESs: []*capi_v2a1.CiliumEndpointSlice{
-				createStoreEndpointSlice("slice1", namespace, []capi_v2a1.CoreCiliumEndpoint{
-					createManagerEndpoint("cep1", 1),
-					createManagerEndpoint("cep2", 1),
-					createManagerEndpoint("cep3", 1),
-				}),
-				createStoreEndpointSlice("slice2", namespace, []capi_v2a1.CoreCiliumEndpoint{
-					createManagerEndpoint("cep1", 2),
-					createManagerEndpoint("cep4", 2),
-					createManagerEndpoint("cep5", 2),
-					createManagerEndpoint("cep6", 2),
-				}),
-				createStoreEndpointSlice("slice3", namespace, []capi_v2a1.CoreCiliumEndpoint{
-					createManagerEndpoint("cep1", 2),
-					createManagerEndpoint("cep4", 2),
-					createManagerEndpoint("cep7", 2),
-					createManagerEndpoint("cep8", 2),
-					createManagerEndpoint("cep9", 2),
-				}),
-			},
-			storeCEPs: []*v2.CiliumEndpoint{
-				createStoreEndpoint("cep1", namespace, 1),
-				createStoreEndpoint("cep2", namespace, 1),
-				createStoreEndpoint("cep3", namespace, 1),
-				createStoreEndpoint("cep4", namespace, 2),
-				createStoreEndpoint("cep5", namespace, 2),
-			},
-			want: map[string]string{
-				"ns/cep1": "slice1",
-				"ns/cep2": "slice1",
-				"ns/cep3": "slice1",
-				"ns/cep4": "",
-				"ns/cep5": "slice2",
-			},
-		},
-	}
-	for _, tc := range testCases {
-		t.Run(tc.desc, func(t *testing.T) {
-			_, client := client.NewFakeClientset()
-			ciliumEndpointStore := cache.NewIndexer(
-				cache.DeletionHandlingMetaNamespaceKeyFunc,
-				cache.Indexers{
-					cache.NamespaceIndex: cache.MetaNamespaceIndexFunc,
-					"identity": func(obj interface{}) ([]string, error) {
-						endpointObj, ok := obj.(*v2.CiliumEndpoint)
-						if !ok {
-							return nil, errors.New("failed to convert cilium endpoint")
-						}
-						identityID := "0"
-						if endpointObj.Status.Identity != nil {
-							identityID = strconv.FormatInt(endpointObj.Status.Identity.ID, 10)
-						}
-						return []string{identityID}, nil
-					},
-				},
-			)
-			cesController := NewCESController(context.Background(), &sync.WaitGroup{}, client, 5, cesIdentityBasedSlicing, 10, 20)
-			cesController.ciliumEndpointStore = ciliumEndpointStore
-			manager := cesController.Manager.(*cesManagerIdentity)
-			for _, cep := range tc.storeCEPs {
-				ciliumEndpointStore.Add(cep)
-			}
-			for _, ces := range tc.storeCESs {
-				cesController.ciliumEndpointSliceStore.Add(ces)
-			}
-			syncCESsInLocalCache(cesController.ciliumEndpointSliceStore, manager)
-			cesController.removeStaleAndDuplicatedCEPEntries()
-			wantedCEPs := make([]string, len(tc.want))
-			i := 0
-			for cep := range tc.want {
-				wantedCEPs[i] = cep
-				i++
-			}
-			assert.ElementsMatch(t, wantedCEPs, manager.getAllCEPNames())
-			for cep := range tc.want {
-				actualCES, exists := manager.desiredCESs.getCESName(cep)
-				assert.True(t, exists)
-				if tc.want[cep] != "" {
-					assert.Equal(t, tc.want[cep], actualCES)
-				}
-			}
-		})
-	}
+	mapping := m.mapping
+
+	cesN, _ := mapping.getCESName(NewCEPName("cep1", "ns"))
+	assert.Equal(t, cesN, NewCESName("ces1"))
+	cesN, _ = mapping.getCESName(NewCEPName("cep2", "ns"))
+	assert.Equal(t, cesN, NewCESName("ces1"))
+	cesN, _ = mapping.getCESName(NewCEPName("cep3", "ns"))
+	assert.Equal(t, cesN, NewCESName("ces1"))
+	cesN, _ = mapping.getCESName(NewCEPName("cep4", "ns"))
+	assert.Equal(t, cesN, NewCESName("ces1"))
+	cesN, _ = mapping.getCESName(NewCEPName("cep5", "ns"))
+	assert.Equal(t, cesN, NewCESName("ces2"))
+	cesN, _ = mapping.getCESName(NewCEPName("cep6", "ns"))
+	assert.Equal(t, cesN, NewCESName("ces2"))
+	cesN, _ = mapping.getCESName(NewCEPName("cep7", "ns"))
+	assert.Equal(t, cesN, NewCESName("ces2"))
+
+	cesController.queue.ShutDown()
+	hive.Stop(context.Background())
 }

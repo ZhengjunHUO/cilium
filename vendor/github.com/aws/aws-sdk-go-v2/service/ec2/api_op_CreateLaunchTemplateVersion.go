@@ -4,6 +4,7 @@ package ec2
 
 import (
 	"context"
+	"fmt"
 	awsmiddleware "github.com/aws/aws-sdk-go-v2/aws/middleware"
 	"github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
@@ -18,8 +19,7 @@ import (
 // immutable; after you create a launch template, you can't modify it. Instead, you
 // can create a new version of the launch template that includes any changes you
 // require. For more information, see Modify a launch template (manage launch
-// template versions)
-// (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-launch-templates.html#manage-launch-template-versions)
+// template versions) (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-launch-templates.html#manage-launch-template-versions)
 // in the Amazon Elastic Compute Cloud User Guide.
 func (c *Client) CreateLaunchTemplateVersion(ctx context.Context, params *CreateLaunchTemplateVersionInput, optFns ...func(*Options)) (*CreateLaunchTemplateVersionOutput, error) {
 	if params == nil {
@@ -44,30 +44,35 @@ type CreateLaunchTemplateVersionInput struct {
 	LaunchTemplateData *types.RequestLaunchTemplateData
 
 	// Unique, case-sensitive identifier you provide to ensure the idempotency of the
-	// request. For more information, see Ensuring idempotency
-	// (https://docs.aws.amazon.com/AWSEC2/latest/APIReference/Run_Instance_Idempotency.html).
-	// Constraint: Maximum 128 ASCII characters.
+	// request. For more information, see Ensuring idempotency (https://docs.aws.amazon.com/AWSEC2/latest/APIReference/Run_Instance_Idempotency.html)
+	// . Constraint: Maximum 128 ASCII characters.
 	ClientToken *string
 
 	// Checks whether you have the required permissions for the action, without
 	// actually making the request, and provides an error response. If you have the
-	// required permissions, the error response is DryRunOperation. Otherwise, it is
-	// UnauthorizedOperation.
+	// required permissions, the error response is DryRunOperation . Otherwise, it is
+	// UnauthorizedOperation .
 	DryRun *bool
 
 	// The ID of the launch template. You must specify either the LaunchTemplateId or
-	// the LaunchTemplateName, but not both.
+	// the LaunchTemplateName , but not both.
 	LaunchTemplateId *string
 
 	// The name of the launch template. You must specify the LaunchTemplateName or the
-	// LaunchTemplateId, but not both.
+	// LaunchTemplateId , but not both.
 	LaunchTemplateName *string
+
+	// If true , and if a Systems Manager parameter is specified for ImageId , the AMI
+	// ID is displayed in the response for imageID . For more information, see Use a
+	// Systems Manager parameter instead of an AMI ID (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-launch-templates.html#use-an-ssm-parameter-instead-of-an-ami-id)
+	// in the Amazon Elastic Compute Cloud User Guide. Default: false
+	ResolveAlias *bool
 
 	// The version number of the launch template version on which to base the new
 	// version. The new version inherits the same launch parameters as the source
-	// version, except for parameters that you specify in LaunchTemplateData. Snapshots
-	// applied to the block device mapping are ignored when creating a new version
-	// unless they are explicitly included.
+	// version, except for parameters that you specify in LaunchTemplateData .
+	// Snapshots applied to the block device mapping are ignored when creating a new
+	// version unless they are explicitly included.
 	SourceVersion *string
 
 	// A description for the version of the launch template.
@@ -93,12 +98,22 @@ type CreateLaunchTemplateVersionOutput struct {
 }
 
 func (c *Client) addOperationCreateLaunchTemplateVersionMiddlewares(stack *middleware.Stack, options Options) (err error) {
+	if err := stack.Serialize.Add(&setOperationInputMiddleware{}, middleware.After); err != nil {
+		return err
+	}
 	err = stack.Serialize.Add(&awsEc2query_serializeOpCreateLaunchTemplateVersion{}, middleware.After)
 	if err != nil {
 		return err
 	}
 	err = stack.Deserialize.Add(&awsEc2query_deserializeOpCreateLaunchTemplateVersion{}, middleware.After)
 	if err != nil {
+		return err
+	}
+	if err := addProtocolFinalizerMiddlewares(stack, options, "CreateLaunchTemplateVersion"); err != nil {
+		return fmt.Errorf("add protocol finalizers: %v", err)
+	}
+
+	if err = addlegacyEndpointContextSetter(stack, options); err != nil {
 		return err
 	}
 	if err = addSetLoggerMiddleware(stack, options); err != nil {
@@ -119,16 +134,13 @@ func (c *Client) addOperationCreateLaunchTemplateVersionMiddlewares(stack *middl
 	if err = addRetryMiddlewares(stack, options); err != nil {
 		return err
 	}
-	if err = addHTTPSignerV4Middleware(stack, options); err != nil {
-		return err
-	}
 	if err = awsmiddleware.AddRawResponseToMetadata(stack); err != nil {
 		return err
 	}
 	if err = awsmiddleware.AddRecordResponseTiming(stack); err != nil {
 		return err
 	}
-	if err = addClientUserAgent(stack); err != nil {
+	if err = addClientUserAgent(stack, options); err != nil {
 		return err
 	}
 	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
@@ -137,10 +149,16 @@ func (c *Client) addOperationCreateLaunchTemplateVersionMiddlewares(stack *middl
 	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
 		return err
 	}
+	if err = addSetLegacyContextSigningOptionsMiddleware(stack); err != nil {
+		return err
+	}
 	if err = addOpCreateLaunchTemplateVersionValidationMiddleware(stack); err != nil {
 		return err
 	}
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opCreateLaunchTemplateVersion(options.Region), middleware.Before); err != nil {
+		return err
+	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
@@ -152,6 +170,9 @@ func (c *Client) addOperationCreateLaunchTemplateVersionMiddlewares(stack *middl
 	if err = addRequestResponseLogging(stack, options); err != nil {
 		return err
 	}
+	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -159,7 +180,6 @@ func newServiceMetadataMiddleware_opCreateLaunchTemplateVersion(region string) *
 	return &awsmiddleware.RegisterServiceMetadata{
 		Region:        region,
 		ServiceID:     ServiceID,
-		SigningName:   "ec2",
 		OperationName: "CreateLaunchTemplateVersion",
 	}
 }

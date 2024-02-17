@@ -7,7 +7,7 @@ import (
 	"net"
 	"testing"
 
-	. "gopkg.in/check.v1"
+	. "github.com/cilium/checkmate"
 
 	"github.com/cilium/ebpf/rlimit"
 
@@ -24,7 +24,7 @@ func Test(t *testing.T) {
 }
 
 func (s *TunnelMapTestSuite) SetUpSuite(c *C) {
-	testutils.PrivilegedCheck(c)
+	testutils.PrivilegedTest(c)
 	err := rlimit.RemoveMemlock()
 	c.Assert(err, IsNil)
 }
@@ -33,9 +33,8 @@ func (s *TunnelMapTestSuite) TestClusterAwareAddressing(c *C) {
 	m := NewTunnelMap("test_cilium_tunnel_map")
 	defer m.Unpin()
 
-	created, err := m.OpenOrCreate()
+	err := m.OpenOrCreate()
 	c.Assert(err, IsNil)
-	c.Assert(created, Equals, true)
 
 	prefix0 := cmtypes.MustParseAddrCluster("10.0.0.1")
 	prefix1 := cmtypes.MustParseAddrCluster("10.0.0.1@1")
@@ -43,11 +42,11 @@ func (s *TunnelMapTestSuite) TestClusterAwareAddressing(c *C) {
 	endpoint1 := net.ParseIP("192.168.1.1")
 
 	// Test insertion with bare IP
-	err = m.SetTunnelEndpoint(0, 0, prefix0, endpoint0)
+	err = m.SetTunnelEndpoint(0, prefix0, endpoint0)
 	c.Assert(err, IsNil)
 
 	// Test insertion with AddrCluster
-	err = m.SetTunnelEndpoint(0, 0, prefix1, endpoint1)
+	err = m.SetTunnelEndpoint(0, prefix1, endpoint1)
 	c.Assert(err, IsNil)
 
 	// Test if tunnel map can distinguish prefix0 and prefix1

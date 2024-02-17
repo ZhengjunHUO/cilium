@@ -8,7 +8,7 @@
   {{- $defaultKeepDeprecatedProbes = false -}}
 {{- end -}}
 
-{{- $kubeProxyReplacement := (coalesce .Values.kubeProxyReplacement "disabled") -}}
+{{- $kubeProxyReplacement := (coalesce .Values.kubeProxyReplacement "false") -}}
 
 ---
 apiVersion: apps/v1
@@ -16,6 +16,10 @@ kind: DaemonSet
 metadata:
   name: cilium
   namespace: {{ .Release.Namespace }}
+  {{- with .Values.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   labels:
     k8s-app: cilium
     app.kubernetes.io/part-of: cilium
@@ -124,6 +128,7 @@ spec:
           failureThreshold: {{ .Values.startupProbe.failureThreshold }}
           periodSeconds: {{ .Values.startupProbe.periodSeconds }}
           successThreshold: 1
+          initialDelaySeconds: 5
         {{- end }}
         livenessProbe:
           {{- if or .Values.keepDeprecatedProbes $defaultKeepDeprecatedProbes }}
@@ -192,6 +197,10 @@ spec:
               fieldPath: metadata.namespace
         - name: CILIUM_CLUSTERMESH_CONFIG
           value: /var/lib/cilium/clustermesh/
+        - name: GOMEMLIMIT
+          valueFrom:
+            resourceFieldRef:
+              resource: limits.memory
         {{- if .Values.k8sServiceHost }}
         - name: KUBERNETES_SERVICE_HOST
           value: {{ .Values.k8sServiceHost | quote }}
@@ -205,7 +214,7 @@ spec:
         {{- end }}
         {{- if .Values.cni.install }}
         lifecycle:
-          {{- if .Values.eni.enabled }}
+          {{- if ne .Values.cni.chainingMode "aws-cni" }}
           postStart:
             exec:
               command:
@@ -234,10 +243,10 @@ spec:
           containerPort: {{ .Values.prometheus.port }}
           hostPort: {{ .Values.prometheus.port }}
           protocol: TCP
-        {{- if .Values.proxy.prometheus.enabled }}
+        {{- if and .Values.envoy.prometheus.enabled (not .Values.envoy.enabled) }}
         - name: envoy-metrics
-          containerPort: {{ .Values.proxy.prometheus.port }}
-          hostPort: {{ .Values.proxy.prometheus.port }}
+          containerPort: {{ .Values.envoy.prometheus.port }}
+          hostPort: {{ .Values.envoy.prometheus.port }}
           protocol: TCP
         {{- end }}
         {{- end }}
@@ -266,9 +275,14 @@ spec:
           {{- end }}
         terminationMessagePolicy: FallbackToLogsOnError
         volumeMounts:
-        {{- if .Values.auth.mTLS.spire.enabled }}
+        {{- if .Values.authentication.mutual.spire.enabled }}
         - name: spire-agent-socket
-          mountPath: {{ dir .Values.auth.mTLS.spire.adminSocketPath }}
+          mountPath: {{ dir .Values.authentication.mutual.spire.adminSocketPath }}
+          readOnly: false
+        {{- end }}
+        {{- if .Values.envoy.enabled }}
+        - name: envoy-sockets
+          mountPath: /var/run/cilium/envoy/sockets
           readOnly: false
         {{- end }}
         {{- if not .Values.securityContext.privileged }}
@@ -335,7 +349,7 @@ spec:
           mountPath: /run/xtables.lock
         {{- if and .Values.encryption.enabled (eq .Values.encryption.type "ipsec") }}
         - name: cilium-ipsec-secrets
-          mountPath: {{ .Values.encryption.ipsec.mountPath | default .Values.encryption.mountPath }}
+          mountPath: {{ .Values.encryption.ipsec.mountPath }}
         {{- end }}
         {{- if .Values.kubeConfigPath }}
         - name: kube-config
@@ -362,6 +376,11 @@ spec:
           mountPropagation: {{ .mountPropagation }}
           {{- end }}
         {{- end }}
+        {{- if .Values.hubble.export.dynamic.enabled }}
+        - name: hubble-flowlog-config
+          mountPath: /flowlog-config
+          readOnly: true
+        {{- end }}
         {{- with .Values.extraVolumeMounts }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -378,7 +397,7 @@ spec:
           for i in {1..5}; do \
             [ -S /var/run/cilium/monitor1_2.sock ] && break || sleep 10;\
             done; \
-          cilium monitor
+          cilium-dbg monitor
         {{- range $type := .Values.monitor.eventTypes -}}
           {{ " " }}--type={{ $type }}
         {{- end }}
@@ -386,6 +405,9 @@ spec:
         volumeMounts:
         - name: cilium-run
           mountPath: /var/run/cilium
+        {{- with .Values.extraVolumeMounts }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
         {{- with .Values.monitor.resources }}
         resources:
           {{- toYaml . | trim | nindent 10 }}
@@ -399,7 +421,7 @@ spec:
         image: {{ include "cilium.image" .Values.image | quote }}
         imagePullPolicy: {{ .Values.image.pullPolicy }}
         command:
-        - cilium
+        - cilium-dbg
         - build-config
         {{- if (not (kindIs "invalid" .Values.daemon.configSources)) }}
         - "--source={{.Values.daemon.configSources}}"
@@ -429,9 +451,15 @@ spec:
         - name: KUBERNETES_SERVICE_PORT
           value: {{ .Values.k8sServicePort | quote }}
         {{- end }}
+        {{- with .Values.extraEnv }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
         volumeMounts:
         - name: tmp
           mountPath: /tmp
+        {{- with .Values.extraVolumeMounts }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
         terminationMessagePolicy: FallbackToLogsOnError
       {{- if .Values.cgroup.autoMount.enabled }}
       # Required to mount cgroup2 filesystem on the underlying Kubernetes node.
@@ -485,6 +513,10 @@ spec:
       - name: apply-sysctl-overwrites
         image: {{ include "cilium.image" .Values.image | quote }}
         imagePullPolicy: {{ .Values.image.pullPolicy }}
+        {{- with .Values.initResources }}
+        resources:
+          {{- toYaml . | trim | nindent 10 }}
+        {{- end }}
         env:
         - name: BIN_PATH
           value: {{ .Values.cni.binPath }}
@@ -530,6 +562,10 @@ spec:
       - name: mount-bpf-fs
         image: {{ include "cilium.image" .Values.image | quote }}
         imagePullPolicy: {{ .Values.image.pullPolicy }}
+        {{- with .Values.initResources }}
+        resources:
+          {{- toYaml . | trim | nindent 10 }}
+        {{- end }}
         args:
         - 'mount | grep "/sys/fs/bpf type bpf" || mount -t bpf bpf /sys/fs/bpf'
         command:
@@ -551,6 +587,10 @@ spec:
       - name: wait-for-node-init
         image: {{ include "cilium.image" .Values.image | quote }}
         imagePullPolicy: {{ .Values.image.pullPolicy }}
+        {{- with .Values.initResources }}
+        resources:
+          {{- toYaml . | trim | nindent 10 }}
+        {{- end }}
         command:
         - sh
         - -c
@@ -581,6 +621,12 @@ spec:
             configMapKeyRef:
               name: cilium-config
               key: clean-cilium-bpf-state
+              optional: true
+        - name: WRITE_CNI_CONF_WHEN_READY
+          valueFrom:
+            configMapKeyRef:
+              name: cilium-config
+              key: write-cni-conf-when-ready
               optional: true
         {{- if .Values.k8sServiceHost }}
         - name: KUBERNETES_SERVICE_HOST
@@ -622,14 +668,21 @@ spec:
           mountPropagation: HostToContainer
         - name: cilium-run
           mountPath: /var/run/cilium
-        {{- with .Values.nodeinit.resources }}
+        {{- with .Values.extraVolumeMounts }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- with .Values.initResources }}
         resources:
           {{- toYaml . | trim | nindent 10 }}
         {{- end }}
-      {{- if and .Values.waitForKubeProxy (ne $kubeProxyReplacement "strict") }}
+      {{- if and .Values.waitForKubeProxy (and (ne $kubeProxyReplacement "strict") (ne $kubeProxyReplacement "true"))  }}
       - name: wait-for-kube-proxy
         image: {{ include "cilium.image" .Values.image | quote }}
         imagePullPolicy: {{ .Values.image.pullPolicy }}
+        {{- with .Values.initResources }}
+        resources:
+          {{- toYaml . | trim | nindent 10 }}
+        {{- end }}
         securityContext:
           privileged: true
         command:
@@ -659,18 +712,21 @@ spec:
             done
         terminationMessagePolicy: FallbackToLogsOnError
       {{- end }} # wait-for-kube-proxy
+      {{- if .Values.cni.install }}
       # Install the CNI binaries in an InitContainer so we don't have a writable host mount in the agent
       - name: install-cni-binaries
         image: {{ include "cilium.image" .Values.image | quote }}
         imagePullPolicy: {{ .Values.image.pullPolicy }}
         command:
           - "/install-plugin.sh"
+        {{- with .Values.cni.resources }}
         resources:
-          requests:
-            cpu: 100m
-            memory: 10Mi
+          {{- toYaml . | trim | nindent 10 }}
+        {{- end }}
         securityContext:
-          {{- if not .Values.securityContext.privileged }}
+          {{- if .Values.securityContext.privileged }}
+          privileged: true
+          {{- else }}
           seLinuxOptions:
             {{- with .Values.securityContext.seLinuxOptions }}
             {{- toYaml . | nindent 12 }}
@@ -683,6 +739,7 @@ spec:
         volumeMounts:
           - name: cni-path
             mountPath: /host/opt/cni/bin
+      {{- end }} # .Values.cni.install
       restartPolicy: Always
       priorityClassName: {{ include "cilium.priorityClass" (list $ .Values.priorityClassName "system-node-critical") }}
       serviceAccount: {{ .Values.serviceAccounts.cilium.name | quote }}
@@ -709,7 +766,7 @@ spec:
       tolerations:
         {{- toYaml . | trim | nindent 8 }}
       {{- end }}
-      {{- if and .Values.clustermesh.useAPIServer .Values.clustermesh.config.enabled }}
+      {{- if and .Values.clustermesh.config.enabled (not (and .Values.clustermesh.useAPIServer .Values.clustermesh.apiserver.kvstoremesh.enabled )) }}
       hostAliases:
       {{- range $cluster := .Values.clustermesh.config.clusters }}
       {{- range $ip := $cluster.ips }}
@@ -766,10 +823,17 @@ spec:
         hostPath:
           path: /run/xtables.lock
           type: FileOrCreate
-      {{- if .Values.auth.mTLS.spire.enabled }}
+      {{- if .Values.authentication.mutual.spire.enabled }}
       - name: spire-agent-socket
         hostPath:
-          path: {{ dir .Values.auth.mTLS.spire.adminSocketPath }}
+          path: {{ dir .Values.authentication.mutual.spire.adminSocketPath }}
+          type: DirectoryOrCreate
+      {{- end }}
+      {{- if .Values.envoy.enabled }}
+      # Sharing socket with Cilium Envoy on the same node by using a host path
+      - name: envoy-sockets
+        hostPath:
+          path: "{{ .Values.daemon.runPath }}/envoy/sockets"
           type: DirectoryOrCreate
       {{- end }}
       {{- if .Values.kubeConfigPath }}
@@ -829,7 +893,7 @@ spec:
               - key: ca.crt
                 path: common-etcd-client-ca.crt
           {{- else }}
-          - configMap:
+          - {{ .Values.tls.caBundle.useSecret | ternary "secret" "configMap" }}:
               name: {{ .Values.tls.caBundle.name }}
               optional: true
               items:
@@ -848,7 +912,7 @@ spec:
       {{- if and .Values.encryption.enabled (eq .Values.encryption.type "ipsec") }}
       - name: cilium-ipsec-secrets
         secret:
-          secretName: {{ .Values.encryption.ipsec.secretName | default .Values.encryption.secretName }}
+          secretName: {{ .Values.encryption.ipsec.secretName }}
       {{- end }}
       {{- if .Values.cni.configMap }}
       - name: cni-configuration
@@ -888,13 +952,19 @@ spec:
               - key: ca.crt
                 path: client-ca.crt
           {{- else }}
-          - configMap:
+          - {{ .Values.tls.caBundle.useSecret | ternary "secret" "configMap" }}:
               name: {{ .Values.tls.caBundle.name }}
               optional: true
               items:
               - key: {{ .Values.tls.caBundle.key }}
                 path: client-ca.crt
           {{- end }}
+      {{- end }}
+      {{- if .Values.hubble.export.dynamic.enabled }}
+      - name: hubble-flowlog-config
+        configMap:
+          name: {{ .Values.hubble.export.dynamic.config.configMapName }}
+          optional: true
       {{- end }}
       {{- range .Values.extraHostPathMounts }}
       - name: {{ .name }}

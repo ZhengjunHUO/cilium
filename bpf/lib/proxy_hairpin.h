@@ -15,30 +15,29 @@
 #include "l4.h"
 
 #if defined(HOST_IFINDEX_MAC) && defined(HOST_IFINDEX)
-/**
- * ctx_redirect_to_proxy_hairpin redirects to the proxy by hairpining the
- * packet out the incoming interface
+
+/** Redirect to the proxy by hairpinning the packet out the incoming
+ *  interface.
+ *
+ * @arg ctx		Packet
+ * @arg ip4		Pointer to IPv4 header. NULL for IPv6 packet.
+ * @arg proxy_port	Proxy port
  */
 static __always_inline int
-ctx_redirect_to_proxy_hairpin(struct __ctx_buff *ctx, __be16 proxy_port, const bool is_ipv6)
+ctx_redirect_to_proxy_hairpin(struct __ctx_buff *ctx, struct iphdr *ip4,
+			      __be16 proxy_port)
 {
 #if defined(ENABLE_IPV4) || defined(ENABLE_IPV6)
 	union macaddr host_mac = HOST_IFINDEX_MAC;
 	union macaddr router_mac = NODE_MAC;
 #endif
-	void *data_end = (void *)(long)ctx->data_end;
-	void *data = (void *)(long)ctx->data;
-	struct iphdr *ip4;
 	int ret = 0;
 
 	ctx_store_meta(ctx, CB_PROXY_MAGIC,
 		       MARK_MAGIC_TO_PROXY | (proxy_port << 16));
 	bpf_barrier(); /* verifier workaround */
 
-	if (!revalidate_data(ctx, &data, &data_end, &ip4))
-		return DROP_INVALID;
-
-	if (is_ipv6) {
+	if (!ip4) {
 #ifdef ENABLE_IPV6
 		ret = ipv6_l3(ctx, ETH_HLEN, (__u8 *)&router_mac, (__u8 *)&host_mac,
 			      METRIC_EGRESS);
@@ -52,7 +51,7 @@ ctx_redirect_to_proxy_hairpin(struct __ctx_buff *ctx, __be16 proxy_port, const b
 	if (IS_ERR(ret))
 		return ret;
 
-	cilium_dbg(ctx, DBG_CAPTURE_PROXY_PRE, proxy_port, 0);
+	cilium_dbg_capture(ctx, DBG_CAPTURE_PROXY_PRE, proxy_port);
 
 	/* Note that the actual __ctx_buff preparation for submitting the
 	 * packet to the proxy will occur in a subsequent program via
@@ -64,9 +63,10 @@ ctx_redirect_to_proxy_hairpin(struct __ctx_buff *ctx, __be16 proxy_port, const b
 
 #ifdef ENABLE_IPV4
 static __always_inline int
-ctx_redirect_to_proxy_hairpin_ipv4(struct __ctx_buff *ctx, __be16 proxy_port)
+ctx_redirect_to_proxy_hairpin_ipv4(struct __ctx_buff *ctx, struct iphdr *ip4,
+				   __be16 proxy_port)
 {
-	return ctx_redirect_to_proxy_hairpin(ctx, proxy_port, false);
+	return ctx_redirect_to_proxy_hairpin(ctx, ip4, proxy_port);
 }
 #endif
 
@@ -74,7 +74,7 @@ ctx_redirect_to_proxy_hairpin_ipv4(struct __ctx_buff *ctx, __be16 proxy_port)
 static __always_inline int
 ctx_redirect_to_proxy_hairpin_ipv6(struct __ctx_buff *ctx, __be16 proxy_port)
 {
-	return ctx_redirect_to_proxy_hairpin(ctx, proxy_port, true);
+	return ctx_redirect_to_proxy_hairpin(ctx, NULL, proxy_port);
 }
 #endif
 

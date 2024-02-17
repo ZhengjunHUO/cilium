@@ -8,8 +8,8 @@ import (
 	"path"
 	"testing"
 
+	check "github.com/cilium/checkmate"
 	cnitypes "github.com/containernetworking/cni/pkg/types"
-	"gopkg.in/check.v1"
 
 	eniTypes "github.com/cilium/cilium/pkg/aws/eni/types"
 	azureTypes "github.com/cilium/cilium/pkg/azure/types"
@@ -262,38 +262,6 @@ func (t *CNITypesSuite) TestReadCNIConfAzurev2WithPlugins(c *check.C) {
 		IPAM: IPAM{
 			IPAMSpec: ipamTypes.IPAMSpec{
 				PreAllocate: 5,
-			},
-		},
-	}
-	testConfRead(c, confFile1, &netConf1)
-}
-
-func (t *CNITypesSuite) TestReadCNIConfClusterPoolV2(c *check.C) {
-	confFile1 := `
-{
-  "cniVersion":"0.3.1",
-  "name":"cilium",
-  "plugins": [
-    {
-      "cniVersion":"0.3.1",
-      "type":"cilium-cni",
-      "ipam": {
-        "pod-cidr-allocation-threshold": 10,
-        "pod-cidr-release-threshold": 20
-      }
-    }
-  ]
-}
-`
-	netConf1 := NetConf{
-		NetConf: cnitypes.NetConf{
-			CNIVersion: "0.3.1",
-			Type:       "cilium-cni",
-		},
-		IPAM: IPAM{
-			IPAMSpec: ipamTypes.IPAMSpec{
-				PodCIDRAllocationThreshold: 10,
-				PodCIDRReleaseThreshold:    20,
 			},
 		},
 	}

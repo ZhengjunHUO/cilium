@@ -21,7 +21,7 @@ environments (> 500 nodes) or if you want to run specific datapath modes, refer
 to the :ref:`getting_started` guide.
 
 Should you encounter any issues during the installation, please refer to the
-:ref:`troubleshooting_k8s` section and / or seek help on the :term:`Slack channel`.
+:ref:`troubleshooting_k8s` section and/or seek help on `Cilium Slack`_.
 
 .. _create_cluster:
 
@@ -129,6 +129,13 @@ to create a Kubernetes cluster locally or using a managed Kubernetes service:
           curl -LO \ |SCM_WEB|\/Documentation/installation/kind-config.yaml
           kind create cluster --config=kind-config.yaml
 
+       .. note::
+
+         Cilium may fail to deploy due to too many open files in one or more
+         of the agent pods. If you notice this error, you can increase the
+         ``inotify`` resource limits on your host machine (see
+         `Pod errors due to "too many open files" <https://kind.sigs.k8s.io/docs/user/known-issues/#pod-errors-due-to-too-many-open-files>`__).
+
     .. group-tab:: minikube
 
        Install minikube ≥ v1.28.0 as per minikube documentation:
@@ -137,17 +144,13 @@ to create a Kubernetes cluster locally or using a managed Kubernetes service:
 
        .. code-block:: shell-session
 
-          minikube start --network-plugin=cni --cni=false
+          minikube start --cni=cilium
 
        .. note::
 
-          From minikube v1.12.1+, cilium networking plugin can be enabled directly with
-          ``--cni=cilium`` parameter in ``minikube start`` command. However, this may not
-          install the latest version of cilium.
-
-          MacOS M1 users using a Minikube version < v1.28.0 with ``--cni=false`` will also need to run
-          ``minikube ssh -- sudo mount bpffs -t bpf /sys/fs/bpf`` in order to mount the BPF filesystem
-          ``bpffs`` to ``/sys/fs/bpf``.
+          - This may not install the latest version of cilium.
+          - It might be necessary to add ``--host-dns-resolver=false`` if using the Virtualbox provider,
+            otherwise DNS resolution may not work after Cilium installation.
 
     .. group-tab:: Rancher Desktop
 
@@ -208,9 +211,9 @@ You can install Cilium on any Kubernetes cluster. Pick one of the options below:
 
        Install Cilium into the Kubernetes cluster pointed to by your current kubectl context:
 
-       .. code-block:: shell-session
+       .. parsed-literal::
 
-          cilium install
+          cilium install |CHART_VERSION|
 
     .. group-tab:: GKE
 
@@ -220,36 +223,22 @@ You can install Cilium on any Kubernetes cluster. Pick one of the options below:
 
        Install Cilium into the GKE cluster:
 
-       .. code-block:: shell-session
+       .. parsed-literal::
 
-           cilium install
+           cilium install |CHART_VERSION|
 
     .. group-tab:: AKS
-
+       
+       .. include:: ../installation/requirements-aks.rst
+   
        **Install Cilium:**
 
        Install Cilium into the AKS cluster:
 
-       .. code-block:: shell-session
+       .. parsed-literal::
 
-           cilium install --azure-resource-group "${AZURE_RESOURCE_GROUP}"
-
-       The Cilium CLI will automatically install Cilium using one of the
-       following installation modes based on the ``--network-plugin``
-       configuration detected from the AKS cluster:
-
-       .. include:: ../installation/requirements-aks.rst
-
-       .. tabs::
-
-          .. tab:: BYOCNI
-
-             .. include:: ../installation/requirements-aks-byocni.rst
-
-          .. tab:: Legacy Azure IPAM
-
-             .. include:: ../installation/requirements-aks-azure-ipam.rst
-
+           cilium install |CHART_VERSION| --set azure.resourceGroup="${AZURE_RESOURCE_GROUP}"
+           
     .. group-tab:: EKS
 
        .. include:: ../installation/requirements-eks.rst
@@ -258,9 +247,9 @@ You can install Cilium on any Kubernetes cluster. Pick one of the options below:
 
        Install Cilium into the EKS cluster.
 
-       .. code-block:: shell-session
+       .. parsed-literal::
 
-           cilium install
+           cilium install |CHART_VERSION|
            cilium status --wait
 
        .. note::
@@ -288,9 +277,9 @@ You can install Cilium on any Kubernetes cluster. Pick one of the options below:
 
        Install Cilium into your newly created RKE cluster:
 
-       .. code-block:: shell-session
+       .. parsed-literal::
 
-           cilium install
+           cilium install |CHART_VERSION|
 
     .. group-tab:: k3s
 
@@ -300,9 +289,9 @@ You can install Cilium on any Kubernetes cluster. Pick one of the options below:
 
        Install Cilium into your newly created Kubernetes cluster:
 
-       .. code-block:: shell-session
+       .. parsed-literal::
 
-           cilium install
+           cilium install |CHART_VERSION|
 
     .. group-tab:: Alibaba ACK
 

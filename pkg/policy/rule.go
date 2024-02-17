@@ -5,7 +5,10 @@ package policy
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
+
+	"github.com/cilium/proxy/pkg/policy/api/kafka"
 
 	"github.com/cilium/cilium/pkg/identity"
 	slim_metav1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/meta/v1"
@@ -13,7 +16,6 @@ import (
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/policy/api"
-	"github.com/cilium/cilium/pkg/policy/api/kafka"
 )
 
 type rule struct {
@@ -97,6 +99,48 @@ func (epd *PerSelectorPolicy) appendL7WildcardRule(ctx *SearchContext) api.L7Rul
 	return epd.L7Rules
 }
 
+// takesListenerPrecedenceOver returns true if the listener reference in 'l7Rules' takes precedence
+// over the listener reference in 'other'.
+func (l7Rules *PerSelectorPolicy) takesListenerPrecedenceOver(other *PerSelectorPolicy) bool {
+	var priority, otherPriority uint16
+
+	// decrement by one to wrap the undefined value (0) to be the highest numerical
+	// value of the uint16, which is the lowest possible priority
+	priority = l7Rules.Priority - 1
+	otherPriority = other.Priority - 1
+
+	return priority < otherPriority
+}
+
+// mergeListenerReference merges listener reference from 'newL7Rules' to 'l7Rules', giving
+// precedence to listener with the lowest priority, if any.
+func (l7Rules *PerSelectorPolicy) mergeListenerReference(newL7Rules *PerSelectorPolicy) error {
+	// Nothing to do if 'newL7Rules' has no listener reference
+	if newL7Rules.Listener == "" {
+		return nil
+	}
+
+	// Nothing to do if the listeners are already the same and have the same priority
+	if newL7Rules.Listener == l7Rules.Listener && l7Rules.Priority == newL7Rules.Priority {
+		return nil
+	}
+
+	// Nothing to do if 'l7Rules' takes precedence
+	if l7Rules.takesListenerPrecedenceOver(newL7Rules) {
+		return nil
+	}
+
+	// override if 'l7Rules' has no listener or 'newL7Rules' takes precedence
+	if l7Rules.Listener == "" || newL7Rules.takesListenerPrecedenceOver(l7Rules) {
+		l7Rules.Listener = newL7Rules.Listener
+		l7Rules.Priority = newL7Rules.Priority
+		return nil
+	}
+
+	// otherwise error on conflict
+	return fmt.Errorf("cannot merge conflicting CiliumEnvoyConfig Listeners (%v/%v) with the same priority (%d)", newL7Rules.Listener, l7Rules.Listener, l7Rules.Priority)
+}
+
 func mergePortProto(ctx *SearchContext, existingFilter, filterToMerge *L4Filter, selectorCache *SelectorCache) (err error) {
 	// Merge the L7-related data from the filter to merge
 	// with the L7-related data already in the existing filter.
@@ -104,15 +148,6 @@ func mergePortProto(ctx *SearchContext, existingFilter, filterToMerge *L4Filter,
 	if err != nil {
 		ctx.PolicyTrace("   Merge conflict: mismatching parsers %s/%s\n", filterToMerge.L7Parser, existingFilter.L7Parser)
 		return err
-	}
-
-	if existingFilter.Listener == "" || filterToMerge.Listener == "" {
-		if filterToMerge.Listener != "" {
-			existingFilter.Listener = filterToMerge.Listener
-		}
-	} else if filterToMerge.Listener != existingFilter.Listener {
-		ctx.PolicyTrace("   Merge conflict: mismatching CiliumEnvoyConfig listeners %v/%v\n", filterToMerge.Listener, existingFilter.Listener)
-		return fmt.Errorf("cannot merge conflicting CiliumEnvoyConfig Listeners (%v/%v)", filterToMerge.Listener, existingFilter.Listener)
 	}
 
 	for cs, newL7Rules := range filterToMerge.PerSelectorPolicies {
@@ -160,13 +195,19 @@ func mergePortProto(ctx *SearchContext, existingFilter, filterToMerge *L4Filter,
 			// Merge isRedirect flag
 			l7Rules.isRedirect = l7Rules.isRedirect || newL7Rules.isRedirect
 
-			if l7Rules.Auth == nil || newL7Rules.Auth == nil {
-				if newL7Rules.Auth != nil {
-					l7Rules.Auth = newL7Rules.Auth
+			// Merge listener reference
+			if err := l7Rules.mergeListenerReference(newL7Rules); err != nil {
+				ctx.PolicyTrace("   Merge conflict: %s\n", err.Error())
+				return err
+			}
+
+			if l7Rules.Authentication == nil || newL7Rules.Authentication == nil {
+				if newL7Rules.Authentication != nil {
+					l7Rules.Authentication = newL7Rules.Authentication
 				}
-			} else if !newL7Rules.Auth.DeepEqual(l7Rules.Auth) {
-				ctx.PolicyTrace("   Merge conflict: mismatching auth types %s/%s\n", newL7Rules.Auth.Type, l7Rules.Auth.Type)
-				return fmt.Errorf("cannot merge conflicting authentication types (%s/%s)", newL7Rules.Auth.Type, l7Rules.Auth.Type)
+			} else if !newL7Rules.Authentication.DeepEqual(l7Rules.Authentication) {
+				ctx.PolicyTrace("   Merge conflict: mismatching auth types %s/%s\n", newL7Rules.Authentication.Mode, l7Rules.Authentication.Mode)
+				return fmt.Errorf("cannot merge conflicting authentication types (%s/%s)", newL7Rules.Authentication.Mode, l7Rules.Authentication.Mode)
 			}
 
 			if l7Rules.TerminatingTLS == nil || newL7Rules.TerminatingTLS == nil {
@@ -286,7 +327,7 @@ func mergePortProto(ctx *SearchContext, existingFilter, filterToMerge *L4Filter,
 // wildcards via 'hostWildcardL7'. That is to say, traffic will be
 // forwarded to the proxy for endpoints matching those labels, but the proxy
 // will allow all such traffic.
-func mergeIngressPortProto(policyCtx PolicyContext, ctx *SearchContext, endpoints api.EndpointSelectorSlice, auth *api.Auth, hostWildcardL7 []string,
+func mergeIngressPortProto(policyCtx PolicyContext, ctx *SearchContext, endpoints api.EndpointSelectorSlice, auth *api.Authentication, hostWildcardL7 []string,
 	r api.Ports, p api.PortProtocol, proto api.L4Proto, ruleLabels labels.LabelArray, resMap L4PolicyMap) (int, error) {
 	// Create a new L4Filter
 	filterToMerge, err := createL4IngressFilter(policyCtx, endpoints, auth, hostWildcardL7, r, p, proto, ruleLabels)
@@ -344,7 +385,7 @@ func rulePortsCoverSearchContext(ports []api.PortProtocol, ctx *SearchContext) b
 			if dp.Name != "" {
 				tracePort.Port = dp.Name
 			} else {
-				tracePort.Port = fmt.Sprintf("%d", dp.Port)
+				tracePort.Port = strconv.FormatUint(uint64(dp.Port), 10)
 			}
 			if p.Covers(tracePort) {
 				return true
@@ -354,8 +395,13 @@ func rulePortsCoverSearchContext(ports []api.PortProtocol, ctx *SearchContext) b
 	return false
 }
 
-func mergeIngress(policyCtx PolicyContext, ctx *SearchContext, fromEndpoints api.EndpointSelectorSlice, auth *api.Auth, toPorts, icmp api.PortsIterator, ruleLabels labels.LabelArray, resMap L4PolicyMap) (int, error) {
+func mergeIngress(policyCtx PolicyContext, ctx *SearchContext, fromEndpoints api.EndpointSelectorSlice, auth *api.Authentication, toPorts, icmp api.PortsIterator, ruleLabels labels.LabelArray, resMap L4PolicyMap) (int, error) {
 	found := 0
+
+	// short-circuit if no endpoint is selected
+	if fromEndpoints == nil {
+		return found, nil
+	}
 
 	if ctx.From != nil && len(fromEndpoints) > 0 {
 		if ctx.TraceEnabled() {
@@ -431,13 +477,7 @@ func mergeIngress(policyCtx PolicyContext, ctx *SearchContext, fromEndpoints api
 		}
 
 		for _, p := range r.GetPortProtocols() {
-			if p.Protocol != api.ProtoAny {
-				cnt, err := mergeIngressPortProto(policyCtx, ctx, fromEndpoints, auth, hostWildcardL7, r, p, p.Protocol, ruleLabels, resMap)
-				if err != nil {
-					return err
-				}
-				found += cnt
-			} else {
+			if p.Protocol.IsAny() {
 				cnt, err := mergeIngressPortProto(policyCtx, ctx, fromEndpoints, auth, hostWildcardL7, r, p, api.ProtoTCP, ruleLabels, resMap)
 				if err != nil {
 					return err
@@ -455,6 +495,12 @@ func mergeIngress(policyCtx PolicyContext, ctx *SearchContext, fromEndpoints api
 					return err
 				}
 				found += cnt
+			} else {
+				cnt, err := mergeIngressPortProto(policyCtx, ctx, fromEndpoints, auth, hostWildcardL7, r, p, p.Protocol, ruleLabels, resMap)
+				if err != nil {
+					return err
+				}
+				found += cnt
 			}
 		}
 		return nil
@@ -467,6 +513,7 @@ func mergeIngress(policyCtx PolicyContext, ctx *SearchContext, fromEndpoints api
 		if len(fromEndpoints) == 0 {
 			fromEndpoints = api.EndpointSelectorSlice{api.WildcardEndpointSelector}
 		}
+
 		if !policyCtx.IsDeny() {
 			ctx.PolicyTrace("      Allows ICMP type %v\n", r.GetPortProtocols())
 		} else {
@@ -529,7 +576,7 @@ func (r *rule) resolveIngressPolicy(
 	}
 	for _, ingressRule := range r.Ingress {
 		fromEndpoints := ingressRule.GetSourceEndpointSelectorsWithRequirements(requirements)
-		cnt, err := mergeIngress(policyCtx, ctx, fromEndpoints, ingressRule.Auth, ingressRule.ToPorts, ingressRule.ICMPs, r.Rule.Labels.DeepCopy(), result)
+		cnt, err := mergeIngress(policyCtx, ctx, fromEndpoints, ingressRule.Authentication, ingressRule.ToPorts, ingressRule.ICMPs, r.Rule.Labels.DeepCopy(), result)
 		if err != nil {
 			return nil, err
 		}
@@ -592,8 +639,13 @@ func (r *rule) matches(securityIdentity *identity.Identity) bool {
 
 // ****************** EGRESS POLICY ******************
 
-func mergeEgress(policyCtx PolicyContext, ctx *SearchContext, toEndpoints api.EndpointSelectorSlice, auth *api.Auth, toPorts, icmp api.PortsIterator, ruleLabels labels.LabelArray, resMap L4PolicyMap, fqdns api.FQDNSelectorSlice) (int, error) {
+func mergeEgress(policyCtx PolicyContext, ctx *SearchContext, toEndpoints api.EndpointSelectorSlice, auth *api.Authentication, toPorts, icmp api.PortsIterator, ruleLabels labels.LabelArray, resMap L4PolicyMap, fqdns api.FQDNSelectorSlice) (int, error) {
 	found := 0
+
+	// short-circuit if no endpoint is selected
+	if toEndpoints == nil {
+		return found, nil
+	}
 
 	if ctx.To != nil && len(toEndpoints) > 0 {
 		if ctx.TraceEnabled() {
@@ -650,13 +702,7 @@ func mergeEgress(policyCtx PolicyContext, ctx *SearchContext, toEndpoints api.En
 		}
 
 		for _, p := range r.GetPortProtocols() {
-			if p.Protocol != api.ProtoAny {
-				cnt, err := mergeEgressPortProto(policyCtx, ctx, toEndpoints, auth, r, p, p.Protocol, ruleLabels, resMap, fqdns)
-				if err != nil {
-					return err
-				}
-				found += cnt
-			} else {
+			if p.Protocol.IsAny() {
 				cnt, err := mergeEgressPortProto(policyCtx, ctx, toEndpoints, auth, r, p, api.ProtoTCP, ruleLabels, resMap, fqdns)
 				if err != nil {
 					return err
@@ -670,6 +716,12 @@ func mergeEgress(policyCtx PolicyContext, ctx *SearchContext, toEndpoints api.En
 				found += cnt
 
 				cnt, err = mergeEgressPortProto(policyCtx, ctx, toEndpoints, auth, r, p, api.ProtoSCTP, ruleLabels, resMap, fqdns)
+				if err != nil {
+					return err
+				}
+				found += cnt
+			} else {
+				cnt, err := mergeEgressPortProto(policyCtx, ctx, toEndpoints, auth, r, p, p.Protocol, ruleLabels, resMap, fqdns)
 				if err != nil {
 					return err
 				}
@@ -711,7 +763,7 @@ func mergeEgress(policyCtx PolicyContext, ctx *SearchContext, toEndpoints api.En
 // port and protocol with the contents of the provided PortRule. If the rule
 // being merged has conflicting L7 rules with those already in the provided
 // L4PolicyMap for the specified port-protocol tuple, it returns an error.
-func mergeEgressPortProto(policyCtx PolicyContext, ctx *SearchContext, endpoints api.EndpointSelectorSlice, auth *api.Auth, r api.Ports, p api.PortProtocol,
+func mergeEgressPortProto(policyCtx PolicyContext, ctx *SearchContext, endpoints api.EndpointSelectorSlice, auth *api.Authentication, r api.Ports, p api.PortProtocol,
 	proto api.L4Proto, ruleLabels labels.LabelArray, resMap L4PolicyMap, fqdns api.FQDNSelectorSlice) (int, error) {
 	// Create a new L4Filter
 	filterToMerge, err := createL4EgressFilter(policyCtx, endpoints, auth, r, p, proto, ruleLabels, fqdns)
@@ -750,7 +802,7 @@ func (r *rule) resolveEgressPolicy(
 	}
 	for _, egressRule := range r.Egress {
 		toEndpoints := egressRule.GetDestinationEndpointSelectorsWithRequirements(requirements)
-		cnt, err := mergeEgress(policyCtx, ctx, toEndpoints, egressRule.Auth, egressRule.ToPorts, egressRule.ICMPs, r.Rule.Labels.DeepCopy(), result, egressRule.ToFQDNs)
+		cnt, err := mergeEgress(policyCtx, ctx, toEndpoints, egressRule.Authentication, egressRule.ToPorts, egressRule.ICMPs, r.Rule.Labels.DeepCopy(), result, egressRule.ToFQDNs)
 		if err != nil {
 			return nil, err
 		}

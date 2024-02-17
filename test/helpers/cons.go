@@ -12,6 +12,7 @@ import (
 	k8sConst "github.com/cilium/cilium/pkg/k8s/apis/cilium.io"
 	"github.com/cilium/cilium/pkg/versioncheck"
 	ginkgoext "github.com/cilium/cilium/test/ginkgo-ext"
+	"github.com/cilium/cilium/test/helpers/logutils"
 )
 
 var (
@@ -175,9 +176,9 @@ const (
 
 	// CiliumStableHelmChartVersion should be the chart version that points
 	// to the v1.X branch
-	CiliumStableHelmChartVersion = "1.13"
+	CiliumStableHelmChartVersion = "1.15"
 	CiliumStableVersion          = "v" + CiliumStableHelmChartVersion
-	CiliumLatestHelmChartVersion = "1.13.90"
+	CiliumLatestHelmChartVersion = "1.16.0-dev"
 
 	MonitorLogFileName = "monitor.log"
 
@@ -219,7 +220,6 @@ const (
 	NACKreceived        = "NACK received for version"                                // from https://github.com/cilium/cilium/issues/4003
 	RunInitFailed       = "JoinEP: "                                                 // from https://github.com/cilium/cilium/pull/5052
 	sizeMismatch        = "size mismatch for BPF map"                                // from https://github.com/cilium/cilium/issues/7851
-	emptyBPFInitArg     = "empty argument passed to bpf/init.sh"                     // from https://github.com/cilium/cilium/issues/10228
 	RemovingMapMsg      = "Removing map to allow for property upgrade"               // from https://github.com/cilium/cilium/pull/10626
 	logBufferMessage    = "Log buffer too small to dump verifier log"                // from https://github.com/cilium/cilium/issues/10517
 	ClangErrorsMsg      = " errors generated."                                       // from https://github.com/cilium/cilium/issues/10857
@@ -244,7 +244,32 @@ const (
 	failedToUpdateLock         = "Failed to update lock:"
 	failedToReleaseLock        = "Failed to release lock:"
 	errorCreatingInitialLeader = "error initially creating leader election record:"
-
+	cantEnableJIT              = "bpf_jit_enable: no such file or directory"                             // Because we run tests in Kind.
+	delMissingService          = "Deleting no longer present service"                                    // cf. https://github.com/cilium/cilium/issues/29679
+	failedIpcacheRestore       = "Failed to restore existing identities from the previous ipcache"       // cf. https://github.com/cilium/cilium/issues/29328
+	podCIDRUnavailable         = " PodCIDR not available"                                                // cf. https://github.com/cilium/cilium/issues/29680
+	unableGetNode              = "Unable to get node resource"                                           // cf. https://github.com/cilium/cilium/issues/29710
+	disableSocketLBTracing     = "Disabling socket-LB tracing"                                           // cf. https://github.com/cilium/cilium/issues/29734
+	sessionAffinitySocketLB    = "Session affinity for host reachable services needs kernel"             // cf. https://github.com/cilium/cilium/issues/29736
+	objectHasBeenModified      = "the object has been modified; please apply your changes"               // cf. https://github.com/cilium/cilium/issues/29712
+	noBackendResponse          = "The kernel does not support --service-no-backend-response=reject"      // cf. https://github.com/cilium/cilium/issues/29733
+	unsupportedSocketLookup    = "Without socket lookup kernel functionality"                            // cf. https://github.com/cilium/cilium/issues/29735
+	legacyBGPFeature           = "You are using the legacy BGP feature"                                  // Expected when testing the legacy BGP feature.
+	etcdTimeout                = "etcd client timeout exceeded"                                          // cf. https://github.com/cilium/cilium/issues/29714
+	endpointRestoreFailed      = "Unable to restore endpoint, ignoring"                                  // cf. https://github.com/cilium/cilium/issues/29716
+	failedPeerSync             = "Failed to create peer client for peers synchronization"                // cf. https://github.com/cilium/cilium/issues/29726
+	unableRestoreRouterIP      = "Unable to restore router IP from filesystem"                           // cf. https://github.com/cilium/cilium/issues/29715
+	routerIPReallocated        = "Router IP could not be re-allocated"                                   // cf. https://github.com/cilium/cilium/issues/29715
+	cantFindIdentityInCache    = "unable to release identity: unable to find key in local cache"         // cf. https://github.com/cilium/cilium/issues/29732
+	kubeApiserverConnLost1     = ":6443/version\\\": http2: client connection lost"                      // cf. https://github.com/cilium/cilium/issues/29737
+	kubeApiserverConnLost2     = ":6443/healthz\\\": http2: client connection lost"                      // cf. https://github.com/cilium/cilium/issues/29737
+	heartbeatTimedOut          = "Heartbeat timed out, restarting client connections"                    // cf. https://github.com/cilium/cilium/issues/29737
+	keyAllocFailedFoundMaster  = "Found master key after proceeding with new allocation"                 // cf. https://github.com/cilium/cilium/issues/29738
+	cantRecreateMasterKey      = "unable to re-create missing master key"                                // cf. https://github.com/cilium/cilium/issues/29738
+	cantUpdateCRDIdentity      = "Unable update CRD identity information with a reference for this node" // cf. https://github.com/cilium/cilium/issues/29739
+	cantDeleteFromPolicyMap    = "cilium_call_policy: delete: key does not exist"                        // cf. https://github.com/cilium/cilium/issues/29754
+	deprecatedEnvoyRuntimeKey  = "Usage of the deprecated runtime key overload.global_downstream_max_connections"
+	noConnLimitEnvoy           = "There is no configured limit to the number of allowed active downstream connections"
 	// HelmTemplate is the location of the Helm templates to install Cilium
 	HelmTemplate = "../install/kubernetes/cilium"
 
@@ -279,6 +304,8 @@ var (
 	IsCiliumV1_12 = versioncheck.MustCompile(">=1.11.90 <1.13.0")
 	IsCiliumV1_13 = versioncheck.MustCompile(">=1.12.90 <1.14.0")
 	IsCiliumV1_14 = versioncheck.MustCompile(">=1.13.90 <1.15.0")
+	IsCiliumV1_15 = versioncheck.MustCompile(">=1.14.90 <1.16.0")
+	IsCiliumV1_16 = versioncheck.MustCompile(">=1.15.90 <1.17.0")
 )
 
 // badLogMessages is a map which key is a part of a log message which indicates
@@ -290,7 +317,6 @@ var badLogMessages = map[string][]string{
 	NACKreceived:        nil,
 	RunInitFailed:       {"signal: terminated", "signal: killed"},
 	sizeMismatch:        {"globals/cilium_policy"},
-	emptyBPFInitArg:     nil,
 	RemovingMapMsg:      nil,
 	logBufferMessage:    nil,
 	ClangErrorsMsg:      nil,
@@ -306,7 +332,17 @@ var badLogMessages = map[string][]string{
 	"DATA RACE":         nil,
 	// Exceptions for level=error should only be added as a last resort, if the
 	// error cannot be fixed in Cilium or in the test.
-	"level=error": {opCantBeFulfilled, initLeaderElection, globalDataSupport, removeInexistentID, failedToListCRDs, retrieveResLock, failedToRelLockEmptyName, failedToUpdateLock, failedToReleaseLock, errorCreatingInitialLeader},
+	logutils.ErrorLogs: {opCantBeFulfilled, initLeaderElection, globalDataSupport,
+		removeInexistentID, failedToListCRDs, retrieveResLock, failedToRelLockEmptyName,
+		failedToUpdateLock, failedToReleaseLock, errorCreatingInitialLeader},
+	logutils.WarningLogs: {cantEnableJIT, delMissingService, failedIpcacheRestore,
+		podCIDRUnavailable, unableGetNode,
+		disableSocketLBTracing, sessionAffinitySocketLB, objectHasBeenModified, noBackendResponse,
+		unsupportedSocketLookup, legacyBGPFeature, etcdTimeout, endpointRestoreFailed,
+		failedPeerSync, unableRestoreRouterIP, routerIPReallocated,
+		cantFindIdentityInCache, kubeApiserverConnLost1, kubeApiserverConnLost2, heartbeatTimedOut,
+		keyAllocFailedFoundMaster, cantRecreateMasterKey, cantUpdateCRDIdentity,
+		cantDeleteFromPolicyMap, deprecatedEnvoyRuntimeKey, noConnLimitEnvoy},
 }
 
 var ciliumCLICommands = map[string]string{

@@ -8,23 +8,34 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/cilium/cilium/pkg/k8s/apis/cilium.io/client"
+	cilium_v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
+	"github.com/cilium/cilium/pkg/labels"
+	"github.com/cilium/cilium/pkg/logging/logfields"
+
 	"github.com/sirupsen/logrus"
 	apiextensionsinternal "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apiextensions-apiserver/pkg/apiserver/validation"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/kube-openapi/pkg/validation/validate"
+)
 
-	"github.com/cilium/cilium/pkg/k8s/apis/cilium.io/client"
-	cilium_v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
-	"github.com/cilium/cilium/pkg/logging/logfields"
-	"github.com/cilium/cilium/pkg/policy/api"
+var (
+	// We can remove the check for this warning once 1.15 is the oldest supported Cilium version.
+	logInitPolicyCNP = "It seems you have a CiliumNetworkPolicy with a " +
+		"match on the 'reserved:init' labels. This label is not " +
+		"supported in CiliumNetworkPolicy any more. If you wish to " +
+		"define a policy for endpoints before they receive a full " +
+		"security identity, change the resource type for the policy " +
+		"to CiliumClusterwideNetworkPolicy."
+	errInitPolicyCNP = fmt.Errorf("CiliumNetworkPolicy incorrectly matches reserved:init label")
+	logOnce          sync.Once
 )
 
 // NPValidator is a validator structure used to validate CNP and CCNP.
 type NPValidator struct {
-	cnpValidator  *validate.SchemaValidator
-	ccnpValidator *validate.SchemaValidator
+	cnpValidator  validation.SchemaCreateValidator
+	ccnpValidator validation.SchemaCreateValidator
 }
 
 func NewNPValidator() (*NPValidator, error) {
@@ -52,7 +63,7 @@ func NewNPValidator() (*NPValidator, error) {
 	if err != nil {
 		return nil, err
 	}
-	cnpValidator, _, err := validation.NewSchemaValidator(&cnpInternal)
+	cnpValidator, _, err := validation.NewSchemaValidator(cnpInternal.OpenAPIV3Schema)
 	if err != nil {
 		return nil, err
 	}
@@ -81,7 +92,7 @@ func NewNPValidator() (*NPValidator, error) {
 	if err != nil {
 		return nil, err
 	}
-	ccnpValidator, _, err := validation.NewSchemaValidator(&ccnpInternal)
+	ccnpValidator, _, err := validation.NewSchemaValidator(ccnpInternal.OpenAPIV3Schema)
 	if err != nil {
 		return nil, err
 	}
@@ -102,21 +113,12 @@ func (n *NPValidator) ValidateCNP(cnp *unstructured.Unstructured) error {
 		return err
 	}
 
+	if err := checkInitLabelsPolicy(cnp); err != nil {
+		return err
+	}
+
 	return nil
 }
-
-var (
-	// We can remove the check for this warning once 1.9 is the oldest supported Cilium version.
-	errWildcardToFromEndpointMessage = "It seems you have a CiliumClusterwideNetworkPolicy " +
-		"with a wildcard to/from endpoint selector. The behavior of this selector has been " +
-		"changed. The selector now only allows traffic to/from Cilium managed K8s endpoints, " +
-		"instead of acting as a truly empty endpoint selector allowing all traffic. To " +
-		"ensure that the policy behavior does not affect your workloads, consider adding " +
-		"another policy that allows traffic to/from world and cluster entities. For a more " +
-		"detailed discussion on the topic, see https://github.com/cilium/cilium/issues/12844"
-
-	logOnce sync.Once
-)
 
 // ValidateCCNP validates the given CCNP accordingly the CCNP validation schema.
 func (n *NPValidator) ValidateCCNP(ccnp *unstructured.Unstructured) error {
@@ -128,86 +130,35 @@ func (n *NPValidator) ValidateCCNP(ccnp *unstructured.Unstructured) error {
 		return err
 	}
 
-	if err := checkWildCardToFromEndpoint(ccnp); err != nil {
-		return err
-	}
-
 	return nil
 }
 
-func checkWildCardToFromEndpoint(ccnp *unstructured.Unstructured) error {
-	logger := log.WithFields(logrus.Fields{
-		logfields.CiliumClusterwideNetworkPolicyName: ccnp.GetName(),
-	})
-
-	// At this point we have validated the custom resource with the new CRV.
-	// We can try converting it to the new CCNP type.
-	// This should not fail, so we are not returning any errors, just logging
-	// a warning.
-	ccnpBytes, err := ccnp.MarshalJSON()
+func checkInitLabelsPolicy(cnp *unstructured.Unstructured) error {
+	cnpBytes, err := cnp.MarshalJSON()
 	if err != nil {
 		return err
 	}
 
-	resCCNP := cilium_v2.CiliumClusterwideNetworkPolicy{}
-	err = json.Unmarshal(ccnpBytes, &resCCNP)
+	resCNP := cilium_v2.CiliumNetworkPolicy{}
+	err = json.Unmarshal(cnpBytes, &resCNP)
 	if err != nil {
 		return err
 	}
 
-	// Print the warninig only once per CCNP.
-	if resCCNP.Spec != nil {
-		if containsWildcardToFromEndpoint(resCCNP.Spec) {
+	for _, spec := range append(resCNP.Specs, resCNP.Spec) {
+		if spec == nil {
+			continue
+		}
+		podInitLbl := labels.LabelSourceReservedKeyPrefix + labels.IDNameInit
+		if spec.EndpointSelector.HasKey(podInitLbl) {
 			logOnce.Do(func() {
-				logger.Error(errWildcardToFromEndpointMessage)
+				log.WithFields(logrus.Fields{
+					logfields.CiliumNetworkPolicyName: cnp.GetName(),
+				}).Error(logInitPolicyCNP)
 			})
-			return fmt.Errorf("use of empty toEndpoints/fromEndpoints selector")
-		}
-	}
-
-	if resCCNP.Specs != nil {
-		for _, rule := range resCCNP.Specs {
-			if containsWildcardToFromEndpoint(rule) {
-				logOnce.Do(func() {
-					logger.Error(errWildcardToFromEndpointMessage)
-				})
-				return fmt.Errorf("use of empty toEndpoints/fromEndpoints selector")
-			}
+			return errInitPolicyCNP
 		}
 	}
 
 	return nil
-}
-
-// containsWildcardToFromEndpoint returns true if a CCNP contains an empty endpoint selector
-// in ingress/egress rules.
-// For more information - https://github.com/cilium/cilium/issues/12844#issuecomment-672074170
-func containsWildcardToFromEndpoint(rule *api.Rule) bool {
-	if len(rule.Ingress) > 0 {
-		for _, r := range rule.Ingress {
-			// We only check for the presence of wildcard to/fromEndpoints
-			// in the network policy spec.
-			if len(r.FromEndpoints) > 0 {
-				for _, epSel := range r.FromEndpoints {
-					if epSel.IsWildcard() {
-						return true
-					}
-				}
-			}
-		}
-	}
-
-	if len(rule.Egress) > 0 {
-		for _, r := range rule.Egress {
-			if len(r.ToEndpoints) > 0 {
-				for _, epSel := range r.ToEndpoints {
-					if epSel.IsWildcard() {
-						return true
-					}
-				}
-			}
-		}
-	}
-
-	return false
 }

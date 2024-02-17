@@ -70,25 +70,13 @@ Your cluster must be configured with support for external workloads
 enabled. This can be done with the cilium CLI tool by issuing ``cilium
 clustermesh enable`` after ``cilium install``:
 
-.. code-block:: shell-session
+.. parsed-literal::
 
-    cilium install --config tunnel-protocol=vxlan
-    cilium clustermesh enable
+    cilium install |CHART_VERSION| --set routingMode=tunnel
+    cilium clustermesh enable --service-type LoadBalancer --enable-external-workloads
 
-Config option ``tunnel-protocol=vxlan`` overrides any default that could
-otherwise be auto-detected for your k8s cluster. This is currently a
-requirement for external workload support.
-
-.. note::
-
-    If this fails indicating that ``--service-type`` needs to be
-    given, add ``--service-type NodePort`` to the second command
-    above, i.e. ``cilium clustermesh enable --service-type
-    NodePort``. This will allow you to go through this guide, but be
-    warned that NodePort service type makes your installation very
-    fragile, it will become non-functional if the node through which
-    the service is accessed is removed from the cluster or if it
-    otherwise becomes unreachable.
+The ``routingMode=tunnel`` Helm value configures Cilium in tunneling mode.
+This is currently a requirement for external workload support.
 
 This will add a deployment for ``clustermesh-apiserver`` into your
 cluster, as well as the related cluster resources, such as TLS
@@ -178,9 +166,9 @@ external workload. Then run the installation script:
     ./install-external-workload.sh
 
 This command launches the Cilium agent in a docker container named
-``cilium`` and copies the ``cilium`` node CLI to your host. This needs
+``cilium`` and copies the ``cilium-dbg`` node CLI to your host. This needs
 ``sudo`` permissions, so you may be asked for a password. Note that
-this ``cilium`` command is not the same as the ``cilium`` CLI used to
+this ``cilium-dbg`` command is not the same as the ``cilium`` CLI used to
 manage Cilium installation on a k8s cluster.
 
 This command waits until the node has been connected to the cluster
@@ -201,7 +189,7 @@ Next you can check the status of the Cilium agent in your external workload:
 
 .. code-block:: shell-session
 
-    cilium status
+    sudo cilium-dbg status
 
 You should see something like:
 
@@ -239,7 +227,7 @@ From the external workload, ping the backend IP of ``clustermesh-apiserver`` ser
 
 .. code-block:: shell-session
 
-    ping $(cilium service list get -o jsonpath='{[?(@.spec.flags.name=="clustermesh-apiserver")].spec.backend-addresses[0].ip}')
+    ping $(sudo cilium-dbg service list get -o jsonpath='{[?(@.spec.flags.name=="clustermesh-apiserver")].spec.backend-addresses[0].ip}')
 
 The ping should keep running also when the following CCNP is applied in your cluster:
 

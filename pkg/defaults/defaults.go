@@ -26,6 +26,9 @@ const (
 	// GopsPortApiserver is the default value for option.GopsPort in the apiserver
 	GopsPortApiserver = 9892
 
+	// GopsPortKVStoreMesh is the default value for option.GopsPort in kvstoremesh
+	GopsPortKVStoreMesh = 9894
+
 	// IPv6ClusterAllocCIDR is the default value for option.IPv6ClusterAllocCIDR
 	IPv6ClusterAllocCIDR = IPv6ClusterAllocCIDRBase + "/64"
 
@@ -83,6 +86,18 @@ const (
 	// HubbleRecorderSinkQueueSize is the queue size for each recorder sink
 	HubbleRecorderSinkQueueSize = 1024
 
+	// HubbleRedactEnabled controls if sensitive information will be redacted from L7 flows
+	HubbleRedactEnabled = false
+
+	// HubbleRedactHttpURLQuery controls if the URL query will be redacted from flows
+	HubbleRedactHttpURLQuery = false
+
+	// HubbleRedactHttpUserInfo controls if the user info will be redacted from flows
+	HubbleRedactHttpUserInfo = true
+
+	// HubbleRedactKafkaApiKey controls if the Kafka API key will be redacted from flows
+	HubbleRedactKafkaApiKey = false
+
 	// MonitorSockPath1_2 is the path to the UNIX domain socket used to
 	// distribute BPF and agent events to listeners.
 	// This is the 1.2 protocol version.
@@ -98,10 +113,6 @@ const (
 	// DeleteQueueLockfile is the file used to synchronize access of the queue directory between
 	// the agent and the CNI plugin processes
 	DeleteQueueLockfile = DeleteQueueDir + "/lockfile"
-
-	// EnableHostIPRestore controls whether the host IP should be restored
-	// from previous state automatically
-	EnableHostIPRestore = true
 
 	// BPFFSRoot is the default path where BPFFS should be mounted
 	BPFFSRoot = "/sys/fs/bpf"
@@ -155,6 +166,9 @@ const (
 	// endpoints that are larger than 512 Bytes or the EDNS0 option, if present.
 	ToFQDNsEnableDNSCompression = true
 
+	// DNSProxyEnableTransparentMode enables transparent mode for the DNS proxy.
+	DNSProxyEnableTransparentMode = false
+
 	// IdentityChangeGracePeriod is the default value for
 	// option.IdentityChangeGracePeriod
 	IdentityChangeGracePeriod = 5 * time.Second
@@ -165,6 +179,10 @@ const (
 
 	// ExecTimeout is a timeout for executing commands.
 	ExecTimeout = 300 * time.Second
+
+	// MaxInternalTimerDelay does not enforce a maximum on timer values in
+	// the agent by default.
+	MaxInternalTimerDelay = 0 * time.Second
 
 	// StatusCollectorInterval is the interval between a probe invocations
 	StatusCollectorInterval = 5 * time.Second
@@ -204,12 +222,6 @@ const (
 	// EnableHostLegacyRouting is the default value for using the old routing path via stack.
 	EnableHostLegacyRouting = false
 
-	// EnableExternalIPs is the default value for k8s service with externalIPs feature.
-	EnableExternalIPs = true
-
-	// K8sEnableEndpointSlice is the default value for k8s EndpointSlice feature.
-	K8sEnableEndpointSlice = true
-
 	// PreAllocateMaps is the default value for BPF map preallocation
 	PreAllocateMaps = true
 
@@ -219,6 +231,10 @@ const (
 	// IPsecKeyRotationDuration is the time to wait before removing old keys when
 	// the IPsec key is changing.
 	IPsecKeyRotationDuration = 5 * time.Minute
+
+	// Enable watcher for IPsec key. If disabled, a restart of the agent will
+	// be necessary on key rotations.
+	EnableIPsecKeyWatcher = true
 
 	// EncryptNode enables encrypting traffic from host networking applications
 	// which are not part of Cilium manged pods.
@@ -270,6 +286,10 @@ const (
 	// EnableHealthCheckNodePort
 	EnableHealthCheckNodePort = true
 
+	// EnableHealthCheckLoadBalancerIP is the default value for
+	// EnableHealthCheckLoadBalancerIP
+	EnableHealthCheckLoadBalancerIP = false
+
 	// AlignCheckerName is the BPF object name for the alignchecker.
 	AlignCheckerName = "bpf_alignchecker.o"
 
@@ -317,12 +337,6 @@ const (
 	// connection tracking garbage collection
 	ConntrackGCStartingInterval = 5 * time.Minute
 
-	// K8sEventHandover enables use of the kvstore to optimize Kubernetes
-	// event handling by listening for k8s events in the operator and
-	// mirroring it into the kvstore for reduced overhead in large
-	// clusters.
-	K8sEventHandover = false
-
 	// LoopbackIPv4 is the default address for service loopback
 	LoopbackIPv4 = "169.254.42.1"
 
@@ -366,6 +380,9 @@ const (
 	// CiliumNode.Spec.IPAM.PreAllocate if no value is set
 	IPAMPreAllocation = 8
 
+	// IPAMDefaultIPPool is the default value for the multi-pool default pool name.
+	IPAMDefaultIPPool = "default"
+
 	// ENIFirstInterfaceIndex is the default value for
 	// CiliumNode.Spec.ENI.FirstInterfaceIndex if no value is set.
 	ENIFirstInterfaceIndex = 0
@@ -405,16 +422,6 @@ const (
 
 	// IPAMAPIQPSLimit is the default QPS limit when rate limiting access to external APIs
 	IPAMAPIQPSLimit = 4.0
-
-	// IPAMPodCIDRAllocationThreshold is the default value for
-	// CiliumNode.Spec.IPAM.PodCIDRAllocationThreshold if no value is set
-	// Defaults to 8, which is similar to IPAMPreAllocation
-	IPAMPodCIDRAllocationThreshold = 8
-
-	// IPAMPodCIDRReleaseThreshold is the default value for
-	// CiliumNode.Spec.IPAM.PodCIDRReleaseThreshold if no value is set
-	// Defaults to 16, which is 2x the allocation threshold to avoid flapping
-	IPAMPodCIDRReleaseThreshold = 16
 
 	// AutoCreateCiliumNodeResource enables automatic creation of a
 	// CiliumNode resource for the local node
@@ -478,6 +485,11 @@ const (
 	// for local traffic
 	EnableIdentityMark = true
 
+	// EnableHighScaleIPcache enables the special ipcache mode for high scale
+	// clusters. The ipcache content will be reduced to the strict minimum and
+	// traffic will be encapsulated to carry security identities.
+	EnableHighScaleIPcache = false
+
 	// K8sEnableLeasesFallbackDiscovery enables k8s to fallback to API probing to check
 	// for the support of Leases in Kubernetes when there is an error in discovering
 	// API groups using Discovery API.
@@ -489,10 +501,10 @@ const (
 	// InstallNoConntrackRules instructs Cilium to install Iptables rules to skip netfilter connection tracking on all pod traffic.
 	InstallNoConntrackIptRules = false
 
-	// WireguardSubnetV4 is a default wireguard tunnel subnet
+	// WireguardSubnetV4 is a default WireGuard tunnel subnet
 	WireguardSubnetV4 = "172.16.43.0/24"
 
-	// WireguardSubnetV6 is a default wireguard tunnel subnet
+	// WireguardSubnetV6 is a default WireGuard tunnel subnet
 	WireguardSubnetV6 = "fdc9:281f:04d7:9ee9::1/64"
 
 	// ExternalClusterIP enables cluster external access to ClusterIP services.
@@ -508,10 +520,16 @@ const (
 	// TunnelProtocol is the default tunneling protocol
 	TunnelProtocol = "vxlan"
 
+	// ServiceNoBackendResponse is the default response for services without backends
+	ServiceNoBackendResponse = "reject"
+
+	// Use the CiliumInternalIPs (vs. NodeInternalIPs) for IPsec encapsulation.
+	UseCiliumInternalIPForIPsec = false
+
 	// TunnelPortVXLAN is the default VXLAN port
-	TunnelPortVXLAN = 8472
+	TunnelPortVXLAN uint16 = 8472
 	// TunnelPortGeneve is the default Geneve port
-	TunnelPortGeneve = 6081
+	TunnelPortGeneve uint16 = 6081
 
 	// ARPBaseReachableTime resembles the kernel's NEIGH_VAR_BASE_REACHABLE_TIME which defaults to 30 seconds.
 	ARPBaseReachableTime = 30 * time.Second
@@ -525,6 +543,16 @@ const (
 
 	// EnableK8sNetworkPolicy enables support for K8s NetworkPolicy.
 	EnableK8sNetworkPolicy = true
+
+	// MaxConnectedClusters sets the maximum number of clusters that can be
+	// connected in a clustermesh.
+	// The value is used to determine the bit allocation for cluster ID and
+	// identity in a numeric identity. Values > 255 will decrease the number of
+	// allocatable identities.
+	MaxConnectedClusters = 255
+
+	// EnableNodeSelectorLabels is the default value for option.EnableNodeSelectorLabels
+	EnableNodeSelectorLabels = false
 )
 
 var (
@@ -557,4 +585,6 @@ var (
 		"cilium_lb6_source_range":   "enabled,128,0",
 		"cilium_lb6_affinity_match": "enabled,128,0",
 	}
+
+	PolicyCIDRMatchMode = []string{}
 )

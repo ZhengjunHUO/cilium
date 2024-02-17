@@ -4,6 +4,7 @@ package ec2
 
 import (
 	"context"
+	"fmt"
 	awsmiddleware "github.com/aws/aws-sdk-go-v2/aws/middleware"
 	"github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
@@ -30,20 +31,20 @@ func (c *Client) DisableAwsNetworkPerformanceMetricSubscription(ctx context.Cont
 type DisableAwsNetworkPerformanceMetricSubscriptionInput struct {
 
 	// The target Region or Availability Zone that the metric subscription is disabled
-	// for. For example, eu-north-1.
+	// for. For example, eu-north-1 .
 	Destination *string
 
 	// Checks whether you have the required permissions for the action, without
 	// actually making the request, and provides an error response. If you have the
-	// required permissions, the error response is DryRunOperation. Otherwise, it is
-	// UnauthorizedOperation.
+	// required permissions, the error response is DryRunOperation . Otherwise, it is
+	// UnauthorizedOperation .
 	DryRun *bool
 
 	// The metric used for the disabled subscription.
 	Metric types.MetricType
 
 	// The source Region or Availability Zone that the metric subscription is disabled
-	// for. For example, us-east-1.
+	// for. For example, us-east-1 .
 	Source *string
 
 	// The statistic used for the disabled subscription.
@@ -64,12 +65,22 @@ type DisableAwsNetworkPerformanceMetricSubscriptionOutput struct {
 }
 
 func (c *Client) addOperationDisableAwsNetworkPerformanceMetricSubscriptionMiddlewares(stack *middleware.Stack, options Options) (err error) {
+	if err := stack.Serialize.Add(&setOperationInputMiddleware{}, middleware.After); err != nil {
+		return err
+	}
 	err = stack.Serialize.Add(&awsEc2query_serializeOpDisableAwsNetworkPerformanceMetricSubscription{}, middleware.After)
 	if err != nil {
 		return err
 	}
 	err = stack.Deserialize.Add(&awsEc2query_deserializeOpDisableAwsNetworkPerformanceMetricSubscription{}, middleware.After)
 	if err != nil {
+		return err
+	}
+	if err := addProtocolFinalizerMiddlewares(stack, options, "DisableAwsNetworkPerformanceMetricSubscription"); err != nil {
+		return fmt.Errorf("add protocol finalizers: %v", err)
+	}
+
+	if err = addlegacyEndpointContextSetter(stack, options); err != nil {
 		return err
 	}
 	if err = addSetLoggerMiddleware(stack, options); err != nil {
@@ -90,16 +101,13 @@ func (c *Client) addOperationDisableAwsNetworkPerformanceMetricSubscriptionMiddl
 	if err = addRetryMiddlewares(stack, options); err != nil {
 		return err
 	}
-	if err = addHTTPSignerV4Middleware(stack, options); err != nil {
-		return err
-	}
 	if err = awsmiddleware.AddRawResponseToMetadata(stack); err != nil {
 		return err
 	}
 	if err = awsmiddleware.AddRecordResponseTiming(stack); err != nil {
 		return err
 	}
-	if err = addClientUserAgent(stack); err != nil {
+	if err = addClientUserAgent(stack, options); err != nil {
 		return err
 	}
 	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
@@ -108,7 +116,13 @@ func (c *Client) addOperationDisableAwsNetworkPerformanceMetricSubscriptionMiddl
 	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
 		return err
 	}
+	if err = addSetLegacyContextSigningOptionsMiddleware(stack); err != nil {
+		return err
+	}
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opDisableAwsNetworkPerformanceMetricSubscription(options.Region), middleware.Before); err != nil {
+		return err
+	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
@@ -120,6 +134,9 @@ func (c *Client) addOperationDisableAwsNetworkPerformanceMetricSubscriptionMiddl
 	if err = addRequestResponseLogging(stack, options); err != nil {
 		return err
 	}
+	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -127,7 +144,6 @@ func newServiceMetadataMiddleware_opDisableAwsNetworkPerformanceMetricSubscripti
 	return &awsmiddleware.RegisterServiceMetadata{
 		Region:        region,
 		ServiceID:     ServiceID,
-		SigningName:   "ec2",
 		OperationName: "DisableAwsNetworkPerformanceMetricSubscription",
 	}
 }

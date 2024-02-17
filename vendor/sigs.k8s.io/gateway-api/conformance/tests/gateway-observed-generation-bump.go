@@ -23,8 +23,9 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"sigs.k8s.io/gateway-api/apis/v1beta1"
+	v1 "sigs.k8s.io/gateway-api/apis/v1"
 	"sigs.k8s.io/gateway-api/conformance/utils/kubernetes"
 	"sigs.k8s.io/gateway-api/conformance/utils/suite"
 )
@@ -35,52 +36,54 @@ func init() {
 
 var GatewayObservedGenerationBump = suite.ConformanceTest{
 	ShortName:   "GatewayObservedGenerationBump",
-	Description: "A Gateway in the gateway-conformance-infra namespace should update the observedGeneration in all of it's Status.Conditions after an update to the spec",
-	Manifests:   []string{"tests/gateway-observed-generation-bump.yaml"},
+	Description: "A Gateway in the gateway-conformance-infra namespace should update the observedGeneration in all of its Status.Conditions after an update to the spec",
+	Features: []suite.SupportedFeature{
+		suite.SupportGateway,
+		suite.SupportGatewayPort8080,
+	},
+	Manifests: []string{"tests/gateway-observed-generation-bump.yaml"},
 	Test: func(t *testing.T, s *suite.ConformanceTestSuite) {
-
 		gwNN := types.NamespacedName{Name: "gateway-observed-generation-bump", Namespace: "gateway-conformance-infra"}
 
 		t.Run("observedGeneration should increment", func(t *testing.T) {
+			namespaces := []string{"gateway-conformance-infra"}
+			kubernetes.NamespacesMustBeReady(t, s.Client, s.TimeoutConfig, namespaces)
+
+			// Sanity check
+			kubernetes.GatewayMustHaveLatestConditions(t, s.Client, s.TimeoutConfig, gwNN)
+
 			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 			defer cancel()
-
-			namespaces := []string{"gateway-conformance-infra"}
-			kubernetes.NamespacesMustBeAccepted(t, s.Client, s.TimeoutConfig, namespaces)
-
-			original := &v1beta1.Gateway{}
+			original := &v1.Gateway{}
 			err := s.Client.Get(ctx, gwNN, original)
 			require.NoErrorf(t, err, "error getting Gateway: %v", err)
 
-			// Sanity check
-			kubernetes.GatewayMustHaveLatestConditions(t, original)
-
-			all := v1beta1.NamespacesFromAll
+			all := v1.NamespacesFromAll
 
 			mutate := original.DeepCopy()
 
 			// mutate the Gateway Spec
-			mutate.Spec.Listeners = append(mutate.Spec.Listeners, v1beta1.Listener{
+			mutate.Spec.Listeners = append(mutate.Spec.Listeners, v1.Listener{
 				Name:     "alternate",
 				Port:     8080,
-				Protocol: v1beta1.HTTPProtocolType,
-				AllowedRoutes: &v1beta1.AllowedRoutes{
-					Namespaces: &v1beta1.RouteNamespaces{From: &all},
+				Protocol: v1.HTTPProtocolType,
+				AllowedRoutes: &v1.AllowedRoutes{
+					Namespaces: &v1.RouteNamespaces{From: &all},
 				},
 			})
 
-			err = s.Client.Update(ctx, mutate)
-			require.NoErrorf(t, err, "error updating the Gateway: %v", err)
+			err = s.Client.Patch(ctx, mutate, client.MergeFrom(original))
+			require.NoErrorf(t, err, "error patching the Gateway: %v", err)
 
 			// Ensure the generation and observedGeneration sync up
-			kubernetes.NamespacesMustBeAccepted(t, s.Client, s.TimeoutConfig, namespaces)
-
-			updated := &v1beta1.Gateway{}
-			err = s.Client.Get(ctx, gwNN, updated)
-			require.NoErrorf(t, err, "error getting Gateway: %v", err)
+			kubernetes.NamespacesMustBeReady(t, s.Client, s.TimeoutConfig, namespaces)
 
 			// Sanity check
-			kubernetes.GatewayMustHaveLatestConditions(t, updated)
+			kubernetes.GatewayMustHaveLatestConditions(t, s.Client, s.TimeoutConfig, gwNN)
+
+			updated := &v1.Gateway{}
+			err = s.Client.Get(ctx, gwNN, updated)
+			require.NoErrorf(t, err, "error getting Gateway: %v", err)
 
 			require.NotEqual(t, original.Generation, updated.Generation, "generation should change after an update")
 		})

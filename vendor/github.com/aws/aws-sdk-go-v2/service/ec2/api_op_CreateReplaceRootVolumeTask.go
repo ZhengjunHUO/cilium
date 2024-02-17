@@ -16,9 +16,8 @@ import (
 // that is restored to the original root volume's launch state, that is restored to
 // a specific snapshot taken from the original root volume, or that is restored
 // from an AMI that has the same key characteristics as that of the instance. For
-// more information, see Replace a root volume
-// (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/replace-root.html) in the
-// Amazon Elastic Compute Cloud User Guide.
+// more information, see Replace a root volume (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/replace-root.html)
+// in the Amazon Elastic Compute Cloud User Guide.
 func (c *Client) CreateReplaceRootVolumeTask(ctx context.Context, params *CreateReplaceRootVolumeTaskInput, optFns ...func(*Options)) (*CreateReplaceRootVolumeTaskOutput, error) {
 	if params == nil {
 		params = &CreateReplaceRootVolumeTaskInput{}
@@ -44,25 +43,25 @@ type CreateReplaceRootVolumeTaskInput struct {
 	// Unique, case-sensitive identifier you provide to ensure the idempotency of the
 	// request. If you do not specify a client token, a randomly generated token is
 	// used for the request to ensure idempotency. For more information, see Ensuring
-	// idempotency
-	// (https://docs.aws.amazon.com/AWSEC2/latest/APIReference/Run_Instance_Idempotency.html).
+	// idempotency (https://docs.aws.amazon.com/AWSEC2/latest/APIReference/Run_Instance_Idempotency.html)
+	// .
 	ClientToken *string
 
 	// Indicates whether to automatically delete the original root volume after the
 	// root volume replacement task completes. To delete the original root volume,
-	// specify true. If you choose to keep the original root volume after the
+	// specify true . If you choose to keep the original root volume after the
 	// replacement task completes, you must manually delete it when you no longer need
 	// it.
 	DeleteReplacedRootVolume *bool
 
 	// Checks whether you have the required permissions for the action, without
 	// actually making the request, and provides an error response. If you have the
-	// required permissions, the error response is DryRunOperation. Otherwise, it is
-	// UnauthorizedOperation.
+	// required permissions, the error response is DryRunOperation . Otherwise, it is
+	// UnauthorizedOperation .
 	DryRun *bool
 
-	// The ID of the AMI to use to restore the root volume. The specified AMI must have
-	// the same product code, billing information, architecture type, and
+	// The ID of the AMI to use to restore the root volume. The specified AMI must
+	// have the same product code, billing information, architecture type, and
 	// virtualization type as that of the instance. If you want to restore the
 	// replacement volume from a specific snapshot, or if you want to restore it to its
 	// launch state, omit this parameter.
@@ -93,12 +92,22 @@ type CreateReplaceRootVolumeTaskOutput struct {
 }
 
 func (c *Client) addOperationCreateReplaceRootVolumeTaskMiddlewares(stack *middleware.Stack, options Options) (err error) {
+	if err := stack.Serialize.Add(&setOperationInputMiddleware{}, middleware.After); err != nil {
+		return err
+	}
 	err = stack.Serialize.Add(&awsEc2query_serializeOpCreateReplaceRootVolumeTask{}, middleware.After)
 	if err != nil {
 		return err
 	}
 	err = stack.Deserialize.Add(&awsEc2query_deserializeOpCreateReplaceRootVolumeTask{}, middleware.After)
 	if err != nil {
+		return err
+	}
+	if err := addProtocolFinalizerMiddlewares(stack, options, "CreateReplaceRootVolumeTask"); err != nil {
+		return fmt.Errorf("add protocol finalizers: %v", err)
+	}
+
+	if err = addlegacyEndpointContextSetter(stack, options); err != nil {
 		return err
 	}
 	if err = addSetLoggerMiddleware(stack, options); err != nil {
@@ -119,22 +128,22 @@ func (c *Client) addOperationCreateReplaceRootVolumeTaskMiddlewares(stack *middl
 	if err = addRetryMiddlewares(stack, options); err != nil {
 		return err
 	}
-	if err = addHTTPSignerV4Middleware(stack, options); err != nil {
-		return err
-	}
 	if err = awsmiddleware.AddRawResponseToMetadata(stack); err != nil {
 		return err
 	}
 	if err = awsmiddleware.AddRecordResponseTiming(stack); err != nil {
 		return err
 	}
-	if err = addClientUserAgent(stack); err != nil {
+	if err = addClientUserAgent(stack, options); err != nil {
 		return err
 	}
 	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
 		return err
 	}
 	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
+		return err
+	}
+	if err = addSetLegacyContextSigningOptionsMiddleware(stack); err != nil {
 		return err
 	}
 	if err = addIdempotencyToken_opCreateReplaceRootVolumeTaskMiddleware(stack, options); err != nil {
@@ -146,6 +155,9 @@ func (c *Client) addOperationCreateReplaceRootVolumeTaskMiddlewares(stack *middl
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opCreateReplaceRootVolumeTask(options.Region), middleware.Before); err != nil {
 		return err
 	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
+		return err
+	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
 		return err
 	}
@@ -153,6 +165,9 @@ func (c *Client) addOperationCreateReplaceRootVolumeTaskMiddlewares(stack *middl
 		return err
 	}
 	if err = addRequestResponseLogging(stack, options); err != nil {
+		return err
+	}
+	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
 		return err
 	}
 	return nil
@@ -195,7 +210,6 @@ func newServiceMetadataMiddleware_opCreateReplaceRootVolumeTask(region string) *
 	return &awsmiddleware.RegisterServiceMetadata{
 		Region:        region,
 		ServiceID:     ServiceID,
-		SigningName:   "ec2",
 		OperationName: "CreateReplaceRootVolumeTask",
 	}
 }

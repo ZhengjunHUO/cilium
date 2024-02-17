@@ -1,17 +1,18 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
 # Copyright Authors of Cilium
 
 set -e
 
-RELEASE_REGEX="[0-9]\+\.[0-9]\+\.[0-9]\+\(-\(\(rc\)\|\(snapshot\)\)\(\.\)\?[0-9]\+\)\?$"
+RELEASE_REGEX="[0-9]\+\.[0-9]\+\.[0-9]\+\(-\(\(rc\)\|\(pre\)\)\(\.\)\?[0-9]\+\)\?$"
+RELEASE_FORMAT_MSG="Expected X.Y.Z-[rc.N|pre.N]"
 
 get_remote () {
   local remote
   local org=${1:-cilium}
   local repo=${2:-cilium}
   remote=$(git remote -v | \
-    grep "github.com[/:]${org}/${repo}" | \
+    grep "github.com[/:]${org}/${repo}\(\.git\)\? " | \
     head -n1 | cut -f1)
   if [ -z "$remote" ]; then
       echo "No remote git@github.com:${org}/${repo}.git or https://github.com/${org}/${repo} found" 1>&2
@@ -80,4 +81,28 @@ get_branch_from_version() {
         branch="main"
     fi
     echo "$branch"
+}
+
+# $1 - VERSION
+version_is_prerelease() {
+    case "$1" in
+        *pre*|*rc*|*snapshot*)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+# $1 - VERSION
+version_is_rc() {
+    case "$1" in
+        *rc*)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
 }

@@ -14,9 +14,8 @@ import (
 )
 
 // Retrieve historical information about a CIDR within an IPAM scope. For more
-// information, see View the history of IP addresses
-// (https://docs.aws.amazon.com/vpc/latest/ipam/view-history-cidr-ipam.html) in the
-// Amazon VPC IPAM User Guide.
+// information, see View the history of IP addresses (https://docs.aws.amazon.com/vpc/latest/ipam/view-history-cidr-ipam.html)
+// in the Amazon VPC IPAM User Guide.
 func (c *Client) GetIpamAddressHistory(ctx context.Context, params *GetIpamAddressHistoryInput, optFns ...func(*Options)) (*GetIpamAddressHistoryOutput, error) {
 	if params == nil {
 		params = &GetIpamAddressHistoryInput{}
@@ -48,8 +47,8 @@ type GetIpamAddressHistoryInput struct {
 
 	// A check for whether you have the required permissions for the action without
 	// actually making the request and provides an error response. If you have the
-	// required permissions, the error response is DryRunOperation. Otherwise, it is
-	// UnauthorizedOperation.
+	// required permissions, the error response is DryRunOperation . Otherwise, it is
+	// UnauthorizedOperation .
 	DryRun *bool
 
 	// The end of the time period for which you are looking for history. If you omit
@@ -91,12 +90,22 @@ type GetIpamAddressHistoryOutput struct {
 }
 
 func (c *Client) addOperationGetIpamAddressHistoryMiddlewares(stack *middleware.Stack, options Options) (err error) {
+	if err := stack.Serialize.Add(&setOperationInputMiddleware{}, middleware.After); err != nil {
+		return err
+	}
 	err = stack.Serialize.Add(&awsEc2query_serializeOpGetIpamAddressHistory{}, middleware.After)
 	if err != nil {
 		return err
 	}
 	err = stack.Deserialize.Add(&awsEc2query_deserializeOpGetIpamAddressHistory{}, middleware.After)
 	if err != nil {
+		return err
+	}
+	if err := addProtocolFinalizerMiddlewares(stack, options, "GetIpamAddressHistory"); err != nil {
+		return fmt.Errorf("add protocol finalizers: %v", err)
+	}
+
+	if err = addlegacyEndpointContextSetter(stack, options); err != nil {
 		return err
 	}
 	if err = addSetLoggerMiddleware(stack, options); err != nil {
@@ -117,16 +126,13 @@ func (c *Client) addOperationGetIpamAddressHistoryMiddlewares(stack *middleware.
 	if err = addRetryMiddlewares(stack, options); err != nil {
 		return err
 	}
-	if err = addHTTPSignerV4Middleware(stack, options); err != nil {
-		return err
-	}
 	if err = awsmiddleware.AddRawResponseToMetadata(stack); err != nil {
 		return err
 	}
 	if err = awsmiddleware.AddRecordResponseTiming(stack); err != nil {
 		return err
 	}
-	if err = addClientUserAgent(stack); err != nil {
+	if err = addClientUserAgent(stack, options); err != nil {
 		return err
 	}
 	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
@@ -135,10 +141,16 @@ func (c *Client) addOperationGetIpamAddressHistoryMiddlewares(stack *middleware.
 	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
 		return err
 	}
+	if err = addSetLegacyContextSigningOptionsMiddleware(stack); err != nil {
+		return err
+	}
 	if err = addOpGetIpamAddressHistoryValidationMiddleware(stack); err != nil {
 		return err
 	}
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opGetIpamAddressHistory(options.Region), middleware.Before); err != nil {
+		return err
+	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
@@ -148,6 +160,9 @@ func (c *Client) addOperationGetIpamAddressHistoryMiddlewares(stack *middleware.
 		return err
 	}
 	if err = addRequestResponseLogging(stack, options); err != nil {
+		return err
+	}
+	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
 		return err
 	}
 	return nil
@@ -249,7 +264,6 @@ func newServiceMetadataMiddleware_opGetIpamAddressHistory(region string) *awsmid
 	return &awsmiddleware.RegisterServiceMetadata{
 		Region:        region,
 		ServiceID:     ServiceID,
-		SigningName:   "ec2",
 		OperationName: "GetIpamAddressHistory",
 	}
 }

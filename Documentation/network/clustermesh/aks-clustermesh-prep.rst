@@ -62,8 +62,8 @@ Install cluster one
 3.  We now have a virtual network and a subnet with the same CIDR. We can 
     create an AKS cluster without CNI and request to use our custom VNet and subnet.
 
-    During creation we also request to use ``"10.10.0.0/16`` as the pod CIDR and
-    ``"10.11.0.0/16`` as the services CIDR. These can be changed to any range
+    During creation we also request to use ``"10.10.0.0/16"`` as the pod CIDR and
+    ``"10.11.0.0/16"`` as the services CIDR. These can be changed to any range
     except for Azure reserved ranges and ranges used by other clusters we intend to
     add to the clustermesh.
 
@@ -87,12 +87,12 @@ Install cluster one
 4.  Install Cilium, it is important to give
     the cluster a unique cluster ID and to tell Cilium to use our custom pod CIDR.
 
-    .. code-block:: bash
+    .. parsed-literal::
 
-        cilium install \
-            --azure-resource-group "${AZURE_RESOURCE_GROUP}" \
-            --cluster-id 1 \
-            --config "cluster-pool-ipv4-cidr=10.10.0.0/16"
+        cilium install |CHART_VERSION| \
+            --set azure.resourceGroup="${AZURE_RESOURCE_GROUP}" \
+            --set cluster.id=1 \
+            --set ipam.operator.clusterPoolIPv4PodCIDRList='{10.10.0.0/16}'
 
 5.  Check the status of Cilium.
 
@@ -151,8 +151,8 @@ arguments.
 3.  Create an AKS cluster without CNI and request to use our custom VNet and 
     subnet.
 
-    During creation we also request to use ``"10.20.0.0/16`` as the pod CIDR and
-    ``"10.21.0.0/16`` as the services CIDR. These can be changed to any range
+    During creation we also request to use ``"10.20.0.0/16"`` as the pod CIDR and
+    ``"10.21.0.0/16"`` as the services CIDR. These can be changed to any range
     except for Azure reserved ranges and ranges used by other clusters we intend to
     add to the clustermesh.
 
@@ -175,12 +175,12 @@ arguments.
 4.  Install Cilium, it is important to give
     the cluster a unique cluster ID and to tell Cilium to use our custom pod CIDR.
 
-    .. code-block:: bash
-        
-        cilium install \
-            --azure-resource-group "${AZURE_RESOURCE_GROUP}" \
-            --cluster-id 2 \
-            --config "cluster-pool-ipv4-cidr=10.20.0.0/16"
+    .. parsed-literal::
+
+        cilium install |CHART_VERSION| \
+            --set azure.resourceGroup="${AZURE_RESOURCE_GROUP}" \
+            --set cluster.id=2 \
+            --set ipam.operator.clusterPoolIPv4PodCIDRList='{10.20.0.0/16}'
 
 5.  Check the status of Cilium.
 

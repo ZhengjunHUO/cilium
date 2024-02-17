@@ -14,19 +14,21 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
-
-	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
+	gatewayv1alpha2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 
 	"github.com/cilium/cilium/operator/pkg/model"
+	"github.com/cilium/cilium/operator/pkg/model/translation"
+	gatewayApiTranslation "github.com/cilium/cilium/operator/pkg/model/translation/gateway-api"
 )
 
 var gwFixture = []client.Object{
 	// Valid Gateway class
-	&gatewayv1beta1.GatewayClass{
+	&gatewayv1.GatewayClass{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "cilium",
 		},
-		Spec: gatewayv1beta1.GatewayClassSpec{
+		Spec: gatewayv1.GatewayClassSpec{
 			ControllerName: "io.cilium/gateway-controller",
 		},
 	},
@@ -39,6 +41,16 @@ var gwFixture = []client.Object{
 		},
 	},
 
+	&corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "cilium-gateway-valid-gateway",
+			Namespace: "default",
+			Annotations: map[string]string{
+				"pre-existing-annotation": "true",
+			},
+		},
+	},
+
 	// Service in another namespace
 	&corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
@@ -48,27 +60,27 @@ var gwFixture = []client.Object{
 	},
 
 	// Valid HTTPRoute
-	&gatewayv1beta1.HTTPRoute{
+	&gatewayv1.HTTPRoute{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "http-route",
 			Namespace: "default",
 		},
-		Spec: gatewayv1beta1.HTTPRouteSpec{
-			CommonRouteSpec: gatewayv1beta1.CommonRouteSpec{
-				ParentRefs: []gatewayv1beta1.ParentReference{
+		Spec: gatewayv1.HTTPRouteSpec{
+			CommonRouteSpec: gatewayv1.CommonRouteSpec{
+				ParentRefs: []gatewayv1.ParentReference{
 					{
 						Name: "valid-gateway",
 					},
 				},
 			},
-			Rules: []gatewayv1beta1.HTTPRouteRule{
+			Rules: []gatewayv1.HTTPRouteRule{
 				{
-					BackendRefs: []gatewayv1beta1.HTTPBackendRef{
+					BackendRefs: []gatewayv1.HTTPBackendRef{
 						{
-							BackendRef: gatewayv1beta1.BackendRef{
-								BackendObjectReference: gatewayv1beta1.BackendObjectReference{
+							BackendRef: gatewayv1.BackendRef{
+								BackendObjectReference: gatewayv1.BackendObjectReference{
 									Name: "dummy-backend",
-									Port: model.AddressOf[gatewayv1beta1.PortNumber](80),
+									Port: model.AddressOf[gatewayv1.PortNumber](80),
 								},
 							},
 						},
@@ -76,11 +88,11 @@ var gwFixture = []client.Object{
 				},
 			},
 		},
-		Status: gatewayv1beta1.HTTPRouteStatus{
-			RouteStatus: gatewayv1beta1.RouteStatus{
-				Parents: []gatewayv1beta1.RouteParentStatus{
+		Status: gatewayv1.HTTPRouteStatus{
+			RouteStatus: gatewayv1.RouteStatus{
+				Parents: []gatewayv1.RouteParentStatus{
 					{
-						ParentRef: gatewayv1beta1.ParentReference{
+						ParentRef: gatewayv1.ParentReference{
 							Name: "valid-gateway",
 						},
 						ControllerName: "io.cilium/gateway-controller",
@@ -96,23 +108,73 @@ var gwFixture = []client.Object{
 		},
 	},
 
+	// Valid TLSRoute
+	&gatewayv1alpha2.TLSRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "tls-route",
+			Namespace: "default",
+		},
+		Spec: gatewayv1alpha2.TLSRouteSpec{
+			CommonRouteSpec: gatewayv1.CommonRouteSpec{
+				ParentRefs: []gatewayv1.ParentReference{
+					{
+						Name: "valid-tlsroute-gateway",
+					},
+				},
+			},
+			Hostnames: []gatewayv1alpha2.Hostname{
+				"sni.cilium.rocks",
+			},
+			Rules: []gatewayv1alpha2.TLSRouteRule{
+				{
+					BackendRefs: []gatewayv1.BackendRef{
+						{
+							BackendObjectReference: gatewayv1.BackendObjectReference{
+								Name: "dummy-backend",
+								Port: model.AddressOf[gatewayv1.PortNumber](443),
+							},
+						},
+					},
+				},
+			},
+		},
+		Status: gatewayv1alpha2.TLSRouteStatus{
+			RouteStatus: gatewayv1.RouteStatus{
+				Parents: []gatewayv1.RouteParentStatus{
+					{
+						ParentRef: gatewayv1.ParentReference{
+							Name: "valid-tlsroute-gateway",
+						},
+						ControllerName: "io.cilium/gateway-controller",
+						Conditions: []metav1.Condition{
+							{
+								Type:   "Accepted",
+								Status: "True",
+							},
+						},
+					},
+				},
+			},
+		},
+	},
+
 	// Valid gateway
-	&gatewayv1beta1.Gateway{
+	&gatewayv1.Gateway{
 		TypeMeta: metav1.TypeMeta{
 			Kind:       "Gateway",
-			APIVersion: gatewayv1beta1.GroupName,
+			APIVersion: gatewayv1.GroupName,
 		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "valid-gateway",
 			Namespace: "default",
 		},
-		Spec: gatewayv1beta1.GatewaySpec{
+		Spec: gatewayv1.GatewaySpec{
 			GatewayClassName: "cilium",
-			Listeners: []gatewayv1beta1.Listener{
+			Listeners: []gatewayv1.Listener{
 				{
 					Name:     "http",
 					Port:     80,
-					Hostname: model.AddressOf[gatewayv1beta1.Hostname]("*.cilium.io"),
+					Hostname: model.AddressOf[gatewayv1.Hostname]("*.cilium.io"),
 					Protocol: "HTTP",
 				},
 			},
@@ -120,23 +182,46 @@ var gwFixture = []client.Object{
 	},
 
 	// gateway with non-existent gateway class
-	&gatewayv1beta1.Gateway{
+	&gatewayv1.Gateway{
 		TypeMeta: metav1.TypeMeta{
 			Kind:       "Gateway",
-			APIVersion: gatewayv1beta1.GroupName,
+			APIVersion: gatewayv1.GroupName,
 		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "gateway-with-non-existent-gateway-class",
 			Namespace: "default",
 		},
-		Spec: gatewayv1beta1.GatewaySpec{
+		Spec: gatewayv1.GatewaySpec{
 			GatewayClassName: "non-existent-gateway-class",
-			Listeners: []gatewayv1beta1.Listener{
+			Listeners: []gatewayv1.Listener{
 				{
 					Name:     "http",
 					Port:     80,
-					Hostname: model.AddressOf[gatewayv1beta1.Hostname]("*.cilium.io"),
+					Hostname: model.AddressOf[gatewayv1.Hostname]("*.cilium.io"),
 					Protocol: "HTTP",
+				},
+			},
+		},
+	},
+
+	/// Valid TLSRoute gateway
+	&gatewayv1.Gateway{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "Gateway",
+			APIVersion: gatewayv1.GroupName,
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "valid-tlsroute-gateway",
+			Namespace: "default",
+		},
+		Spec: gatewayv1.GatewaySpec{
+			GatewayClassName: "cilium",
+			Listeners: []gatewayv1.Listener{
+				{
+					Name:     "tls",
+					Port:     443,
+					Hostname: model.AddressOf[gatewayv1.Hostname]("*.cilium.rocks"),
+					Protocol: "TLS",
 				},
 			},
 		},
@@ -144,8 +229,19 @@ var gwFixture = []client.Object{
 }
 
 func Test_gatewayReconciler_Reconcile(t *testing.T) {
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(gwFixture...).Build()
-	r := &gatewayReconciler{Client: c}
+	c := fake.NewClientBuilder().
+		WithScheme(testScheme()).
+		WithObjects(gwFixture...).
+		WithStatusSubresource(&gatewayv1.Gateway{}).
+		Build()
+
+	cecTranslator := translation.NewCECTranslator("", false, true, 60)
+	gatewayAPITranslator := gatewayApiTranslation.NewTranslator(cecTranslator)
+
+	r := &gatewayReconciler{
+		Client:     c,
+		translator: gatewayAPITranslator,
+	}
 
 	t.Run("non-existent gateway", func(t *testing.T) {
 		result, err := r.Reconcile(context.Background(), ctrl.Request{
@@ -172,7 +268,7 @@ func Test_gatewayReconciler_Reconcile(t *testing.T) {
 		require.Equal(t, "gatewayclasses.gateway.networking.k8s.io \"non-existent-gateway-class\" not found", err.Error())
 		require.Equal(t, ctrl.Result{}, result)
 
-		gw := &gatewayv1beta1.Gateway{}
+		gw := &gatewayv1.Gateway{}
 		err = c.Get(context.Background(), key, gw)
 		require.NoError(t, err)
 		require.Len(t, gw.Status.Conditions, 1)
@@ -182,7 +278,7 @@ func Test_gatewayReconciler_Reconcile(t *testing.T) {
 		require.Equal(t, "GatewayClass does not exist", gw.Status.Conditions[0].Message)
 	})
 
-	t.Run("valid gateway", func(t *testing.T) {
+	t.Run("valid http gateway", func(t *testing.T) {
 		key := client.ObjectKey{
 			Namespace: "default",
 			Name:      "valid-gateway",
@@ -200,6 +296,7 @@ func Test_gatewayReconciler_Reconcile(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, corev1.ServiceTypeLoadBalancer, lb.Spec.Type)
 		require.Equal(t, "valid-gateway", lb.Labels["io.cilium.gateway/owning-gateway"])
+		require.Equal(t, "true", lb.Annotations["pre-existing-annotation"])
 
 		// Update LB status
 		lb.Status.LoadBalancer.Ingress = []corev1.LoadBalancerIngress{
@@ -222,7 +319,7 @@ func Test_gatewayReconciler_Reconcile(t *testing.T) {
 		require.Equal(t, ctrl.Result{}, result)
 
 		// Check that the gateway status has been updated
-		gw := &gatewayv1beta1.Gateway{}
+		gw := &gatewayv1.Gateway{}
 		err = c.Get(context.Background(), key, gw)
 		require.NoError(t, err)
 
@@ -230,7 +327,7 @@ func Test_gatewayReconciler_Reconcile(t *testing.T) {
 		require.Equal(t, "Accepted", gw.Status.Conditions[0].Type)
 		require.Equal(t, "True", string(gw.Status.Conditions[0].Status))
 		require.Equal(t, "Gateway successfully scheduled", gw.Status.Conditions[0].Message)
-		require.Equal(t, "Ready", gw.Status.Conditions[1].Type)
+		require.Equal(t, "Programmed", gw.Status.Conditions[1].Type)
 		require.Equal(t, "True", string(gw.Status.Conditions[1].Status))
 		require.Equal(t, "Gateway successfully reconciled", gw.Status.Conditions[1].Message)
 
@@ -240,13 +337,85 @@ func Test_gatewayReconciler_Reconcile(t *testing.T) {
 
 		require.Len(t, gw.Status.Listeners, 1)
 		require.Equal(t, "http", string(gw.Status.Listeners[0].Name))
-		require.Len(t, gw.Status.Listeners[0].Conditions, 1)
+		require.Len(t, gw.Status.Listeners[0].Conditions, 3)
 		require.Equal(t, "Programmed", gw.Status.Listeners[0].Conditions[0].Type)
 		require.Equal(t, "True", string(gw.Status.Listeners[0].Conditions[0].Status))
 		require.Equal(t, "Programmed", gw.Status.Listeners[0].Conditions[0].Reason)
-		require.Equal(t, "Listener Ready", gw.Status.Listeners[0].Conditions[0].Message)
+		require.Equal(t, "Listener Programmed", gw.Status.Listeners[0].Conditions[0].Message)
+		require.Equal(t, "Accepted", gw.Status.Listeners[0].Conditions[1].Type)
+		require.Equal(t, "True", string(gw.Status.Listeners[0].Conditions[1].Status))
+		require.Equal(t, "ResolvedRefs", gw.Status.Listeners[0].Conditions[2].Type)
+		require.Equal(t, "True", string(gw.Status.Listeners[0].Conditions[2].Status))
 	})
 
+	t.Run("valid tls gateway", func(t *testing.T) {
+		key := client.ObjectKey{
+			Namespace: "default",
+			Name:      "valid-tlsroute-gateway",
+		}
+		result, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: key})
+
+		// First reconcile should wait for LB status
+		require.Error(t, err)
+		require.Equal(t, "load balancer status is not ready", err.Error())
+		require.Equal(t, ctrl.Result{}, result)
+
+		// Simulate LB service update
+		lb := &corev1.Service{}
+		err = c.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "cilium-gateway-valid-tlsroute-gateway"}, lb)
+		require.NoError(t, err)
+		require.Equal(t, corev1.ServiceTypeLoadBalancer, lb.Spec.Type)
+		require.Equal(t, "valid-tlsroute-gateway", lb.Labels["io.cilium.gateway/owning-gateway"])
+
+		// Update LB status
+		lb.Status.LoadBalancer.Ingress = []corev1.LoadBalancerIngress{
+			{
+				IP: "10.10.10.11",
+				Ports: []corev1.PortStatus{
+					{
+						Port:     443,
+						Protocol: "TCP",
+					},
+				},
+			},
+		}
+		err = c.Status().Update(context.Background(), lb)
+		require.NoError(t, err)
+
+		// Perform second reconciliation
+		result, err = r.Reconcile(context.Background(), ctrl.Request{NamespacedName: key})
+		require.NoError(t, err)
+		require.Equal(t, ctrl.Result{}, result)
+
+		// Check that the gateway status has been updated
+		gw := &gatewayv1.Gateway{}
+		err = c.Get(context.Background(), key, gw)
+		require.NoError(t, err)
+
+		require.Len(t, gw.Status.Conditions, 2)
+		require.Equal(t, "Accepted", gw.Status.Conditions[0].Type)
+		require.Equal(t, "True", string(gw.Status.Conditions[0].Status))
+		require.Equal(t, "Gateway successfully scheduled", gw.Status.Conditions[0].Message)
+		require.Equal(t, "Programmed", gw.Status.Conditions[1].Type)
+		require.Equal(t, "True", string(gw.Status.Conditions[1].Status))
+		require.Equal(t, "Gateway successfully reconciled", gw.Status.Conditions[1].Message)
+
+		require.Len(t, gw.Status.Addresses, 1)
+		require.Equal(t, "IPAddress", string(*gw.Status.Addresses[0].Type))
+		require.Equal(t, "10.10.10.11", gw.Status.Addresses[0].Value)
+
+		require.Len(t, gw.Status.Listeners, 1)
+		require.Equal(t, "tls", string(gw.Status.Listeners[0].Name))
+		require.Len(t, gw.Status.Listeners[0].Conditions, 3)
+		require.Equal(t, "Programmed", gw.Status.Listeners[0].Conditions[0].Type)
+		require.Equal(t, "True", string(gw.Status.Listeners[0].Conditions[0].Status))
+		require.Equal(t, "Programmed", gw.Status.Listeners[0].Conditions[0].Reason)
+		require.Equal(t, "Listener Programmed", gw.Status.Listeners[0].Conditions[0].Message)
+		require.Equal(t, "Accepted", gw.Status.Listeners[0].Conditions[1].Type)
+		require.Equal(t, "True", string(gw.Status.Listeners[0].Conditions[1].Status))
+		require.Equal(t, "ResolvedRefs", gw.Status.Listeners[0].Conditions[2].Type)
+		require.Equal(t, "True", string(gw.Status.Listeners[0].Conditions[2].Status))
+	})
 }
 
 func Test_isValidPemFormat(t *testing.T) {
@@ -360,6 +529,151 @@ hEKCKf/N3gE1oMrTxVzUDQ==
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equalf(t, tt.want, isValidPemFormat(tt.args.b), "isValidPemFormat(%v)", tt.args.b)
+		})
+	}
+}
+
+func Test_sectionNameMatched(t *testing.T) {
+	httpListener := &gatewayv1.Listener{
+		Name:     "http",
+		Port:     80,
+		Hostname: model.AddressOf[gatewayv1.Hostname]("*.cilium.io"),
+		Protocol: "HTTP",
+	}
+	httpNoMatchListener := &gatewayv1.Listener{
+		Name:     "http-no-match",
+		Port:     8080,
+		Hostname: model.AddressOf[gatewayv1.Hostname]("*.cilium.io"),
+		Protocol: "HTTP",
+	}
+	gw := &gatewayv1.Gateway{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "Gateway",
+			APIVersion: gatewayv1.GroupName,
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "valid-gateway",
+			Namespace: "default",
+		},
+		Spec: gatewayv1.GatewaySpec{
+			GatewayClassName: "cilium",
+			Listeners: []gatewayv1.Listener{
+				*httpListener,
+				*httpNoMatchListener,
+			},
+		},
+	}
+	type args struct {
+		routeNamespace string
+		listener       *gatewayv1.Listener
+		refs           []gatewayv1.ParentReference
+	}
+	tests := []struct {
+		name string
+		args args
+		want bool
+	}{
+		{
+			name: "Matching Section name",
+			args: args{
+				listener: httpListener,
+				refs: []gatewayv1.ParentReference{
+					{
+						Kind:        (*gatewayv1.Kind)(model.AddressOf("Gateway")),
+						Name:        "valid-gateway",
+						SectionName: (*gatewayv1.SectionName)(model.AddressOf("http")),
+					},
+				},
+			},
+			want: true,
+		},
+		{
+			name: "Not matching Section name",
+			args: args{
+				listener: httpNoMatchListener,
+				refs: []gatewayv1.ParentReference{
+					{
+						Kind:        (*gatewayv1.Kind)(model.AddressOf("Gateway")),
+						Name:        "valid-gateway",
+						SectionName: (*gatewayv1.SectionName)(model.AddressOf("http")),
+					},
+				},
+			},
+			want: false,
+		},
+		{
+			name: "Matching Port number",
+			args: args{
+				listener: httpListener,
+				refs: []gatewayv1.ParentReference{
+					{
+						Kind: (*gatewayv1.Kind)(model.AddressOf("Gateway")),
+						Name: "valid-gateway",
+						Port: (*gatewayv1.PortNumber)(model.AddressOf[int32](80)),
+					},
+				},
+			},
+			want: true,
+		},
+		{
+			name: "No matching Port number",
+			args: args{
+				listener: httpNoMatchListener,
+				refs: []gatewayv1.ParentReference{
+					{
+						Kind: (*gatewayv1.Kind)(model.AddressOf("Gateway")),
+						Name: "valid-gateway",
+						Port: (*gatewayv1.PortNumber)(model.AddressOf[int32](80)),
+					},
+				},
+			},
+			want: false,
+		},
+		{
+			name: "Matching both Section name and Port number",
+			args: args{
+				listener: httpListener,
+				refs: []gatewayv1.ParentReference{
+					{
+						Kind:        (*gatewayv1.Kind)(model.AddressOf("Gateway")),
+						Name:        "valid-gateway",
+						SectionName: (*gatewayv1.SectionName)(model.AddressOf("http")),
+						Port:        (*gatewayv1.PortNumber)(model.AddressOf[int32](80)),
+					},
+				},
+			},
+			want: true,
+		},
+		{
+			name: "Matching any listener (httpListener)",
+			args: args{
+				listener: httpListener,
+				refs: []gatewayv1.ParentReference{
+					{
+						Kind: (*gatewayv1.Kind)(model.AddressOf("Gateway")),
+						Name: "valid-gateway",
+					},
+				},
+			},
+			want: true,
+		},
+		{
+			name: "Matching any listener (httpNoMatchListener)",
+			args: args{
+				listener: httpNoMatchListener,
+				refs: []gatewayv1.ParentReference{
+					{
+						Kind: (*gatewayv1.Kind)(model.AddressOf("Gateway")),
+						Name: "valid-gateway",
+					},
+				},
+			},
+			want: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equalf(t, tt.want, parentRefMatched(gw, tt.args.listener, "default", tt.args.refs), "parentRefMatched(%v, %v, %v, %v)", gw, tt.args.listener, tt.args.routeNamespace, tt.args.refs)
 		})
 	}
 }

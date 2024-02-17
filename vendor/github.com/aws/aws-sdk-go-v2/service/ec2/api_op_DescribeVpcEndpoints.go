@@ -12,7 +12,7 @@ import (
 	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
-// Describes one or more of your VPC endpoints.
+// Describes your VPC endpoints.
 func (c *Client) DescribeVpcEndpoints(ctx context.Context, params *DescribeVpcEndpointsInput, optFns ...func(*Options)) (*DescribeVpcEndpointsOutput, error) {
 	if params == nil {
 		params = &DescribeVpcEndpointsInput{}
@@ -28,43 +28,29 @@ func (c *Client) DescribeVpcEndpoints(ctx context.Context, params *DescribeVpcEn
 	return out, nil
 }
 
-// Contains the parameters for DescribeVpcEndpoints.
 type DescribeVpcEndpointsInput struct {
 
 	// Checks whether you have the required permissions for the action, without
 	// actually making the request, and provides an error response. If you have the
-	// required permissions, the error response is DryRunOperation. Otherwise, it is
-	// UnauthorizedOperation.
+	// required permissions, the error response is DryRunOperation . Otherwise, it is
+	// UnauthorizedOperation .
 	DryRun *bool
 
-	// One or more filters.
-	//
-	// * ip-address-type - The IP address type (ipv4 | ipv6).
-	//
-	// *
-	// service-name - The name of the service.
-	//
-	// * tag: - The key/value combination of a
-	// tag assigned to the resource. Use the tag key in the filter name and the tag
-	// value as the filter value. For example, to find all resources that have a tag
-	// with the key Owner and the value TeamA, specify tag:Owner for the filter name
-	// and TeamA for the filter value.
-	//
-	// * tag-key - The key of a tag assigned to the
-	// resource. Use this filter to find all resources assigned a tag with a specific
-	// key, regardless of the tag value.
-	//
-	// * vpc-id - The ID of the VPC in which the
-	// endpoint resides.
-	//
-	// * vpc-endpoint-id - The ID of the endpoint.
-	//
-	// *
-	// vpc-endpoint-state - The state of the endpoint (pendingAcceptance | pending |
-	// available | deleting | deleted | rejected | failed).
-	//
-	// * vpc-endpoint-type - The
-	// type of VPC endpoint (Interface | Gateway | GatewayLoadBalancer).
+	// The filters.
+	//   - ip-address-type - The IP address type ( ipv4 | ipv6 ).
+	//   - service-name - The name of the service.
+	//   - tag : - The key/value combination of a tag assigned to the resource. Use the
+	//   tag key in the filter name and the tag value as the filter value. For example,
+	//   to find all resources that have a tag with the key Owner and the value TeamA ,
+	//   specify tag:Owner for the filter name and TeamA for the filter value.
+	//   - tag-key - The key of a tag assigned to the resource. Use this filter to find
+	//   all resources assigned a tag with a specific key, regardless of the tag value.
+	//   - vpc-id - The ID of the VPC in which the endpoint resides.
+	//   - vpc-endpoint-id - The ID of the endpoint.
+	//   - vpc-endpoint-state - The state of the endpoint ( pendingAcceptance | pending
+	//   | available | deleting | deleted | rejected | failed ).
+	//   - vpc-endpoint-type - The type of VPC endpoint ( Interface | Gateway |
+	//   GatewayLoadBalancer ).
 	Filters []types.Filter
 
 	// The maximum number of items to return for this request. The request returns a
@@ -76,13 +62,12 @@ type DescribeVpcEndpointsInput struct {
 	// prior call.)
 	NextToken *string
 
-	// One or more endpoint IDs.
+	// The IDs of the VPC endpoints.
 	VpcEndpointIds []string
 
 	noSmithyDocumentSerde
 }
 
-// Contains the output of DescribeVpcEndpoints.
 type DescribeVpcEndpointsOutput struct {
 
 	// The token to use when requesting the next set of items. If there are no
@@ -99,12 +84,22 @@ type DescribeVpcEndpointsOutput struct {
 }
 
 func (c *Client) addOperationDescribeVpcEndpointsMiddlewares(stack *middleware.Stack, options Options) (err error) {
+	if err := stack.Serialize.Add(&setOperationInputMiddleware{}, middleware.After); err != nil {
+		return err
+	}
 	err = stack.Serialize.Add(&awsEc2query_serializeOpDescribeVpcEndpoints{}, middleware.After)
 	if err != nil {
 		return err
 	}
 	err = stack.Deserialize.Add(&awsEc2query_deserializeOpDescribeVpcEndpoints{}, middleware.After)
 	if err != nil {
+		return err
+	}
+	if err := addProtocolFinalizerMiddlewares(stack, options, "DescribeVpcEndpoints"); err != nil {
+		return fmt.Errorf("add protocol finalizers: %v", err)
+	}
+
+	if err = addlegacyEndpointContextSetter(stack, options); err != nil {
 		return err
 	}
 	if err = addSetLoggerMiddleware(stack, options); err != nil {
@@ -125,16 +120,13 @@ func (c *Client) addOperationDescribeVpcEndpointsMiddlewares(stack *middleware.S
 	if err = addRetryMiddlewares(stack, options); err != nil {
 		return err
 	}
-	if err = addHTTPSignerV4Middleware(stack, options); err != nil {
-		return err
-	}
 	if err = awsmiddleware.AddRawResponseToMetadata(stack); err != nil {
 		return err
 	}
 	if err = awsmiddleware.AddRecordResponseTiming(stack); err != nil {
 		return err
 	}
-	if err = addClientUserAgent(stack); err != nil {
+	if err = addClientUserAgent(stack, options); err != nil {
 		return err
 	}
 	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
@@ -143,7 +135,13 @@ func (c *Client) addOperationDescribeVpcEndpointsMiddlewares(stack *middleware.S
 	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
 		return err
 	}
+	if err = addSetLegacyContextSigningOptionsMiddleware(stack); err != nil {
+		return err
+	}
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opDescribeVpcEndpoints(options.Region), middleware.Before); err != nil {
+		return err
+	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
@@ -153,6 +151,9 @@ func (c *Client) addOperationDescribeVpcEndpointsMiddlewares(stack *middleware.S
 		return err
 	}
 	if err = addRequestResponseLogging(stack, options); err != nil {
+		return err
+	}
+	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
 		return err
 	}
 	return nil
@@ -255,7 +256,6 @@ func newServiceMetadataMiddleware_opDescribeVpcEndpoints(region string) *awsmidd
 	return &awsmiddleware.RegisterServiceMetadata{
 		Region:        region,
 		ServiceID:     ServiceID,
-		SigningName:   "ec2",
 		OperationName: "DescribeVpcEndpoints",
 	}
 }

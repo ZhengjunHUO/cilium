@@ -4,11 +4,8 @@
 package testutils
 
 import (
-	"fmt"
 	"os"
 	"testing"
-
-	"gopkg.in/check.v1"
 )
 
 const (
@@ -21,22 +18,13 @@ func PrivilegedTest(tb testing.TB) {
 	tb.Helper()
 
 	if os.Getenv(privilegedEnv) == "" {
-		tb.Skip(fmt.Sprintf("Set %s to run this test", privilegedEnv))
-	}
-}
-
-func PrivilegedCheck(c *check.C) {
-	if os.Getenv(privilegedEnv) == "" {
-		c.Skip(fmt.Sprintf("Set %s to run this test", privilegedEnv))
+		tb.Skipf("Set %s to run this test", privilegedEnv)
 	}
 }
 
 // IntegrationTests returns true if integration tests are requested.
 func IntegrationTests() bool {
-	if os.Getenv(integrationEnv) != "" {
-		return true
-	}
-	return false
+	return os.Getenv(integrationEnv) != ""
 }
 
 // IntegrationTest only executes tb if integration tests are requested.
@@ -44,14 +32,7 @@ func IntegrationTest(tb testing.TB) {
 	tb.Helper()
 
 	if os.Getenv(integrationEnv) == "" {
-		tb.Skip(fmt.Sprintf("Set %s to run this test", integrationEnv))
-	}
-}
-
-// IntegrationCheck only executes c if integration tests are requested.
-func IntegrationCheck(c *check.C) {
-	if os.Getenv(integrationEnv) == "" {
-		c.Skip(fmt.Sprintf("Set %s to run this test", integrationEnv))
+		tb.Skipf("Set %s to run this test", integrationEnv)
 	}
 }
 
@@ -59,6 +40,6 @@ func GatewayAPIConformanceTest(tb testing.TB) {
 	tb.Helper()
 
 	if os.Getenv(gatewayAPIConformanceEnv) == "" {
-		tb.Skip(fmt.Sprintf("Set %s to run this test", gatewayAPIConformanceEnv))
+		tb.Skipf("Set %s to run this test", gatewayAPIConformanceEnv)
 	}
 }

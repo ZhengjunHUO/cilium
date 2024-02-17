@@ -32,6 +32,10 @@ const (
 	//    Total extra bytes:  50B
 	TunnelOverhead = 50
 
+	// DsrTunnelOverhead is about the GENEVE DSR option that gets inserted
+	// by the LB, when addressing a Service in hs-ipcache mode
+	DsrTunnelOverhead = 12
+
 	// EncryptionIPsecOverhead is an approximation for bytes used for
 	// encryption. Depending on key size and encryption type the actual
 	// size may vary here we do calculations for 128B keys and Auth. The
@@ -52,7 +56,7 @@ const (
 	// key secrets.
 	EncryptionDefaultAuthKeyLength = 16
 
-	// WireguardOverhead is an approximation for the overhead of wireguard
+	// WireguardOverhead is an approximation for the overhead of WireGuard
 	// encapsulation.
 	//
 	// https://github.com/torvalds/linux/blob/v5.12/drivers/net/wireguard/device.c#L262:
@@ -101,7 +105,7 @@ type Configuration struct {
 // specified, otherwise it will be automatically detected. if encapEnabled is
 // true, the MTU is adjusted to account for encapsulation overhead for all
 // routes involved in node to node communication.
-func NewConfiguration(authKeySize int, encryptEnabled bool, encapEnabled bool, wireguardEnabled bool, mtu int, mtuDetectIP net.IP) Configuration {
+func NewConfiguration(authKeySize int, encryptEnabled bool, encapEnabled bool, wireguardEnabled bool, hsIpcacheDSRenabled bool, mtu int, mtuDetectIP net.IP) Configuration {
 	encryptOverhead := 0
 
 	if mtu == 0 {
@@ -124,9 +128,14 @@ func NewConfiguration(authKeySize int, encryptEnabled bool, encapEnabled bool, w
 		encryptOverhead = EncryptionIPsecOverhead + (authKeySize - EncryptionDefaultAuthKeyLength)
 	}
 
+	fullTunnelOverhead := TunnelOverhead
+	if hsIpcacheDSRenabled {
+		fullTunnelOverhead += DsrTunnelOverhead
+	}
+
 	conf := Configuration{
 		standardMTU:      mtu,
-		tunnelMTU:        mtu - (TunnelOverhead + encryptOverhead),
+		tunnelMTU:        mtu - (fullTunnelOverhead + encryptOverhead),
 		postEncryptMTU:   mtu - TunnelOverhead,
 		preEncryptMTU:    mtu - encryptOverhead,
 		encapEnabled:     encapEnabled,
@@ -160,6 +169,9 @@ func (c *Configuration) GetRoutePostEncryptMTU() int {
 // encryption overhead accounted for.
 func (c *Configuration) GetRouteMTU() int {
 	if c.wireguardEnabled {
+		if c.encapEnabled {
+			return c.GetDeviceMTU() - (WireguardOverhead + TunnelOverhead)
+		}
 		return c.GetDeviceMTU() - WireguardOverhead
 	}
 

@@ -24,7 +24,8 @@ var (
 // ELF is an in-memory representation of a BPF ELF object from the filesystem.
 type ELF struct {
 	metadata *elf.File
-	file     *os.File
+	closer   io.Closer
+	contents io.ReaderAt
 	symbols  symbols
 	log      *logrus.Entry
 
@@ -57,6 +58,7 @@ func NewELF(ra io.ReaderAt, scopedLog *logrus.Entry) (*ELF, error) {
 
 	result := &ELF{
 		metadata: ef,
+		contents: ra,
 		log:      scopedLog,
 	}
 	if err := result.symbols.extractFrom(ef); err != nil {
@@ -90,17 +92,17 @@ func Open(path string) (*ELF, error) {
 			Err:  err,
 		}
 	}
-	result.file = f
+	result.closer = f
 	return result, nil
 }
 
 // Close closes the ELF. If the File was created using NewELF directly instead
 // of Open, Close has no effect.
 func (elf *ELF) Close() (err error) {
-	if elf.file != nil {
-		err = elf.file.Close()
+	if elf.closer != nil {
+		return elf.closer.Close()
 	}
-	return err
+	return nil
 }
 
 func (elf *ELF) writeValue(w io.WriteSeeker, offset uint64, value []byte) error {
@@ -115,7 +117,7 @@ func (elf *ELF) writeValue(w io.WriteSeeker, offset uint64, value []byte) error 
 // strings specified in 'strOptions' with their corresponding values.
 //
 // Keys in the 'intOptions' / 'strOptions' maps are case-sensitive.
-func (elf *ELF) copy(w io.WriteSeeker, r *io.SectionReader, intOptions map[string]uint32, strOptions map[string]string) error {
+func (elf *ELF) copy(w io.WriteSeeker, r *io.SectionReader, intOptions map[string]uint64, strOptions map[string]string) error {
 	if len(intOptions) == 0 && len(strOptions) == 0 {
 		// Copy the remaining portion of the file
 		if _, err := io.Copy(w, r); err != nil {
@@ -133,27 +135,36 @@ func (elf *ELF) copy(w io.WriteSeeker, r *io.SectionReader, intOptions map[strin
 
 processSymbols:
 	for _, symbol := range elf.symbols.sort() {
-		scopedLog := log.WithField("symbol", symbol.name)
+		// Use the symbol's name without config prefix for lookups and logging.
+		name := strings.TrimPrefix(symbol.name, configPrefix)
+
+		scopedLog := log.WithField("symbol", name)
 
 		// Figure out the value to substitute
 		var value []byte
 		switch symbol.kind {
 		case symbolData:
-			if v, exists := intOptions[symbol.name]; exists {
+			// intOptions doesn't contain symbols with the config prefix, but symbols
+			// found in the ELF do.
+			if v, exists := intOptions[name]; exists {
 				value = make([]byte, symbol.size)
 				switch uintptr(symbol.size) {
+				case unsafe.Sizeof(uint64(0)):
+					elf.metadata.ByteOrder.PutUint64(value, v)
 				case unsafe.Sizeof(uint32(0)):
-					elf.metadata.ByteOrder.PutUint32(value, v)
+					elf.metadata.ByteOrder.PutUint32(value, uint32(v))
 				case unsafe.Sizeof(uint16(0)):
 					elf.metadata.ByteOrder.PutUint16(value, uint16(v))
+				default:
+					return fmt.Errorf("substitute symbol %s: unsupported size %d", name, symbol.size)
 				}
 			}
 
 		case symbolString:
-			v, exists := strOptions[symbol.name]
+			v, exists := strOptions[name]
 			if exists {
 				if uint64(len(v)) != symbol.size {
-					return fmt.Errorf("symbol substitution value %q (len %d) must equal length of symbol name %q (len %d)", v, len(v), symbol.name, symbol.size)
+					return fmt.Errorf("symbol substitution value %q (len %d) must equal length of symbol name %q (len %d)", v, len(v), name, symbol.size)
 				}
 				value = []byte(v)
 			}
@@ -161,7 +172,7 @@ processSymbols:
 
 		if value == nil {
 			for _, prefix := range ignoredPrefixes {
-				if strings.HasPrefix(symbol.name, prefix) {
+				if strings.HasPrefix(name, prefix) {
 					continue processSymbols
 				}
 			}
@@ -171,16 +182,16 @@ processSymbols:
 
 		// Encode the value at the given offset in the destination file.
 		if err := elf.writeValue(w, symbol.offset, value); err != nil {
-			return fmt.Errorf("failed to substitute %s: %s", symbol.name, err)
+			return fmt.Errorf("failed to substitute %s: %s", name, err)
 		}
 
 		if symbol.offsetBTF != 0 {
 			if err := elf.writeValue(w, symbol.offsetBTF, value); err != nil {
-				return fmt.Errorf("failed to substitute %s BTF: %s", symbol.name, err)
+				return fmt.Errorf("failed to substitute %s BTF: %s", name, err)
 			}
 		}
 
-		processedOptions[symbol.name] = struct{}{}
+		processedOptions[name] = struct{}{}
 	}
 
 	// Check for additional options that weren't applied
@@ -208,7 +219,7 @@ processSymbols:
 //
 // On success, writes the new file to the specified path.
 // On failure, returns an error and no file is left on the filesystem.
-func (elf *ELF) Write(path string, intOptions map[string]uint32, strOptions map[string]string) error {
+func (elf *ELF) Write(path string, intOptions map[string]uint64, strOptions map[string]string) error {
 	elf.Lock()
 	defer elf.Unlock()
 
@@ -234,7 +245,7 @@ func (elf *ELF) Write(path string, intOptions map[string]uint32, strOptions map[
 		}
 	}()
 
-	reader := newReader(elf.file)
+	reader := newReader(elf.contents)
 	if err = elf.copy(f, reader, intOptions, strOptions); err != nil {
 		return &os.PathError{
 			Op:   "failed to write ELF file:",

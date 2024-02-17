@@ -6,20 +6,24 @@ package cni
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path"
+	"sort"
 	"strings"
 	"text/template"
-	"time"
 
+	"github.com/containernetworking/cni/libcni"
 	"github.com/fsnotify/fsnotify"
 	"github.com/google/renameio/v2"
 	"github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 
 	"github.com/cilium/cilium/pkg/controller"
-	"github.com/cilium/cilium/pkg/hive"
+	"github.com/cilium/cilium/pkg/hive/cell"
+	"github.com/cilium/cilium/pkg/time"
 	cnitypes "github.com/cilium/cilium/plugins/cilium-cni/types"
 )
 
@@ -43,24 +47,38 @@ type cniConfigManager struct {
 // GetMTU returns the MTU as written in the CNI configuration file.
 // This is one way to override the node's MTU.
 func (c *cniConfigManager) GetMTU() int {
-	if c.config.ReadCNIConf == "" {
+	conf := c.GetCustomNetConf()
+	if conf == nil {
 		return 0
 	}
-
-	conf, err := cnitypes.ReadNetConf(c.config.ReadCNIConf)
-	if err != nil {
-		c.log.WithField("path", c.config.ReadCNIConf).WithError(err).Warnf("Failed to parse existing CNI configuration file")
-	}
-
-	if conf.MTU > 0 {
-		return conf.MTU
-	}
-	return 0
+	return conf.MTU
 }
 
 // GetChainingMode returns the configured chaining mode.
 func (c *cniConfigManager) GetChainingMode() string {
 	return c.config.CNIChainingMode
+}
+
+// ExternalRoutingEnabled returns true if the chained plugin implements routing
+// for Endpoints (Pods).
+func (c *cniConfigManager) ExternalRoutingEnabled() bool {
+	return c.config.CNIExternalRouting
+}
+
+// GetCustomNetConf returns the parsed custom CNI configuration, if provided
+// (In other words, the value to --read-cni-conf).
+// Otherwise, returns nil.
+func (c *cniConfigManager) GetCustomNetConf() *cnitypes.NetConf {
+	if c.config.ReadCNIConf == "" {
+		return nil
+	}
+
+	conf, err := cnitypes.ReadNetConf(c.config.ReadCNIConf)
+	if err != nil {
+		c.log.WithField("path", c.config.ReadCNIConf).WithError(err).Warnf("Failed to parse existing CNI configuration file")
+		return nil
+	}
+	return conf
 }
 
 // cniConfigs are the default configurations, per chaining mode
@@ -99,6 +117,7 @@ var cniConfigs map[string]string = map[string]string{
     },
     {
        "type": "cilium-cni",
+       "chaining-mode": "flannel",
        "enable-debug": {{.Debug | js }},
        "log-file": "{{.LogFile | js }}"
     }
@@ -125,15 +144,18 @@ var cniConfigs map[string]string = map[string]string{
 }
 
 // The CNI plugin config we inject in to the plugins[] array of existing AWS configs
-const awsCNIEntry = `
+const chainedCNIEntry = `
 {
 	"type": "cilium-cni",
+	"chaining-mode": "{{.ChainingMode | js }}",
 	"enable-debug": {{.Debug | js }},
 	"log-file": "{{.LogFile | js }}"
 }
 `
 
 const cniControllerName = "write-cni-file"
+
+var cniControllerGroup = controller.NewGroup("write-cni-file")
 
 // startCNIConfWriter starts the CNI configuration file manager.
 //
@@ -153,26 +175,32 @@ const cniControllerName = "write-cni-file"
 // - cni-exlusive -- if true, then remove other existing CNI configurations
 // - cni-log-file=PATH -- A file for the CNI plugin to use for logging
 // - debug -- Whether or not the CNI plugin binary should be verbose
-func (c *cniConfigManager) Start(hive.HookContext) error {
+func (c *cniConfigManager) Start(cell.HookContext) error {
 	if c.config.WriteCNIConfWhenReady == "" {
 		return nil
 	}
 
-	var err error
-
-	c.watcher, err = fsnotify.NewWatcher()
-	if err != nil {
-		c.log.Warnf("Failed to create watcher: %v", err)
-	} else {
-		if err := c.watcher.Add(c.cniConfDir); err != nil {
-			c.log.Warnf("Failed to watch CNI configuration directory %s: %v", c.cniConfDir, err)
-			c.watcher = nil
+	// Watch the CNI configuration directory, and regenerate CNI config
+	// if necessary.
+	// Don't watch for changes if cni-exclusive is false. This is to allow
+	// rewriting of the Cilium CNI configuration by another plugin (e.g. Istio).
+	if c.config.CNIExclusive {
+		var err error
+		c.watcher, err = fsnotify.NewWatcher()
+		if err != nil {
+			c.log.Warnf("Failed to create watcher: %v", err)
+		} else {
+			if err := c.watcher.Add(c.cniConfDir); err != nil {
+				c.log.Warnf("Failed to watch CNI configuration directory %s: %v", c.cniConfDir, err)
+				c.watcher = nil
+			}
 		}
 	}
 
 	// Install the CNI file controller
 	c.controller.UpdateController(cniControllerName,
 		controller.ControllerParams{
+			Group: cniControllerGroup,
 			DoFunc: func(ctx context.Context) error {
 				err := c.setupCNIConfFile()
 				if err != nil {
@@ -190,7 +218,7 @@ func (c *cniConfigManager) Start(hive.HookContext) error {
 	return nil
 }
 
-func (c *cniConfigManager) Stop(hive.HookContext) error {
+func (c *cniConfigManager) Stop(cell.HookContext) error {
 	c.doneFunc()
 	c.controller.RemoveAllAndWait()
 
@@ -250,6 +278,11 @@ func (c *cniConfigManager) setupCNIConfFile() error {
 		}
 	}
 
+	err = ensureDirExists(c.cniConfDir)
+	if err != nil {
+		return fmt.Errorf("failed to create the dir %s of the CNI configuration file: %w", c.cniConfDir, err)
+	}
+
 	dest := path.Join(c.cniConfDir, c.cniConfFile)
 
 	// Check to see if existing file is the same; if so, do nothing
@@ -274,23 +307,18 @@ func (c *cniConfigManager) setupCNIConfFile() error {
 }
 
 // renderCNIConf renders the CNI configuration file based on the parameters.
-// Note: this is somewhat special for AWS, see tryInjectAWSConfig.
+// It may generate a configuration file from scratch or inject Cilium
+// in to an existing CNI network.
 func (c *cniConfigManager) renderCNIConf() (cniConfig []byte, err error) {
-	// special case: AWS adjusts existing file rather than creating
-	// one from scratch
-	if c.config.CNIChainingMode == "aws-cni" {
-		pluginConfig := c.renderCNITemplate(awsCNIEntry)
-		cniConfig, err = c.mergeExistingAWSCNIConfig(c.cniConfDir, pluginConfig)
+	if c.config.CNIChainingTarget != "" {
+		pluginConfig := c.renderCNITemplate(chainedCNIEntry)
+		cniConfig, err = c.mergeExistingCNIConfig(pluginConfig)
 		if err != nil {
 			return nil, err
 		}
 	} else {
-		mode := c.config.CNIChainingMode
-		if mode == "" {
-			mode = "none"
-		}
-		c.log.Infof("Generating CNI configuration file with mode %s", mode)
-		tmpl := cniConfigs[c.config.CNIChainingMode]
+		c.log.Infof("Generating CNI configuration file with mode %s", c.config.CNIChainingMode)
+		tmpl := cniConfigs[strings.ToLower(c.config.CNIChainingMode)]
 		cniConfig = []byte(c.renderCNITemplate(tmpl))
 	}
 
@@ -301,45 +329,52 @@ func (c *cniConfigManager) renderCNIConf() (cniConfig []byte, err error) {
 	return cniConfig, nil
 }
 
-// mergeExistingAWSCNIConfig looks for an existing AWS cni configuration file
-// and modifies it to include Cilium. This is because they do something
-// "special" for v6-only clusters.
+// mergeExistingCNIConfig looks for an existing cni configuration
+// and modifies it to include Cilium. If no configuration is found, it
+// fails.
 //
-// cniDir is the directory in the container to look for AWS CNI config, and
-// pluginConfig is the raw json to insert
+// pluginConfig is the raw json to insert in the plugin chain.
 //
-// See PR #18522 for details.
-func (c *cniConfigManager) mergeExistingAWSCNIConfig(confDir string, pluginConfig []byte) ([]byte, error) {
-	awsFiles := []string{"10-aws.conflist", "10-aws.conflist.cilium_bak"}
-	found, err := findFile(confDir, awsFiles)
+// This was originally added to interact solely with aws-cni, see
+// PR #18522 for details.
+func (c *cniConfigManager) mergeExistingCNIConfig(pluginConfig []byte) ([]byte, error) {
+	contents, err := c.findCNINetwork(c.config.CNIChainingTarget)
 	if err != nil {
-		return nil, fmt.Errorf("could not find existing AWS CNI config for chaining %w", err)
+		return nil, fmt.Errorf("could not find existing CNI config for chaining %w", err)
 	}
 
-	contents, err := os.ReadFile(found)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read existing AWS CNI config %s: %w", found, err)
-	}
+	// Check to see if we're already inserted; otherwise we should append
+	index := int64(-1)
+	res := gjson.GetBytes(contents, `plugins.#.type`)
+	res.ForEach(func(key gjson.Result, value gjson.Result) bool {
+		if value.String() == "cilium-cni" {
+			index = key.Int()
+			return false
+		}
+		return true
+	})
 
-	// We found the CNI configuration,
-	// inject Cilium as the last chained plugin
-	out, err := sjson.SetRawBytes(contents, "plugins.-1", pluginConfig)
+	// Inject cilium in to the plugins[] array, appending or overwriting if it
+	// already existed.
+	out, err := sjson.SetRawBytes(contents, fmt.Sprintf("plugins.%d", index), pluginConfig)
 	if err != nil {
-		return nil, fmt.Errorf("failed to modify existing AWS CNI config at %s: %w", found, err)
+		return nil, fmt.Errorf("failed to modify existing CNI config: %w", err)
 	}
-	c.log.Infof("Inserting cilium in to CNI configuration file at %s", found)
+	c.log.Infof("Generated chained cilium CNI configuration from %s", c.config.CNIChainingTarget)
 	return out, nil
 }
 
 // renderCNITemplate applies any cni template replacements
-// right now, just sets .Debug and Logfile
+// currently: Debug, LogFile, and ChainingMode
 func (c *cniConfigManager) renderCNITemplate(in string) []byte {
 	data := struct {
-		Debug   bool
-		LogFile string
+		Debug        bool
+		LogFile      string
+		ChainingMode string
 	}{
-		Debug:   c.debug,
-		LogFile: c.config.CNILogFile,
+		Debug:        c.debug,
+		LogFile:      c.config.CNILogFile,
+		ChainingMode: c.config.CNIChainingMode,
 	}
 
 	t := template.Must(template.New("cni").Parse(in))
@@ -385,20 +420,67 @@ func (c *cniConfigManager) cleanupOtherCNI() error {
 	return nil
 }
 
-// findFile looks in basedir for any filenames listed in paths.
-// returns the full path to the first one found, or error if none found
-func findFile(basedir string, paths []string) (string, error) {
-	for _, p := range paths {
-		_, err := os.Stat(path.Join(basedir, p))
-		if err != nil {
-			if os.IsNotExist(err) {
-				continue
-			}
-			return "", err
-		} else {
-			return path.Join(basedir, p), nil
-		}
+// findCNINetwork scans a given directory for CNI configuration files,
+// returning the path to a file that contains a CNI **network** with the name
+// supplied.
+func (c *cniConfigManager) findCNINetwork(wantNetwork string) ([]byte, error) {
+	files, err := libcni.ConfFiles(c.cniConfDir, []string{".conflist", ".conf", ".json", ".cilium_bak"})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list files in %s: %w", c.cniConfDir, err)
 	}
+	sort.Strings(files)
 
-	return "", os.ErrNotExist
+	for _, file := range files {
+		// Don't inject ourselves in to ourselves :-)
+		if _, filename := path.Split(file); filename == c.cniConfFile {
+			continue
+		}
+		contents, err := os.ReadFile(file)
+		if err != nil {
+			c.log.WithError(err).WithField("path", file).Warn("Could not read CNI configuration file, skipping.")
+			continue
+		}
+
+		rawConfig := make(map[string]interface{})
+		if err := json.Unmarshal(contents, &rawConfig); err != nil {
+			c.log.WithError(err).WithField("path", file).Warn("CNI configuration file has invalid json, skipping.")
+			continue
+		}
+
+		netName, ok := rawConfig["name"].(string)
+		if !ok {
+			continue
+		}
+
+		// "*" indicates select the first valid file. It is not a valid CNI network name
+		if wantNetwork != "*" && wantNetwork != netName {
+			continue
+		}
+
+		c.log.WithField("path", file).Infof("Found CNI network %s for chaining", netName)
+
+		// Check to see if we need to upconvert to a CNI configuration list.
+		// The presence of a "plugins" configuration key means this is a conflist
+		plugins, ok := rawConfig["plugins"].([]interface{})
+		if ok && len(plugins) > 0 {
+			return contents, nil
+		}
+
+		rawConfigList := map[string]interface{}{
+			"name":       wantNetwork,
+			"cniVersion": rawConfig["cniVersion"],
+			"plugins":    []interface{}{rawConfig},
+		}
+
+		return json.Marshal(rawConfigList)
+	}
+	return nil, fmt.Errorf("no matching CNI configurations found (will retry)")
+}
+
+func ensureDirExists(dir string) error {
+	err := os.MkdirAll(dir, os.ModePerm)
+	if err != nil && os.IsExist(err) {
+		return nil
+	}
+	return err
 }

@@ -43,39 +43,23 @@ type DescribeBundleTasksInput struct {
 
 	// Checks whether you have the required permissions for the action, without
 	// actually making the request, and provides an error response. If you have the
-	// required permissions, the error response is DryRunOperation. Otherwise, it is
-	// UnauthorizedOperation.
+	// required permissions, the error response is DryRunOperation . Otherwise, it is
+	// UnauthorizedOperation .
 	DryRun *bool
 
 	// The filters.
-	//
-	// * bundle-id - The ID of the bundle task.
-	//
-	// * error-code - If the
-	// task failed, the error code returned.
-	//
-	// * error-message - If the task failed, the
-	// error message returned.
-	//
-	// * instance-id - The ID of the instance.
-	//
-	// * progress -
-	// The level of task completion, as a percentage (for example, 20%).
-	//
-	// * s3-bucket -
-	// The Amazon S3 bucket to store the AMI.
-	//
-	// * s3-prefix - The beginning of the AMI
-	// name.
-	//
-	// * start-time - The time the task started (for example,
-	// 2013-09-15T17:15:20.000Z).
-	//
-	// * state - The state of the task (pending |
-	// waiting-for-shutdown | bundling | storing | cancelling | complete | failed).
-	//
-	// *
-	// update-time - The time of the most recent update for the task.
+	//   - bundle-id - The ID of the bundle task.
+	//   - error-code - If the task failed, the error code returned.
+	//   - error-message - If the task failed, the error message returned.
+	//   - instance-id - The ID of the instance.
+	//   - progress - The level of task completion, as a percentage (for example, 20%).
+	//   - s3-bucket - The Amazon S3 bucket to store the AMI.
+	//   - s3-prefix - The beginning of the AMI name.
+	//   - start-time - The time the task started (for example,
+	//   2013-09-15T17:15:20.000Z).
+	//   - state - The state of the task ( pending | waiting-for-shutdown | bundling |
+	//   storing | cancelling | complete | failed ).
+	//   - update-time - The time of the most recent update for the task.
 	Filters []types.Filter
 
 	noSmithyDocumentSerde
@@ -93,12 +77,22 @@ type DescribeBundleTasksOutput struct {
 }
 
 func (c *Client) addOperationDescribeBundleTasksMiddlewares(stack *middleware.Stack, options Options) (err error) {
+	if err := stack.Serialize.Add(&setOperationInputMiddleware{}, middleware.After); err != nil {
+		return err
+	}
 	err = stack.Serialize.Add(&awsEc2query_serializeOpDescribeBundleTasks{}, middleware.After)
 	if err != nil {
 		return err
 	}
 	err = stack.Deserialize.Add(&awsEc2query_deserializeOpDescribeBundleTasks{}, middleware.After)
 	if err != nil {
+		return err
+	}
+	if err := addProtocolFinalizerMiddlewares(stack, options, "DescribeBundleTasks"); err != nil {
+		return fmt.Errorf("add protocol finalizers: %v", err)
+	}
+
+	if err = addlegacyEndpointContextSetter(stack, options); err != nil {
 		return err
 	}
 	if err = addSetLoggerMiddleware(stack, options); err != nil {
@@ -119,16 +113,13 @@ func (c *Client) addOperationDescribeBundleTasksMiddlewares(stack *middleware.St
 	if err = addRetryMiddlewares(stack, options); err != nil {
 		return err
 	}
-	if err = addHTTPSignerV4Middleware(stack, options); err != nil {
-		return err
-	}
 	if err = awsmiddleware.AddRawResponseToMetadata(stack); err != nil {
 		return err
 	}
 	if err = awsmiddleware.AddRecordResponseTiming(stack); err != nil {
 		return err
 	}
-	if err = addClientUserAgent(stack); err != nil {
+	if err = addClientUserAgent(stack, options); err != nil {
 		return err
 	}
 	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
@@ -137,7 +128,13 @@ func (c *Client) addOperationDescribeBundleTasksMiddlewares(stack *middleware.St
 	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
 		return err
 	}
+	if err = addSetLegacyContextSigningOptionsMiddleware(stack); err != nil {
+		return err
+	}
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opDescribeBundleTasks(options.Region), middleware.Before); err != nil {
+		return err
+	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
@@ -149,11 +146,14 @@ func (c *Client) addOperationDescribeBundleTasksMiddlewares(stack *middleware.St
 	if err = addRequestResponseLogging(stack, options); err != nil {
 		return err
 	}
+	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
+		return err
+	}
 	return nil
 }
 
-// DescribeBundleTasksAPIClient is a client that implements the DescribeBundleTasks
-// operation.
+// DescribeBundleTasksAPIClient is a client that implements the
+// DescribeBundleTasks operation.
 type DescribeBundleTasksAPIClient interface {
 	DescribeBundleTasks(context.Context, *DescribeBundleTasksInput, ...func(*Options)) (*DescribeBundleTasksOutput, error)
 }
@@ -173,8 +173,8 @@ type BundleTaskCompleteWaiterOptions struct {
 	// MinDelay must resolve to a value lesser than or equal to the MaxDelay.
 	MinDelay time.Duration
 
-	// MaxDelay is the maximum amount of time to delay between retries. If unset or set
-	// to zero, BundleTaskCompleteWaiter will use default max delay of 120 seconds.
+	// MaxDelay is the maximum amount of time to delay between retries. If unset or
+	// set to zero, BundleTaskCompleteWaiter will use default max delay of 120 seconds.
 	// Note that MaxDelay must resolve to value greater than or equal to the MinDelay.
 	MaxDelay time.Duration
 
@@ -363,7 +363,6 @@ func newServiceMetadataMiddleware_opDescribeBundleTasks(region string) *awsmiddl
 	return &awsmiddleware.RegisterServiceMetadata{
 		Region:        region,
 		ServiceID:     ServiceID,
-		SigningName:   "ec2",
 		OperationName: "DescribeBundleTasks",
 	}
 }

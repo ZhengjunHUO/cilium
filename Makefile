@@ -12,53 +12,80 @@ debug: all
 
 include Makefile.defs
 
-SUBDIRS_CILIUM_CONTAINER := proxylib envoy bpf cilium daemon cilium-health bugtool tools/mount tools/sysctlfix
-SUBDIRS := $(SUBDIRS_CILIUM_CONTAINER) operator plugins tools hubble-relay
+SUBDIRS_CILIUM_CONTAINER := cilium-dbg daemon cilium-health bugtool tools/mount tools/sysctlfix plugins/cilium-cni
+SUBDIR_OPERATOR_CONTAINER := operator
+SUBDIR_RELAY_CONTAINER := hubble-relay
 
-SUBDIRS_CILIUM_CONTAINER += plugins/cilium-cni
 ifdef LIBNETWORK_PLUGIN
 SUBDIRS_CILIUM_CONTAINER += plugins/cilium-docker
 endif
+
+# Add the ability to override variables
+-include Makefile.override
+
+# List of subdirectories used for global "make build", "make clean", etc
+SUBDIRS := $(SUBDIRS_CILIUM_CONTAINER) $(SUBDIR_OPERATOR_CONTAINER) plugins tools $(SUBDIR_RELAY_CONTAINER) bpf
+
+# Filter out any directories where the parent directory is also present, to avoid
+# building or cleaning a subdirectory twice.
+# For example: The directory "tools" is transformed into a match pattern "tools/%",
+# which is then used to filter out items such as "tools/mount" and "tools/sysctlfx"
+SUBDIRS := $(filter-out $(foreach dir,$(SUBDIRS),$(dir)/%),$(SUBDIRS))
 
 # Space-separated list of Go packages to test, equivalent to 'go test' package patterns.
 # Because is treated as a Go package pattern, the special '...' sequence is supported,
 # meaning 'all subpackages of the given package'.
 TESTPKGS ?= ./...
 
-SWAGGER_VERSION := v0.30.3
-SWAGGER := $(CONTAINER_ENGINE) run -u $(shell id -u):$(shell id -g) --rm -v $(CURDIR):$(CURDIR) -w $(CURDIR) --entrypoint swagger quay.io/goswagger/swagger:$(SWAGGER_VERSION)
-
-GOTEST_BASE := -test.v -timeout 600s
+GOTEST_BASE := -timeout 600s
 GOTEST_COVER_OPTS += -coverprofile=coverage.out
 BENCH_EVAL := "."
 BENCH ?= $(BENCH_EVAL)
 BENCHFLAGS_EVAL := -bench=$(BENCH) -run=^$ -benchtime=10s
 BENCHFLAGS ?= $(BENCHFLAGS_EVAL)
-SKIP_VET ?= "false"
 SKIP_KVSTORES ?= "false"
 SKIP_K8S_CODE_GEN_CHECK ?= "true"
 SKIP_CUSTOMVET_CHECK ?= "false"
 
 JOB_BASE_NAME ?= cilium_test
 
-GO_MAJOR_AND_MINOR_VERSION := $(shell awk '/^go/ { print $$2 }' go.mod)
-GO_INSTALLED_MAJOR_AND_MINOR_VERSION := $(shell $(GO) version | sed 's/go version go\([0-9]\+\).\([0-9]\+\)\(.[0-9]\+\)\?.*/\1.\2/')
-
 TEST_LDFLAGS=-ldflags "-X github.com/cilium/cilium/pkg/kvstore.consulDummyAddress=https://consul:8443 \
 	-X github.com/cilium/cilium/pkg/kvstore.etcdDummyAddress=http://etcd:4002 \
-	-X github.com/cilium/cilium/pkg/datapath.DatapathSHA256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+	-X github.com/cilium/cilium/pkg/datapath.datapathSHA256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
-TEST_UNITTEST_LDFLAGS=-ldflags "-X github.com/cilium/cilium/pkg/datapath.DatapathSHA256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+TEST_UNITTEST_LDFLAGS=-ldflags "-X github.com/cilium/cilium/pkg/datapath.datapathSHA256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+BPF_SOURCE_NAMES_TO_IDS ?= bpf/source_names_to_ids.h
+GO_SOURCE_NAMES_TO_IDS ?= pkg/monitor/datapath_drop.go
 
 build: check-sources $(SUBDIRS) ## Builds all the components for Cilium by executing make in the respective sub directories.
 
 build-container: check-sources ## Builds components required for cilium-agent container.
 	for i in $(SUBDIRS_CILIUM_CONTAINER); do $(MAKE) $(SUBMAKEOPTS) -C $$i all; done
 
+build-container-operator: ## Builds components required for cilium-operator container.
+	$(MAKE) $(SUBMAKEOPTS) -C $(SUBDIR_OPERATOR_CONTAINER) all
+
+build-container-operator-generic: ## Builds components required for a cilium-operator generic variant container.
+	$(MAKE) $(SUBMAKEOPTS) -C $(SUBDIR_OPERATOR_CONTAINER) cilium-operator-generic
+
+build-container-operator-aws: ## Builds components required for a cilium-operator aws variant container.
+	$(MAKE) $(SUBMAKEOPTS) -C $(SUBDIR_OPERATOR_CONTAINER) cilium-operator-aws
+
+build-container-operator-azure: ## Builds components required for a cilium-operator azure variant container.
+	$(MAKE) $(SUBMAKEOPTS) -C $(SUBDIR_OPERATOR_CONTAINER) cilium-operator-azure
+
+build-container-operator-alibabacloud: ## Builds components required for a cilium-operator alibabacloud variant container.
+	$(MAKE) $(SUBMAKEOPTS) -C $(SUBDIR_OPERATOR_CONTAINER) cilium-operator-alibabacloud
+
+build-container-hubble-relay:
+	$(MAKE) $(SUBMAKEOPTS) -C $(SUBDIR_RELAY_CONTAINER) all
+
 $(SUBDIRS): force ## Execute default make target(make all) for the provided subdirectory.
 	@ $(MAKE) $(SUBMAKEOPTS) -C $@ all
 
 tests-privileged: ## Run Go tests including ones that require elevated privileges.
+	@$(ECHO_CHECK) running privileged tests...
 	PRIVILEGED_TESTS=true PATH=$(PATH):$(ROOT_DIR)/bpf $(GO_TEST) $(TEST_LDFLAGS) \
 		$(TESTPKGS) $(GOTEST_BASE) $(GOTEST_COVER_OPTS) | $(GOTEST_FORMATTER)
 	$(MAKE) generate-cov
@@ -109,9 +136,7 @@ generate-cov: ## Generate HTML coverage report at coverage-all.html.
 
 integration-tests: start-kvstores ## Run Go tests including ones that are marked as integration tests.
 	$(QUIET) $(MAKE) $(SUBMAKEOPTS) -C test/bpf/
-ifeq ($(SKIP_VET),"false")
-	$(MAKE) govet
-endif
+	@$(ECHO_CHECK) running integration tests...
 	INTEGRATION_TESTS=true $(GO_TEST) $(TEST_UNITTEST_LDFLAGS) $(TESTPKGS) $(GOTEST_BASE) $(GOTEST_COVER_OPTS) | $(GOTEST_FORMATTER)
 	$(MAKE) generate-cov
 	$(MAKE) stop-kvstores
@@ -173,10 +198,36 @@ install-bash-completion: ## Install bash completion for all components required 
 	$(QUIET)$(INSTALL) -m 0755 -d $(DESTDIR)$(BINDIR)
 	for i in $(SUBDIRS_CILIUM_CONTAINER); do $(MAKE) $(SUBMAKEOPTS) -C $$i install-bash-completion; done
 
+install-container-binary-operator: ## Install binaries for all components required for cilium-operator container.
+	$(QUIET)$(INSTALL) -m 0755 -d $(DESTDIR)$(BINDIR)
+	$(MAKE) $(SUBMAKEOPTS) -C $(SUBDIR_OPERATOR_CONTAINER) install
+
+install-container-binary-operator-generic: ## Install binaries for all components required for cilium-operator generic variant container.
+	$(QUIET)$(INSTALL) -m 0755 -d $(DESTDIR)$(BINDIR)
+	$(MAKE) $(SUBMAKEOPTS) -C $(SUBDIR_OPERATOR_CONTAINER) install-generic
+
+install-container-binary-operator-aws: ## Install binaries for all components required for cilium-operator aws variant container.
+	$(QUIET)$(INSTALL) -m 0755 -d $(DESTDIR)$(BINDIR)
+	$(MAKE) $(SUBMAKEOPTS) -C $(SUBDIR_OPERATOR_CONTAINER) install-aws
+
+install-container-binary-operator-azure: ## Install binaries for all components required for cilium-operator azure variant container.
+	$(QUIET)$(INSTALL) -m 0755 -d $(DESTDIR)$(BINDIR)
+	$(MAKE) $(SUBMAKEOPTS) -C $(SUBDIR_OPERATOR_CONTAINER) install-azure
+
+install-container-binary-operator-alibabacloud: ## Install binaries for all components required for cilium-operator alibabacloud variant container.
+	$(QUIET)$(INSTALL) -m 0755 -d $(DESTDIR)$(BINDIR)
+	$(MAKE) $(SUBMAKEOPTS) -C $(SUBDIR_OPERATOR_CONTAINER) install-alibabacloud
+
+install-container-binary-hubble-relay:
+	$(QUIET)$(INSTALL) -m 0755 -d $(DESTDIR)$(BINDIR)
+	$(MAKE) $(SUBMAKEOPTS) -C $(SUBDIR_RELAY_CONTAINER) install-binary
+
 # Workaround for not having git in the build environment
 # Touch the file only if needed
 GIT_VERSION: force
 	@if [ "$(GIT_VERSION)" != "`cat 2>/dev/null GIT_VERSION`" ] ; then echo "$(GIT_VERSION)" >GIT_VERSION; fi
+
+include Makefile.kind
 
 -include Makefile.docker
 
@@ -198,9 +249,17 @@ CRDS_CILIUM_V2 := ciliumnetworkpolicies \
                   ciliumclusterwideenvoyconfigs
 CRDS_CILIUM_V2ALPHA1 := ciliumendpointslices \
                         ciliumbgppeeringpolicies \
+                        ciliumbgpclusterconfigs \
+                        ciliumbgppeerconfigs \
+                        ciliumbgpadvertisements \
+                        ciliumbgpnodeconfigs \
+                        ciliumbgpnodeconfigoverrides \
                         ciliumloadbalancerippools \
                         ciliumnodeconfigs \
-                        ciliumcidrgroups
+                        ciliumcidrgroups \
+                        ciliuml2announcementpolicies \
+                        ciliumpodippools
+
 manifests: ## Generate K8s manifests e.g. CRD, RBAC etc.
 	$(eval TMPDIR := $(shell mktemp -d -t cilium.tmpXXXXXXXX))
 	$(QUIET)$(GO) run sigs.k8s.io/controller-tools/cmd/controller-gen $(CRD_OPTIONS) paths=$(CRD_PATHS) output:crd:artifacts:config="$(TMPDIR)"
@@ -267,8 +326,9 @@ generate-hubble-api: api/v1/flow/flow.proto api/v1/peer/peer.proto api/v1/observ
 
 define generate_k8s_api
 	$(QUIET) cd "./vendor/k8s.io/code-generator" && \
-	bash ./generate-groups.sh $(1) \
+	bash ./generate-internal-groups.sh $(1) \
 	    $(2) \
+	    "" \
 	    $(3) \
 	    $(4) \
 	    --go-header-file "$(PWD)/hack/custom-boilerplate.go.txt" \
@@ -375,7 +435,7 @@ govet: ## Run govet on Go source files in the repository.
 	$(QUIET) $(GO_VET) ./...
 
 golangci-lint: ## Run golangci-lint
-ifneq (,$(findstring $(GOLANGCILINT_WANT_VERSION),$(GOLANGCILINT_VERSION)))
+ifneq (,$(findstring $(GOLANGCILINT_WANT_VERSION:v%=%),$(GOLANGCILINT_VERSION)))
 	@$(ECHO_CHECK) golangci-lint $(GOLANGCI_LINT_ARGS)
 	$(QUIET) golangci-lint run $(GOLANGCI_LINT_ARGS)
 else
@@ -410,172 +470,7 @@ microk8s: check-microk8s ## Build cilium-dev docker image and import to microk8s
 	@echo "  DEPLOY image to microk8s ($(LOCAL_OPERATOR_IMAGE))"
 	$(QUIET)./contrib/scripts/microk8s-import.sh $(LOCAL_OPERATOR_IMAGE)
 
-kind: ## Create a kind cluster for Cilium development.
-	$(QUIET)./contrib/scripts/kind.sh
-
-kind-down: ## Destroy a kind cluster for Cilium development.
-	$(QUIET)./contrib/scripts/kind-down.sh
-
-.PHONY: kind-clustermesh
-kind-clustermesh: ## Create two kind clusters for clustermesh development.
-	@echo " If you have problems with too many open file, check https://kind.sigs.k8s.io/docs/user/known-issues/#pod-errors-due-to-too-many-open-files"
-	$(QUIET) CLUSTER_NAME=clustermesh1 IPFAMILY=ipv4 PODSUBNET=10.1.0.0/16 SERVICESUBNET=172.20.1.0/24 ./contrib/scripts/kind.sh
-	$(QUIET) CLUSTER_NAME=clustermesh2 AGENTPORTPREFIX=236 OPERATORPORTPREFIX=237 IPFAMILY=ipv4 PODSUBNET=10.2.0.0/16 SERVICESUBNET=172.20.2.0/24 ./contrib/scripts/kind.sh
-
-.PHONY: kind-clustermesh-down
-kind-clustermesh-down: ## Destroy kind clusters for clustermesh development.
-	$(QUIET)./contrib/scripts/kind-down.sh clustermesh1 clustermesh2
-
-.PHONY: kind-clustermesh-ready
-kind-clustermesh-ready: ## Check if both kind clustermesh clusters exist
-	@$(ECHO_CHECK) clustermesh kind is ready...
-	@kind get clusters 2>&1 | grep "clustermesh1" \
-		&& exit 0 || exit 1
-	@kind get clusters 2>&1 | grep "clustermesh2" \
-		&& exit 0 || exit 1
-
-# Template for kind environment for a target. Parameters are:
-# $(1) Makefile target name
-define KIND_ENV
-.PHONY: $(1)
-$(1): export DOCKER_REGISTRY=localhost:5000
-$(1): export LOCAL_AGENT_IMAGE=$$(DOCKER_REGISTRY)/$$(DOCKER_DEV_ACCOUNT)/cilium-dev:$$(LOCAL_IMAGE_TAG)
-$(1): export LOCAL_OPERATOR_IMAGE=$$(DOCKER_REGISTRY)/$$(DOCKER_DEV_ACCOUNT)/operator-generic:$$(LOCAL_IMAGE_TAG)
-$(1): export LOCAL_CLUSTERMESH_IMAGE=$$(DOCKER_REGISTRY)/$$(DOCKER_DEV_ACCOUNT)/clustermesh-apiserver:$$(LOCAL_IMAGE_TAG)
-endef
-
-$(eval $(call KIND_ENV,kind-clustermesh-images))
-kind-clustermesh-images: kind-clustermesh-ready kind-build-clustermesh-apiserver kind-build-image-agent kind-build-image-operator ## Builds images and imports them into clustermesh clusters
-	$(QUIET)kind load docker-image $(LOCAL_CLUSTERMESH_IMAGE) --name clustermesh1
-	$(QUIET)kind load docker-image $(LOCAL_CLUSTERMESH_IMAGE) --name clustermesh2
-	$(QUIET)kind load docker-image $(LOCAL_AGENT_IMAGE) --name clustermesh1
-	$(QUIET)kind load docker-image $(LOCAL_AGENT_IMAGE) --name clustermesh2
-	$(QUIET)kind load docker-image $(LOCAL_OPERATOR_IMAGE) --name clustermesh1
-	$(QUIET)kind load docker-image $(LOCAL_OPERATOR_IMAGE) --name clustermesh2
-
-$(eval $(call KIND_ENV,kind-install-cilium-clustermesh))
-kind-install-cilium-clustermesh: kind-clustermesh-ready ## Install a local Cilium version into the clustermesh clusters and enable clustermesh.
-	@echo "  INSTALL cilium on clustermesh1 cluster"
-	kubectl config use kind-clustermesh1
-	-cilium uninstall >/dev/null
-	cilium install \
-		--chart-directory=$(ROOT_DIR)/install/kubernetes/cilium \
-		--helm-values=$(ROOT_DIR)/contrib/testing/kind-clustermesh1.yaml \
-		--version=
-	@echo "  INSTALL cilium on clustermesh2 cluster"
-	kubectl config use kind-clustermesh2
-	-cilium uninstall >/dev/null
-	cilium install \
-		--inherit-ca kind-clustermesh1 \
-		--chart-directory=$(ROOT_DIR)/install/kubernetes/cilium \
-		--helm-values=$(ROOT_DIR)/contrib/testing/kind-clustermesh2.yaml \
-		--version=
-	@echo "  Enabling clustermesh"
-	cilium clustermesh enable --context kind-clustermesh1 --service-type NodePort --apiserver-image $(LOCAL_CLUSTERMESH_IMAGE)
-	cilium clustermesh enable --context kind-clustermesh2 --service-type NodePort --apiserver-image $(LOCAL_CLUSTERMESH_IMAGE)
-	cilium clustermesh status --context kind-clustermesh1 --wait
-	cilium clustermesh status --context kind-clustermesh2 --wait
-	cilium clustermesh connect --context kind-clustermesh1 --destination-context kind-clustermesh2
-	cilium clustermesh status --context kind-clustermesh1 --wait
-	cilium clustermesh status --context kind-clustermesh2 --wait
-
-
-.PHONY: kind-ready
-kind-ready:
-	@$(ECHO_CHECK) kind is ready...
-	@kind get clusters 2>&1 | grep "No kind clusters found." \
-		&& exit 1 || exit 0
-
-$(eval $(call KIND_ENV,kind-build-image-agent))
-kind-build-image-agent: ## Build cilium-dev docker image
-	$(QUIET)$(MAKE) dev-docker-image$(DEBUGGER_SUFFIX) DOCKER_IMAGE_TAG=$(LOCAL_IMAGE_TAG)
-
-$(eval $(call KIND_ENV,kind-image-agent))
-kind-image-agent: kind-ready kind-build-image-agent ## Build cilium-dev docker image and import it into kind.
-	$(QUIET)kind load docker-image $(LOCAL_AGENT_IMAGE)
-
-$(eval $(call KIND_ENV,kind-build-image-operator))
-kind-build-image-operator: ## Build cilium-operator-dev docker image
-	$(QUIET)$(MAKE) dev-docker-operator-generic-image$(DEBUGGER_SUFFIX) DOCKER_IMAGE_TAG=$(LOCAL_IMAGE_TAG)
-
-$(eval $(call KIND_ENV,kind-image-operator))
-kind-image-operator: kind-ready kind-build-image-operator ## Build cilium-operator-dev docker image and import it into kind.
-	$(QUIET)kind load docker-image $(LOCAL_OPERATOR_IMAGE)
-
-$(eval $(call KIND_ENV,kind-build-clustermesh-apiserver))
-kind-build-clustermesh-apiserver: ## Build cilium-clustermesh-apiserver docker image
-	$(QUIET)$(MAKE) docker-clustermesh-apiserver-image DOCKER_IMAGE_TAG=$(LOCAL_IMAGE_TAG)
-
-.PHONY: kind-image
-kind-image: ## Build cilium and operator images and import them into kind.
-	$(MAKE) kind-image-agent
-	$(MAKE) kind-image-operator
-
-.PHONY: kind-install-cilium
-kind-install-cilium: kind-ready ## Install a local Cilium version into the cluster.
-	@echo "  INSTALL cilium"
-	# cilium-cli doesn't support idempotent installs, so we uninstall and
-	# reinstall here. https://github.com/cilium/cilium-cli/issues/205
-	-cilium uninstall >/dev/null
-	# cilium-cli's --wait flag doesn't work, so we just force it to run
-	# in the background instead and wait for the resources to be available.
-	# https://github.com/cilium/cilium-cli/issues/1070
-	cilium install \
-		--chart-directory=$(ROOT_DIR)/install/kubernetes/cilium \
-		--helm-values=$(ROOT_DIR)/contrib/testing/kind-values.yaml \
-		--version= \
-		>/dev/null 2>&1 &
-
-.PHONY: kind-check-cilium
-kind-check-cilium:
-	@echo "  CHECK  cilium is ready..."
-	cilium status --wait --wait-duration 1s >/dev/null 2>/dev/null
-
-# Template for kind debug targets. Parameters are:
-# $(1) agent target
-define DEBUG_KIND_TEMPLATE
-.PHONY: kind-image$(1)-debug
-kind-image$(1)-debug: export DEBUGGER_SUFFIX=-debug
-kind-image$(1)-debug: export NOSTRIP=1
-kind-image$(1)-debug: export NOOPT=1
-kind-image$(1)-debug: ## Build cilium$(1) docker image with a dlv debugger wrapper and import it into kind.
-	$(MAKE) kind-image$(1)
-endef
-
-# kind-image-agent-debug
-$(eval $(call DEBUG_KIND_TEMPLATE,-agent))
-
-# kind-image-operator-debug
-$(eval $(call DEBUG_KIND_TEMPLATE,-operator))
-
-$(eval $(call KIND_ENV,kind-debug-agent))
-kind-debug-agent: ## Create a local kind development environment with cilium-agent attached to a debugger.
-	$(QUIET)$(MAKE) kind-ready 2>/dev/null \
-		|| $(MAKE) kind
-	$(MAKE) kind-image-agent-debug
-	# Not debugging cilium-operator here; any image is good enough.
-	kind load docker-image $(LOCAL_OPERATOR_IMAGE) \
-		|| $(MAKE) kind-image-operator
-	$(MAKE) kind-check-cilium 2>/dev/null \
-		|| $(MAKE) kind-install-cilium
-	@echo "Attach delve to localhost on these ports to continue:"
-	@echo " - 23401: cilium-agent (kind-control-plane)"
-	@echo " - 23411: cilium-agent (kind-worker)"
-
-$(eval $(call KIND_ENV,kind-debug))
-kind-debug: ## Create a local kind development environment with cilium-agent & cilium-operator attached to a debugger.
-	$(QUIET)$(MAKE) kind-ready 2>/dev/null \
-		|| $(MAKE) kind
-	$(MAKE) kind-image-agent-debug
-	$(MAKE) kind-image-operator-debug
-	$(MAKE) kind-check-cilium 2>/dev/null \
-		|| $(MAKE) kind-install-cilium
-	@echo "Attach delve to localhost on these ports to continue:"
-	@echo " - 23401: cilium-agent    (kind-control-plane)"
-	@echo " - 23411: cilium-agent    (kind-worker)"
-	@echo " - 23511: cilium-operator (kind-worker)"
-
-precheck: check-go-version logging-subsys-field ## Peform build precheck for the source code.
+precheck: logging-subsys-field ## Peform build precheck for the source code.
 ifeq ($(SKIP_K8S_CODE_GEN_CHECK),"false")
 	@$(ECHO_CHECK) contrib/scripts/check-k8s-code-gen.sh
 	$(QUIET) contrib/scripts/check-k8s-code-gen.sh
@@ -598,10 +493,12 @@ ifeq ($(SKIP_CUSTOMVET_CHECK),"false")
 endif
 	@$(ECHO_CHECK) contrib/scripts/rand-check.sh
 	$(QUIET) contrib/scripts/rand-check.sh
+	@$(ECHO_CHECK) contrib/scripts/check-time.sh
+	$(QUIET) contrib/scripts/check-time.sh
 
 check-sources:
 	@$(ECHO_CHECK) pkg/datapath/loader/check-sources.sh
-	$(QUIET) pkg/datapath/loader/check-sources.sh
+	$(QUIET) BPF_SOURCE_NAMES_TO_IDS=$(BPF_SOURCE_NAMES_TO_IDS) GO_SOURCE_NAMES_TO_IDS=$(GO_SOURCE_NAMES_TO_IDS) pkg/datapath/loader/check-sources.sh
 
 pprof-heap: ## Get Go pprof heap profile.
 	$(QUIET)$(GO) tool pprof http://localhost:6060/debug/pprof/heap
@@ -626,6 +523,9 @@ update-authors: ## Update AUTHORS file for Cilium repository.
 	@contrib/scripts/extract_authors.sh >> AUTHORS
 	@cat .authors.aux >> AUTHORS
 
+generate-crd-docs: ## Generate CRD List for documentation
+	$(QUIET)$(GO) run ./tools/crdlistgen
+
 test-docs: ## Build HTML documentation.
 	$(MAKE) -C Documentation html
 
@@ -646,14 +546,6 @@ postcheck: build ## Run Cilium build postcheck (update-cmdref, build documentati
 
 licenses-all: ## Generate file with all the License from dependencies.
 	@$(GO) run ./tools/licensegen > LICENSE.all || ( rm -f LICENSE.all ; false )
-
-check-go-version: ## Check locally install Go version against required Go version.
-ifneq ($(GO_MAJOR_AND_MINOR_VERSION),$(GO_INSTALLED_MAJOR_AND_MINOR_VERSION))
-	@echo "Installed Go version $(GO_INSTALLED_MAJOR_AND_MINOR_VERSION) does not match requested Go version $(GO_MAJOR_AND_MINOR_VERSION)"
-	@exit 1
-else
-	@$(ECHO_CHECK) "Installed Go version $(GO_INSTALLED_MAJOR_AND_MINOR_VERSION) matches required version $(GO_MAJOR_AND_MINOR_VERSION)"
-endif
 
 dev-doctor: ## Run Cilium dev-doctor to validate local development environment.
 	$(QUIET)$(GO) version 2>/dev/null || ( echo "go not found, see https://golang.org/doc/install" ; false )
@@ -680,3 +572,6 @@ force :;
 CILIUM_BUILDER_IMAGE=$(shell cat images/cilium/Dockerfile | grep "ARG CILIUM_BUILDER_IMAGE=" | cut -d"=" -f2)
 run_bpf_tests:
 	docker run -v $$(pwd):/src --privileged -w /src -e RUN_WITH_SUDO=false $(CILIUM_BUILDER_IMAGE) "make" "-C" "test/" "run_bpf_tests"
+
+run-builder:
+	docker run -it --rm -v $$(pwd):/go/src/github.com/cilium/cilium $(CILIUM_BUILDER_IMAGE) bash

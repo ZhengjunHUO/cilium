@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // PerfTest represents a type of test to run when running `netperf`.
@@ -129,6 +130,20 @@ func CurlWithRetries(endpoint string, retries int, fail bool, optionalValues ...
 		retries, endpoint)
 }
 
+// CurlTimeout does the same as CurlFail() except you can define the timeout.
+// See note about optionalValues on CurlFail().
+func CurlTimeout(endpoint string, timeout time.Duration, optionalValues ...interface{}) string {
+	statsInfo := `time-> DNS: '%{time_namelookup}(%{remote_ip})', Connect: '%{time_connect}',` +
+		`Transfer '%{time_starttransfer}', total '%{time_total}'`
+
+	if len(optionalValues) > 0 {
+		endpoint = fmt.Sprintf(endpoint, optionalValues...)
+	}
+	return fmt.Sprintf(
+		`curl --path-as-is -s -D /dev/stderr --fail --connect-timeout %d --max-time %d %s -w "%s"`,
+		timeout, timeout, endpoint, statsInfo)
+}
+
 // Netperf returns the string representing the netperf command to use when testing
 // connectivity between endpoints.
 func Netperf(endpoint string, perfTest PerfTest, options string) string {
@@ -195,7 +210,7 @@ func OpenSSLShowCerts(host string, port uint16, serverName string) string {
 // GetBPFPacketsCount returns the number of packets for a given drop reason and
 // direction by parsing BPF metrics.
 func GetBPFPacketsCount(kubectl *Kubectl, pod, reason, direction string) (int, error) {
-	cmd := fmt.Sprintf("cilium bpf metrics list -o json | jq '.[] | select(.description == \"%s\").values.%s.packets'", reason, direction)
+	cmd := fmt.Sprintf("cilium-dbg bpf metrics list -o json | jq '.[] | select(.description == \"%s\").values.%s.packets'", reason, direction)
 
 	res := kubectl.CiliumExecMustSucceed(context.TODO(), pod, cmd)
 

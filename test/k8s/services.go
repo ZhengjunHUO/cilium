@@ -8,9 +8,9 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/asaskevich/govalidator"
 	. "github.com/onsi/gomega"
 	v1 "k8s.io/api/core/v1"
 
@@ -41,6 +41,7 @@ var _ = SkipDescribeIf(helpers.RunsOn54Kernel, "K8sDatapathServicesTest", func()
 
 	BeforeAll(func() {
 		kubectl = helpers.CreateKubectl(helpers.K8s1VMName(), logger)
+		deploymentManager.SetKubectl(kubectl)
 
 		ni, err = helpers.GetNodesInfo(kubectl)
 		Expect(err).Should(BeNil(), "Cannot get nodes info")
@@ -49,7 +50,7 @@ var _ = SkipDescribeIf(helpers.RunsOn54Kernel, "K8sDatapathServicesTest", func()
 	})
 
 	AfterFailed(func() {
-		kubectl.CiliumReport("cilium service list", "cilium endpoint list")
+		kubectl.CiliumReport("cilium-dbg service list", "cilium-dbg endpoint list")
 	})
 
 	JustAfterEach(func() {
@@ -90,9 +91,19 @@ var _ = SkipDescribeIf(helpers.RunsOn54Kernel, "K8sDatapathServicesTest", func()
 		})
 
 		AfterAll(func() {
+			wg := sync.WaitGroup{}
 			for _, yaml := range yamls {
-				kubectl.Delete(yaml)
+				wg.Add(1)
+				go func(yaml string) {
+					defer wg.Done()
+					// Ensure that all deployments are fully cleaned up before
+					// proceeding to the next test.
+					res := kubectl.DeleteAndWait(yaml, true)
+
+					Expect(res.WasSuccessful()).Should(BeTrue(), "Unable to cleanup yaml: %s", yaml)
+				}(yaml)
 			}
+			wg.Wait()
 			ExpectAllPodsTerminated(kubectl)
 		})
 
@@ -111,7 +122,7 @@ var _ = SkipDescribeIf(helpers.RunsOn54Kernel, "K8sDatapathServicesTest", func()
 					// Remove CT entries to avoid packet drops which could happen
 					// due to matching stale entries with proxy_redirect = 1
 					kubectl.CiliumExecMustSucceedOnAll(context.TODO(),
-						"cilium bpf ct flush global", "Unable to flush CT maps")
+						"cilium-dbg bpf ct flush global", "Unable to flush CT maps")
 				})
 
 				It("Tests NodePort with L7 Policy", func() {
@@ -134,7 +145,7 @@ var _ = SkipDescribeIf(helpers.RunsOn54Kernel, "K8sDatapathServicesTest", func()
 			for _, svcName := range serviceNames {
 				clusterIP, _, err := kubectl.GetServiceHostPort(helpers.DefaultNamespace, svcName)
 				Expect(err).Should(BeNil(), "Cannot get service %q ClusterIP", svcName)
-				Expect(govalidator.IsIP(clusterIP)).Should(BeTrue(), "ClusterIP is not an IP")
+				Expect(net.ParseIP(clusterIP) != nil).Should(BeTrue(), "ClusterIP is not an IP")
 
 				url := fmt.Sprintf("http://%s/", net.JoinHostPort(clusterIP, "80"))
 				testCurlFromPods(kubectl, echoPodLabel, url, 10, 0)
@@ -281,7 +292,7 @@ var _ = SkipDescribeIf(helpers.RunsOn54Kernel, "K8sDatapathServicesTest", func()
 				kubectl.Delete(demoPolicyL7)
 				// Same reason as in other L7 test above
 				kubectl.CiliumExecMustSucceedOnAll(context.TODO(),
-					"cilium bpf ct flush global", "Unable to flush CT maps")
+					"cilium-dbg bpf ct flush global", "Unable to flush CT maps")
 			})
 
 			It("Tests NodePort with L7 Policy", func() {
@@ -413,18 +424,6 @@ Secondary Interface %s :: IPv4: (%s, %s), IPv6: (%s, %s)`,
 			}
 		})
 
-		SkipItIf(func() bool {
-			// Currently, KIND doesn't support multiple interfaces among nodes
-			return helpers.IsIntegration(helpers.CIIntegrationKind)
-		}, "Tests with secondary NodePort device", func() {
-			DeployCiliumOptionsAndDNS(kubectl, ciliumFilename, map[string]string{
-				"loadBalancer.mode": "snat",
-				"devices":           fmt.Sprintf(`'{%s,%s}'`, ni.PrivateIface, helpers.SecondaryIface),
-			})
-
-			testNodePortExternal(kubectl, ni, true, false, false)
-		})
-
 		It("Tests with direct routing and DSR", func() {
 			DeployCiliumOptionsAndDNS(kubectl, ciliumFilename, map[string]string{
 				"loadBalancer.mode":    "dsr",
@@ -543,6 +542,7 @@ Secondary Interface %s :: IPv4: (%s, %s), IPv6: (%s, %s)`,
 				"loadBalancer.algorithm":    "maglev",
 				"maglev.tableSize":          "251",
 				"routingMode":               "native",
+				"tunnelProtocol":            "geneve",
 				"autoDirectNodeRoutes":      "true",
 				"loadBalancer.dsrDispatch":  "geneve",
 				"devices":                   fmt.Sprintf(`'{%s}'`, ni.PrivateIface),
@@ -550,8 +550,7 @@ Secondary Interface %s :: IPv4: (%s, %s), IPv6: (%s, %s)`,
 				// see #14047 for details.
 				"hostFirewall.enabled": "false",
 			})
-			// DSR with Geneve doesn't work in conjunction with XDP and IPv6 currently
-			testNodePortExternalIPv4Only(kubectl, ni, false, true, true)
+			testNodePortExternal(kubectl, ni, false, true, true)
 		})
 
 		It("Tests with TC, direct routing and Hybrid", func() {
@@ -561,7 +560,7 @@ Secondary Interface %s :: IPv4: (%s, %s), IPv6: (%s, %s)`,
 				"loadBalancer.algorithm":    "random",
 				"routingMode":               "native",
 				"autoDirectNodeRoutes":      "true",
-				"devices":                   fmt.Sprintf(`'{}'`), // Revert back to auto-detection after XDP.
+				"devices":                   "'{}'", // Revert back to auto-detection after XDP.
 			})
 			testNodePortExternal(kubectl, ni, false, true, false)
 		})
@@ -573,11 +572,26 @@ Secondary Interface %s :: IPv4: (%s, %s), IPv6: (%s, %s)`,
 				"loadBalancer.algorithm":    "maglev",
 				"maglev.tableSize":          "251",
 				"routingMode":               "native",
+				"tunnelProtocol":            "geneve",
 				"autoDirectNodeRoutes":      "true",
 				"loadBalancer.dsrDispatch":  "geneve",
-				"devices":                   fmt.Sprintf(`'{}'`), // Revert back to auto-detection after XDP.
+				"devices":                   "'{}'", // Revert back to auto-detection after XDP.
 			})
 			testNodePortExternal(kubectl, ni, false, true, true)
+		})
+
+		It("Tests with TC, direct routing and Hybrid-DSR with Geneve", func() {
+			DeployCiliumOptionsAndDNS(kubectl, ciliumFilename, map[string]string{
+				"loadBalancer.acceleration": "disabled",
+				"loadBalancer.mode":         "hybrid",
+				"loadBalancer.algorithm":    "random",
+				"routingMode":               "native",
+				"tunnelProtocol":            "geneve",
+				"autoDirectNodeRoutes":      "true",
+				"loadBalancer.dsrDispatch":  "geneve",
+				"devices":                   "'{}'",
+			})
+			testNodePortExternal(kubectl, ni, false, true, false)
 		})
 
 		It("Tests with TC, geneve tunnel, dsr and Maglev", func() {
@@ -588,9 +602,21 @@ Secondary Interface %s :: IPv4: (%s, %s), IPv6: (%s, %s)`,
 				"maglev.tableSize":          "251",
 				"tunnelProtocol":            "geneve",
 				"loadBalancer.dsrDispatch":  "geneve",
-				"devices":                   fmt.Sprintf(`'{}'`), // Revert back to auto-detection after XDP.
+				"devices":                   "'{}'", // Revert back to auto-detection after XDP.
 			})
 			testNodePortExternal(kubectl, ni, false, true, true)
+		})
+
+		It("Tests with TC, geneve tunnel, and Hybrid-DSR with Geneve", func() {
+			DeployCiliumOptionsAndDNS(kubectl, ciliumFilename, map[string]string{
+				"loadBalancer.acceleration": "disabled",
+				"loadBalancer.mode":         "hybrid",
+				"loadBalancer.algorithm":    "random",
+				"tunnelProtocol":            "geneve",
+				"loadBalancer.dsrDispatch":  "geneve",
+				"devices":                   "'{}'",
+			})
+			testNodePortExternal(kubectl, ni, false, true, false)
 		})
 
 		// Run on net-next and 4.19 but not on old versions, because of
@@ -603,19 +629,30 @@ Secondary Interface %s :: IPv4: (%s, %s), IPv6: (%s, %s)`,
 				options["gke.enabled"] = "false"
 				options["routingMode"] = "native"
 			}
+
 			DeployCiliumOptionsAndDNS(kubectl, ciliumFilename, options)
+
+			cmd := fmt.Sprintf("cilium config %s=%s", helpers.OptionConntrackAccounting, helpers.OptionEnabled)
+			kubectl.CiliumExecMustSucceedOnAll(context.TODO(), cmd, "Unable to enable ConntrackAccounting option")
+			kubectl.CiliumPreFlightCheck()
 			testIPv4FragmentSupport(kubectl, ni)
 		})
 
-		SkipContextIf(func() bool { return helpers.RunsOnGKE() }, "With host policy", func() {
+		SkipContextIf(helpers.RunsOnGKE, "With host policy", func() {
+			hostPolicyFilename := "ccnp-host-policy-nodeport-tests.yaml"
 			var ccnpHostPolicy string
 
 			BeforeAll(func() {
-				DeployCiliumOptionsAndDNS(kubectl, ciliumFilename, map[string]string{
+				options := map[string]string{
 					"hostFirewall.enabled": "true",
-				})
+				}
+				if helpers.RunsWithKubeProxyReplacement() {
+					// BPF IPv6 masquerade not currently supported with host firewall - GH-26074
+					options["enableIPv6Masquerade"] = "false"
+				}
+				DeployCiliumOptionsAndDNS(kubectl, ciliumFilename, options)
 
-				originalCCNPHostPolicy := helpers.ManifestGet(kubectl.BasePath(), "ccnp-host-policy-nodeport-tests.yaml")
+				originalCCNPHostPolicy := helpers.ManifestGet(kubectl.BasePath(), hostPolicyFilename)
 				res := kubectl.ExecMiddle("mktemp")
 				res.ExpectSuccess()
 				ccnpHostPolicy = strings.Trim(res.Stdout(), "\n")
@@ -623,6 +660,8 @@ Secondary Interface %s :: IPv4: (%s, %s), IPv6: (%s, %s)`,
 				Expect(err).Should(BeNil())
 				kubectl.ExecMiddle(fmt.Sprintf("sed 's/NODE_WITHOUT_CILIUM_IP/%s/' %s > %s",
 					nodeIP, originalCCNPHostPolicy, ccnpHostPolicy)).ExpectSuccess()
+
+				prepareHostPolicyEnforcement(kubectl, ccnpHostPolicy)
 
 				_, err = kubectl.CiliumClusterwidePolicyAction(ccnpHostPolicy,
 					helpers.KubectlApply, helpers.HelperTimeout)
@@ -641,28 +680,6 @@ Secondary Interface %s :: IPv4: (%s, %s), IPv6: (%s, %s)`,
 
 			It("Tests NodePort", func() {
 				testNodePort(kubectl, ni, true, true, 0)
-			})
-		})
-
-		SkipContextIf(func() bool {
-			return helpers.DoesNotRunWithKubeProxyReplacement() || helpers.RunsOnAKS() || helpers.DoesNotExistNodeWithoutCilium()
-		}, "with L7 policy", func() {
-			var demoPolicyL7 string
-
-			BeforeAll(func() {
-				demoPolicyL7 = helpers.ManifestGet(kubectl.BasePath(), "l7-policy-demo.yaml")
-			})
-
-			AfterAll(func() {
-				kubectl.Delete(demoPolicyL7)
-				// Same reason as in other L7 test above
-				kubectl.CiliumExecMustSucceedOnAll(context.TODO(),
-					"cilium bpf ct flush global", "Unable to flush CT maps")
-			})
-
-			It("Tests NodePort with L7 Policy from outside", func() {
-				applyPolicy(kubectl, demoPolicyL7)
-				testNodePort(kubectl, ni, false, true, 0)
 			})
 		})
 

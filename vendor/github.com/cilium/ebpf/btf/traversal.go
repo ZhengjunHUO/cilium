@@ -15,7 +15,7 @@ type postorderIterator struct {
 	// The root type. May be nil if skip(root) is true.
 	root Type
 
-	// Contains types which need to be either walked or passed to the callback.
+	// Contains types which need to be either walked or yielded.
 	types typeDeque
 	// Contains a boolean whether the type has been walked or not.
 	walked internal.Deque[bool]
@@ -26,9 +26,8 @@ type postorderIterator struct {
 	Type Type
 }
 
-// postorderTraversal calls fn for all types reachable from root.
-//
-// fn is invoked on children of root before root itself.
+// postorderTraversal iterates all types reachable from root by visiting the
+// leaves of the graph first.
 //
 // Types for which skip returns true are ignored. skip may be nil.
 func postorderTraversal(root Type, skip func(Type) (skip bool)) postorderIterator {
@@ -86,6 +85,43 @@ func (po *postorderIterator) Next() bool {
 	// Only return root once.
 	po.Type, po.root = po.root, nil
 	return po.Type != nil
+}
+
+// modifyGraphPreorder allows modifying every Type in a graph.
+//
+// fn is invoked in preorder for every unique Type in a graph. See [Type] for the definition
+// of equality. Every occurrence of node is substituted with its replacement.
+//
+// If cont is true, fn is invoked for every child of replacement. Otherwise
+// traversal stops.
+//
+// Returns the substitution of the root node.
+func modifyGraphPreorder(root Type, fn func(node Type) (replacement Type, cont bool)) Type {
+	sub, cont := fn(root)
+	replacements := map[Type]Type{root: sub}
+
+	// This is a preorder traversal.
+	var walk func(*Type)
+	walk = func(node *Type) {
+		sub, visited := replacements[*node]
+		if visited {
+			*node = sub
+			return
+		}
+
+		sub, cont := fn(*node)
+		replacements[*node] = sub
+		*node = sub
+
+		if cont {
+			walkType(*node, walk)
+		}
+	}
+
+	if cont {
+		walkType(sub, walk)
+	}
+	return sub
 }
 
 // walkType calls fn on each child of typ.

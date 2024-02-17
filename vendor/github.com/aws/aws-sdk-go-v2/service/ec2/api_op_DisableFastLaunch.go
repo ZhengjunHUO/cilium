@@ -4,6 +4,7 @@ package ec2
 
 import (
 	"context"
+	"fmt"
 	awsmiddleware "github.com/aws/aws-sdk-go-v2/aws/middleware"
 	"github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
@@ -12,11 +13,12 @@ import (
 	"time"
 )
 
-// Discontinue faster launching for a Windows AMI, and clean up existing
-// pre-provisioned snapshots. When you disable faster launching, the AMI uses the
-// standard launch process for each instance. All pre-provisioned snapshots must be
-// removed before you can enable faster launching again. To change these settings,
-// you must own the AMI.
+// Discontinue Windows fast launch for a Windows AMI, and clean up existing
+// pre-provisioned snapshots. After you disable Windows fast launch, the AMI uses
+// the standard launch process for each new instance. Amazon EC2 must remove all
+// pre-provisioned snapshots before you can enable Windows fast launch again. You
+// can only change these settings for Windows AMIs that you own or that have been
+// shared with you.
 func (c *Client) DisableFastLaunch(ctx context.Context, params *DisableFastLaunchInput, optFns ...func(*Options)) (*DisableFastLaunchOutput, error) {
 	if params == nil {
 		params = &DisableFastLaunchInput{}
@@ -34,19 +36,18 @@ func (c *Client) DisableFastLaunch(ctx context.Context, params *DisableFastLaunc
 
 type DisableFastLaunchInput struct {
 
-	// The ID of the image for which you’re turning off faster launching, and removing
-	// pre-provisioned snapshots.
+	// Specify the ID of the image for which to disable Windows fast launch.
 	//
 	// This member is required.
 	ImageId *string
 
 	// Checks whether you have the required permissions for the action, without
 	// actually making the request, and provides an error response. If you have the
-	// required permissions, the error response is DryRunOperation. Otherwise, it is
-	// UnauthorizedOperation.
+	// required permissions, the error response is DryRunOperation . Otherwise, it is
+	// UnauthorizedOperation .
 	DryRun *bool
 
-	// Forces the image settings to turn off faster launching for your Windows AMI.
+	// Forces the image settings to turn off Windows fast launch for your Windows AMI.
 	// This parameter overrides any errors that are encountered while cleaning up
 	// resources in your account.
 	Force *bool
@@ -56,34 +57,35 @@ type DisableFastLaunchInput struct {
 
 type DisableFastLaunchOutput struct {
 
-	// The ID of the image for which faster-launching has been turned off.
+	// The ID of the image for which Windows fast launch was disabled.
 	ImageId *string
 
 	// The launch template that was used to launch Windows instances from
 	// pre-provisioned snapshots.
 	LaunchTemplate *types.FastLaunchLaunchTemplateSpecificationResponse
 
-	// The maximum number of parallel instances to launch for creating resources.
+	// The maximum number of instances that Amazon EC2 can launch at the same time to
+	// create pre-provisioned snapshots for Windows fast launch.
 	MaxParallelLaunches *int32
 
-	// The owner of the Windows AMI for which faster launching was turned off.
+	// The owner of the Windows AMI for which Windows fast launch was disabled.
 	OwnerId *string
 
-	// The pre-provisioning resource type that must be cleaned after turning off faster
-	// launching for the Windows AMI. Supported values include: snapshot.
+	// The pre-provisioning resource type that must be cleaned after turning off
+	// Windows fast launch for the Windows AMI. Supported values include: snapshot .
 	ResourceType types.FastLaunchResourceType
 
-	// Parameters that were used for faster launching for the Windows AMI before faster
-	// launching was turned off. This informs the clean-up process.
+	// Parameters that were used for Windows fast launch for the Windows AMI before
+	// Windows fast launch was disabled. This informs the clean-up process.
 	SnapshotConfiguration *types.FastLaunchSnapshotConfigurationResponse
 
-	// The current state of faster launching for the specified Windows AMI.
+	// The current state of Windows fast launch for the specified Windows AMI.
 	State types.FastLaunchStateCode
 
-	// The reason that the state changed for faster launching for the Windows AMI.
+	// The reason that the state changed for Windows fast launch for the Windows AMI.
 	StateTransitionReason *string
 
-	// The time that the state changed for faster launching for the Windows AMI.
+	// The time that the state changed for Windows fast launch for the Windows AMI.
 	StateTransitionTime *time.Time
 
 	// Metadata pertaining to the operation's result.
@@ -93,12 +95,22 @@ type DisableFastLaunchOutput struct {
 }
 
 func (c *Client) addOperationDisableFastLaunchMiddlewares(stack *middleware.Stack, options Options) (err error) {
+	if err := stack.Serialize.Add(&setOperationInputMiddleware{}, middleware.After); err != nil {
+		return err
+	}
 	err = stack.Serialize.Add(&awsEc2query_serializeOpDisableFastLaunch{}, middleware.After)
 	if err != nil {
 		return err
 	}
 	err = stack.Deserialize.Add(&awsEc2query_deserializeOpDisableFastLaunch{}, middleware.After)
 	if err != nil {
+		return err
+	}
+	if err := addProtocolFinalizerMiddlewares(stack, options, "DisableFastLaunch"); err != nil {
+		return fmt.Errorf("add protocol finalizers: %v", err)
+	}
+
+	if err = addlegacyEndpointContextSetter(stack, options); err != nil {
 		return err
 	}
 	if err = addSetLoggerMiddleware(stack, options); err != nil {
@@ -119,16 +131,13 @@ func (c *Client) addOperationDisableFastLaunchMiddlewares(stack *middleware.Stac
 	if err = addRetryMiddlewares(stack, options); err != nil {
 		return err
 	}
-	if err = addHTTPSignerV4Middleware(stack, options); err != nil {
-		return err
-	}
 	if err = awsmiddleware.AddRawResponseToMetadata(stack); err != nil {
 		return err
 	}
 	if err = awsmiddleware.AddRecordResponseTiming(stack); err != nil {
 		return err
 	}
-	if err = addClientUserAgent(stack); err != nil {
+	if err = addClientUserAgent(stack, options); err != nil {
 		return err
 	}
 	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
@@ -137,10 +146,16 @@ func (c *Client) addOperationDisableFastLaunchMiddlewares(stack *middleware.Stac
 	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
 		return err
 	}
+	if err = addSetLegacyContextSigningOptionsMiddleware(stack); err != nil {
+		return err
+	}
 	if err = addOpDisableFastLaunchValidationMiddleware(stack); err != nil {
 		return err
 	}
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opDisableFastLaunch(options.Region), middleware.Before); err != nil {
+		return err
+	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
@@ -152,6 +167,9 @@ func (c *Client) addOperationDisableFastLaunchMiddlewares(stack *middleware.Stac
 	if err = addRequestResponseLogging(stack, options); err != nil {
 		return err
 	}
+	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -159,7 +177,6 @@ func newServiceMetadataMiddleware_opDisableFastLaunch(region string) *awsmiddlew
 	return &awsmiddleware.RegisterServiceMetadata{
 		Region:        region,
 		ServiceID:     ServiceID,
-		SigningName:   "ec2",
 		OperationName: "DisableFastLaunch",
 	}
 }

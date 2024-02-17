@@ -12,11 +12,11 @@ import (
 	"testing"
 	"time"
 
+	. "github.com/cilium/checkmate"
 	"github.com/google/go-cmp/cmp"
 	flag "github.com/spf13/pflag"
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
-	. "gopkg.in/check.v1"
 
 	"github.com/cilium/cilium/pkg/cidr"
 	"github.com/cilium/cilium/pkg/defaults"
@@ -571,6 +571,18 @@ func TestCheckIPv4NativeRoutingCIDR(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		{
+			name: "without native routing cidr and tunnel disabled, but ipmasq-agent",
+			d: &DaemonConfig{
+				EnableIPv4Masquerade: true,
+				EnableIPv6Masquerade: true,
+				RoutingMode:          RoutingModeNative,
+				IPAM:                 ipamOption.IPAMKubernetes,
+				EnableIPv4:           true,
+				EnableIPMasqAgent:    true,
+			},
+			wantErr: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -632,6 +644,17 @@ func TestCheckIPv6NativeRoutingCIDR(t *testing.T) {
 				EnableIPv6:           true,
 			},
 			wantErr: true,
+		},
+		{
+			name: "without native routing cidr and tunnel disabled, but ipmasq-agent",
+			d: &DaemonConfig{
+				EnableIPv4Masquerade: true,
+				EnableIPv6Masquerade: true,
+				RoutingMode:          RoutingModeNative,
+				EnableIPv6:           true,
+				EnableIPMasqAgent:    true,
+			},
+			wantErr: false,
 		},
 	}
 
@@ -696,6 +719,22 @@ func TestCheckIPAMDelegatedPlugin(t *testing.T) {
 				EnableIPv6: true,
 			},
 			expectErr: fmt.Errorf("--local-router-ipv6 must be provided when IPv6 is enabled with --ipam=delegated-plugin"),
+		},
+		{
+			name: "IPAMDelegatedPlugin with ingress controller enabled",
+			d: &DaemonConfig{
+				IPAM:                    ipamOption.IPAMDelegatedPlugin,
+				EnableIngressController: true,
+			},
+			expectErr: fmt.Errorf("--enable-ingress-controller must be disabled with --ipam=delegated-plugin"),
+		},
+		{
+			name: "IPAMDelegatedPlugin with envoy config enabled",
+			d: &DaemonConfig{
+				IPAM:              ipamOption.IPAMDelegatedPlugin,
+				EnableEnvoyConfig: true,
+			},
+			expectErr: fmt.Errorf("--enable-envoy-config must be disabled with --ipam=delegated-plugin"),
 		},
 	}
 

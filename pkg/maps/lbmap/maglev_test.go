@@ -7,15 +7,13 @@ import (
 	"net"
 	"testing"
 
+	. "github.com/cilium/checkmate"
 	"github.com/cilium/ebpf/rlimit"
-	. "gopkg.in/check.v1"
 
 	datapathTypes "github.com/cilium/cilium/pkg/datapath/types"
 	"github.com/cilium/cilium/pkg/loadbalancer"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/testutils"
-	"github.com/cilium/cilium/pkg/version"
-	"github.com/cilium/cilium/pkg/versioncheck"
 )
 
 func Test(t *testing.T) {
@@ -30,24 +28,13 @@ type MaglevSuite struct {
 var _ = Suite(&MaglevSuite{})
 
 func (s *MaglevSuite) SetUpSuite(c *C) {
-	testutils.PrivilegedCheck(c)
-
-	vsn, err := version.GetKernelVersion()
-	c.Assert(err, IsNil)
-	constraint, err := versioncheck.Compile(">=4.11.0")
-	c.Assert(err, IsNil)
-
-	if !constraint(vsn) {
-		// Currently, we run privileged tests on the 4.9 kernel in CI. That
-		// kernel does not have the support for map-in-map. Thus, this skip.
-		c.Skip("Skipping as >= 4.11 kernel is required for map-in-map support")
-	}
+	testutils.PrivilegedTest(c)
 
 	s.prevMaglevTableSize = option.Config.MaglevTableSize
 	s.prevNodePortAlg = option.Config.NodePortAlg
 
 	// Otherwise opening the map might fail with EPERM
-	err = rlimit.RemoveMemlock()
+	err := rlimit.RemoveMemlock()
 	c.Assert(err, IsNil)
 
 	option.Config.LBMapEntries = DefaultMaxEntries

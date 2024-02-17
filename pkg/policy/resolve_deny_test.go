@@ -6,7 +6,7 @@ package policy
 import (
 	"sync"
 
-	. "gopkg.in/check.v1"
+	. "github.com/cilium/checkmate"
 
 	"github.com/cilium/cilium/pkg/checker"
 	"github.com/cilium/cilium/pkg/identity"
@@ -130,7 +130,7 @@ func (ds *PolicyTestSuite) TestL3WithIngressDenyWildcard(c *C) {
 	}
 
 	rule1.Sanitize()
-	_, _, err := repo.Add(rule1, []Endpoint{})
+	_, _, err := repo.Add(rule1)
 	c.Assert(err, IsNil)
 
 	repo.Mutex.RLock()
@@ -143,9 +143,9 @@ func (ds *PolicyTestSuite) TestL3WithIngressDenyWildcard(c *C) {
 		selectorPolicy: &selectorPolicy{
 			Revision:      repo.GetRevision(),
 			SelectorCache: repo.GetSelectorCache(),
-			L4Policy: &L4Policy{
+			L4Policy: L4Policy{
 				Revision: repo.GetRevision(),
-				Ingress: L4PolicyMap{
+				Ingress: L4DirectionPolicy{PortRules: L4PolicyMap{
 					"80/TCP": {
 						Port:     80,
 						Protocol: api.ProtoTCP,
@@ -159,14 +159,16 @@ func (ds *PolicyTestSuite) TestL3WithIngressDenyWildcard(c *C) {
 						RuleOrigin: map[CachedSelector]labels.LabelArrayList{wildcardCachedSelector: {nil}},
 					},
 				},
-				Egress: L4PolicyMap{},
+					features: denyRules,
+				},
+				Egress: newL4DirectionPolicy(),
 			},
 			IngressPolicyEnabled: true,
 		},
 		PolicyOwner: DummyOwner{},
 		// inherit this from the result as it is outside of the scope
 		// of this test
-		PolicyMapState: policy.PolicyMapState,
+		policyMapState: policy.policyMapState,
 	}
 
 	// Have to remove circular reference before testing to avoid an infinite loop
@@ -209,7 +211,7 @@ func (ds *PolicyTestSuite) TestL3WithLocalHostWildcardd(c *C) {
 	}
 
 	rule1.Sanitize()
-	_, _, err := repo.Add(rule1, []Endpoint{})
+	_, _, err := repo.Add(rule1)
 	c.Assert(err, IsNil)
 
 	repo.Mutex.RLock()
@@ -226,9 +228,9 @@ func (ds *PolicyTestSuite) TestL3WithLocalHostWildcardd(c *C) {
 		selectorPolicy: &selectorPolicy{
 			Revision:      repo.GetRevision(),
 			SelectorCache: repo.GetSelectorCache(),
-			L4Policy: &L4Policy{
+			L4Policy: L4Policy{
 				Revision: repo.GetRevision(),
-				Ingress: L4PolicyMap{
+				Ingress: L4DirectionPolicy{PortRules: L4PolicyMap{
 					"80/TCP": {
 						Port:     80,
 						Protocol: api.ProtoTCP,
@@ -242,14 +244,16 @@ func (ds *PolicyTestSuite) TestL3WithLocalHostWildcardd(c *C) {
 						RuleOrigin: map[CachedSelector]labels.LabelArrayList{wildcardCachedSelector: {nil}},
 					},
 				},
-				Egress: L4PolicyMap{},
+					features: denyRules,
+				},
+				Egress: newL4DirectionPolicy(),
 			},
 			IngressPolicyEnabled: true,
 		},
 		PolicyOwner: DummyOwner{},
 		// inherit this from the result as it is outside of the scope
 		// of this test
-		PolicyMapState: policy.PolicyMapState,
+		policyMapState: policy.policyMapState,
 	}
 
 	// Have to remove circular reference before testing to avoid an infinite loop
@@ -292,7 +296,7 @@ func (ds *PolicyTestSuite) TestMapStateWithIngressDenyWildcard(c *C) {
 	}
 
 	rule1.Sanitize()
-	_, _, err := repo.Add(rule1, []Endpoint{})
+	_, _, err := repo.Add(rule1)
 	c.Assert(err, IsNil)
 
 	repo.Mutex.RLock()
@@ -301,16 +305,16 @@ func (ds *PolicyTestSuite) TestMapStateWithIngressDenyWildcard(c *C) {
 	c.Assert(err, IsNil)
 	policy := selPolicy.DistillPolicy(DummyOwner{}, false)
 
-	rule1MapStateEntry := NewMapStateEntry(wildcardCachedSelector, labels.LabelArrayList{ruleLabel}, false, true, AuthTypeNone)
-	allowEgressMapStateEntry := NewMapStateEntry(nil, labels.LabelArrayList{ruleLabelAllowAnyEgress}, false, false, AuthTypeNone)
+	rule1MapStateEntry := NewMapStateEntry(wildcardCachedSelector, labels.LabelArrayList{ruleLabel}, 0, "", 0, true, DefaultAuthType, AuthTypeDisabled)
+	allowEgressMapStateEntry := NewMapStateEntry(nil, labels.LabelArrayList{ruleLabelAllowAnyEgress}, 0, "", 0, false, ExplicitAuthType, AuthTypeDisabled)
 
 	expectedEndpointPolicy := EndpointPolicy{
 		selectorPolicy: &selectorPolicy{
 			Revision:      repo.GetRevision(),
 			SelectorCache: repo.GetSelectorCache(),
-			L4Policy: &L4Policy{
+			L4Policy: L4Policy{
 				Revision: repo.GetRevision(),
-				Ingress: L4PolicyMap{
+				Ingress: L4DirectionPolicy{PortRules: L4PolicyMap{
 					"80/TCP": {
 						Port:     80,
 						Protocol: api.ProtoTCP,
@@ -324,17 +328,19 @@ func (ds *PolicyTestSuite) TestMapStateWithIngressDenyWildcard(c *C) {
 						RuleOrigin: map[CachedSelector]labels.LabelArrayList{wildcardCachedSelector: {ruleLabel}},
 					},
 				},
-				Egress: L4PolicyMap{},
+					features: denyRules,
+				},
+				Egress: newL4DirectionPolicy(),
 			},
 			IngressPolicyEnabled: true,
 		},
 		PolicyOwner: DummyOwner{},
-		PolicyMapState: MapState{
+		policyMapState: newMapState(map[Key]MapStateEntry{
 			// Although we have calculated deny policies, the overall policy
 			// will still allow egress to world.
 			{TrafficDirection: trafficdirection.Egress.Uint8()}: allowEgressMapStateEntry,
 			{DestPort: 80, Nexthdr: 6}:                          rule1MapStateEntry,
-		},
+		}),
 	}
 
 	// Add new identity to test accumulation of MapChanges
@@ -403,7 +409,7 @@ func (ds *PolicyTestSuite) TestMapStateWithIngressDeny(c *C) {
 	}
 
 	rule1.Sanitize()
-	_, _, err := repo.Add(rule1, []Endpoint{})
+	_, _, err := repo.Add(rule1)
 	c.Assert(err, IsNil)
 
 	repo.Mutex.RLock()
@@ -436,19 +442,25 @@ func (ds *PolicyTestSuite) TestMapStateWithIngressDeny(c *C) {
 	cachedSelectorWorld := testSelectorCache.FindCachedIdentitySelector(api.ReservedEndpointSelectors[labels.IDNameWorld])
 	c.Assert(cachedSelectorWorld, Not(IsNil))
 
+	cachedSelectorWorldV4 := testSelectorCache.FindCachedIdentitySelector(api.ReservedEndpointSelectors[labels.IDNameWorldIPv4])
+	c.Assert(cachedSelectorWorldV4, Not(IsNil))
+
+	cachedSelectorWorldV6 := testSelectorCache.FindCachedIdentitySelector(api.ReservedEndpointSelectors[labels.IDNameWorldIPv6])
+	c.Assert(cachedSelectorWorldV6, Not(IsNil))
+
 	cachedSelectorTest := testSelectorCache.FindCachedIdentitySelector(api.NewESFromLabels(lblTest))
 	c.Assert(cachedSelectorTest, Not(IsNil))
 
-	rule1MapStateEntry := NewMapStateEntry(cachedSelectorTest, labels.LabelArrayList{ruleLabel}, false, true, AuthTypeNone)
-	allowEgressMapStateEntry := NewMapStateEntry(nil, labels.LabelArrayList{ruleLabelAllowAnyEgress}, false, false, AuthTypeNone)
+	rule1MapStateEntry := NewMapStateEntry(cachedSelectorTest, labels.LabelArrayList{ruleLabel}, 0, "", 0, true, DefaultAuthType, AuthTypeDisabled)
+	allowEgressMapStateEntry := NewMapStateEntry(nil, labels.LabelArrayList{ruleLabelAllowAnyEgress}, 0, "", 0, false, ExplicitAuthType, AuthTypeDisabled)
 
 	expectedEndpointPolicy := EndpointPolicy{
 		selectorPolicy: &selectorPolicy{
 			Revision:      repo.GetRevision(),
 			SelectorCache: repo.GetSelectorCache(),
-			L4Policy: &L4Policy{
+			L4Policy: L4Policy{
 				Revision: repo.GetRevision(),
-				Ingress: L4PolicyMap{
+				Ingress: L4DirectionPolicy{PortRules: L4PolicyMap{
 					"80/TCP": {
 						Port:     80,
 						Protocol: api.ProtoTCP,
@@ -456,28 +468,36 @@ func (ds *PolicyTestSuite) TestMapStateWithIngressDeny(c *C) {
 						L7Parser: ParserTypeNone,
 						Ingress:  true,
 						PerSelectorPolicies: L7DataMap{
-							cachedSelectorWorld: &PerSelectorPolicy{IsDeny: true},
-							cachedSelectorTest:  &PerSelectorPolicy{IsDeny: true},
+							cachedSelectorWorld:   &PerSelectorPolicy{IsDeny: true},
+							cachedSelectorWorldV4: &PerSelectorPolicy{IsDeny: true},
+							cachedSelectorWorldV6: &PerSelectorPolicy{IsDeny: true},
+							cachedSelectorTest:    &PerSelectorPolicy{IsDeny: true},
 						},
 						RuleOrigin: map[CachedSelector]labels.LabelArrayList{
-							cachedSelectorWorld: {ruleLabel},
-							cachedSelectorTest:  {ruleLabel},
+							cachedSelectorWorld:   {ruleLabel},
+							cachedSelectorWorldV4: {ruleLabel},
+							cachedSelectorWorldV6: {ruleLabel},
+							cachedSelectorTest:    {ruleLabel},
 						},
 					},
 				},
-				Egress: L4PolicyMap{},
+					features: denyRules,
+				},
+				Egress: newL4DirectionPolicy(),
 			},
 			IngressPolicyEnabled: true,
 		},
 		PolicyOwner: DummyOwner{},
-		PolicyMapState: MapState{
+		policyMapState: newMapState(map[Key]MapStateEntry{
 			// Although we have calculated deny policies, the overall policy
 			// will still allow egress to world.
-			{TrafficDirection: trafficdirection.Egress.Uint8()}:                          allowEgressMapStateEntry,
-			{Identity: uint32(identity.ReservedIdentityWorld), DestPort: 80, Nexthdr: 6}: rule1MapStateEntry.WithOwners(cachedSelectorWorld),
-			{Identity: 192, DestPort: 80, Nexthdr: 6}:                                    rule1MapStateEntry,
-			{Identity: 194, DestPort: 80, Nexthdr: 6}:                                    rule1MapStateEntry,
-		},
+			{TrafficDirection: trafficdirection.Egress.Uint8()}:                              allowEgressMapStateEntry,
+			{Identity: uint32(identity.ReservedIdentityWorld), DestPort: 80, Nexthdr: 6}:     rule1MapStateEntry.WithOwners(cachedSelectorWorld),
+			{Identity: uint32(identity.ReservedIdentityWorldIPv4), DestPort: 80, Nexthdr: 6}: rule1MapStateEntry.WithOwners(cachedSelectorWorldV4, cachedSelectorWorld),
+			{Identity: uint32(identity.ReservedIdentityWorldIPv6), DestPort: 80, Nexthdr: 6}: rule1MapStateEntry.WithOwners(cachedSelectorWorldV6, cachedSelectorWorld),
+			{Identity: 192, DestPort: 80, Nexthdr: 6}:                                        rule1MapStateEntry,
+			{Identity: 194, DestPort: 80, Nexthdr: 6}:                                        rule1MapStateEntry,
+		}),
 	}
 
 	adds, deletes := policy.ConsumeMapChanges()

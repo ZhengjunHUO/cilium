@@ -1,4 +1,4 @@
-name: codeql
+name: CodeQL
 
 on:
   pull_request:
@@ -23,7 +23,7 @@ jobs:
       go-changes: ${{ steps.go-changes.outputs.src }}
     steps:
       - name: Check code changes
-        uses: dorny/paths-filter@4512585405083f25c027a35db413c2b3b9006d50 # v2.11.1
+        uses: dorny/paths-filter@0bc4621a3135347011ad047f9ecf449bf72ce2bd # v3.0.0
         id: go-changes
         with:
           filters: |
@@ -36,19 +36,20 @@ jobs:
   analyze:
     needs: check_changes
     if: ${{ needs.check_changes.outputs.go-changes == 'true' || github.event_name != 'pull_request' }}
+    name: Analyze
     runs-on: ubuntu-latest
     permissions:
       security-events: write
     steps:
     - name: Checkout repo
-      uses: actions/checkout@8e5e7e5ab8b370d6c329ec480221332ada57f0ab # v3.5.2
+      uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
       with:
         persist-credentials: false
         fetch-depth: 1
     - name: Initialize CodeQL
-      uses: github/codeql-action/init@b2c19fb9a2a485599ccf4ed5d65527d94bc57226 # v2.3.0
+      uses: github/codeql-action/init@e675ced7a7522a761fc9c8eb26682c8b27c42b2b # v3.24.1
       with:
         languages: go
         debug: true
     - name: Perform CodeQL Analysis
-      uses: github/codeql-action/analyze@b2c19fb9a2a485599ccf4ed5d65527d94bc57226 # v2.3.0
+      uses: github/codeql-action/analyze@e675ced7a7522a761fc9c8eb26682c8b27c42b2b # v3.24.1

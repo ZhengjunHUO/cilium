@@ -8,13 +8,13 @@ import (
 	"fmt"
 	"strconv"
 	"sync"
-	"time"
 
 	"github.com/vishvananda/netlink"
 
 	"github.com/cilium/cilium/pkg/controller"
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/mac"
+	"github.com/cilium/cilium/pkg/time"
 )
 
 var (
@@ -23,6 +23,8 @@ var (
 	// triggered exactly once and the same instance is handed to all users.
 	linkCache LinkCache
 	once      sync.Once
+
+	linkCacheControllerGroup = controller.NewGroup("link-cache")
 )
 
 // DeleteByName deletes the interface with the name ifName.
@@ -77,6 +79,7 @@ func NewLinkCache() *LinkCache {
 		linkCache = LinkCache{}
 		controller.NewManager().UpdateController("link-cache",
 			controller.ControllerParams{
+				Group:       linkCacheControllerGroup,
 				RunInterval: 15 * time.Second,
 				DoFunc: func(ctx context.Context) error {
 					return linkCache.syncCache()

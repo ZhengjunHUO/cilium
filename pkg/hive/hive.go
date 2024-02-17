@@ -5,27 +5,33 @@ package hive
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
 	"reflect"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 	"go.uber.org/dig"
-	"go.uber.org/multierr"
-	"golang.org/x/sys/unix"
 
 	"github.com/cilium/cilium/pkg/hive/cell"
+	"github.com/cilium/cilium/pkg/hive/metrics"
 	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 )
 
 var (
 	log = logging.DefaultLogger.WithField(logfields.LogSubsys, "hive")
+
+	// envPrefix is the prefix to use for environment variables, e.g.
+	// flag "foo" can be set with environment variable "CILIUM_FOO".
+	// Can be changed with SetEnvPrefix.
+	envPrefix = "CILIUM_"
 )
 
 const (
@@ -35,10 +41,6 @@ const (
 
 	// defaultStopTimeout is the amount of time allotted for stop hooks.
 	defaultStopTimeout = time.Minute
-
-	// defaultEnvPrefix is the default prefix for environment variables, e.g.
-	// flag "foo" can be set with environment variable "CILIUM_FOO".
-	defaultEnvPrefix = "CILIUM_"
 )
 
 // Hive is a framework building modular applications.
@@ -50,11 +52,10 @@ type Hive struct {
 	container                 *dig.Container
 	cells                     []cell.Cell
 	shutdown                  chan error
-	envPrefix                 string
 	startTimeout, stopTimeout time.Duration
 	flags                     *pflag.FlagSet
 	viper                     *viper.Viper
-	lifecycle                 *DefaultLifecycle
+	lifecycle                 cell.Lifecycle
 	populated                 bool
 	invokes                   []func() error
 	configOverrides           []any
@@ -72,19 +73,48 @@ type Hive struct {
 func New(cells ...cell.Cell) *Hive {
 	h := &Hive{
 		container:       dig.New(),
-		envPrefix:       defaultEnvPrefix,
 		cells:           cells,
 		viper:           viper.New(),
 		startTimeout:    defaultStartTimeout,
 		stopTimeout:     defaultStopTimeout,
 		flags:           pflag.NewFlagSet("", pflag.ContinueOnError),
-		lifecycle:       &DefaultLifecycle{},
+		lifecycle:       &cell.DefaultLifecycle{},
 		shutdown:        make(chan error, 1),
 		configOverrides: nil,
 	}
 
 	if err := h.provideDefaults(); err != nil {
 		log.WithError(err).Fatal("Failed to provide default objects")
+	}
+
+	if err := metrics.Cell.Apply(h.container); err != nil {
+		log.WithError(err).Fatal("Failed to apply Hive metrics cell")
+	}
+
+	// Use a single health provider for all cells, which is used to create
+	// module scoped health reporters.
+	if err := h.container.Provide(func(healthMetrics *metrics.HealthMetrics, lc cell.Lifecycle) cell.Health {
+		hp := cell.NewHealthProvider()
+		updateStats := func() {
+			for l, c := range hp.Stats() {
+				healthMetrics.HealthStatusGauge.WithLabelValues(strings.ToLower(string(l))).Set(float64(c))
+			}
+		}
+		lc.Append(cell.Hook{
+			OnStart: func(ctx cell.HookContext) error {
+				updateStats()
+				hp.Subscribe(ctx, func(u cell.Update) {
+					updateStats()
+				}, func(err error) {})
+				return nil
+			},
+			OnStop: func(ctx cell.HookContext) error {
+				return hp.Stop(ctx)
+			},
+		})
+		return hp
+	}); err != nil {
+		log.WithError(err).Fatal("Failed to provide health provider")
 	}
 
 	// Apply all cells to the container. This registers all constructors
@@ -101,7 +131,7 @@ func New(cells ...cell.Cell) *Hive {
 		if err := h.viper.BindPFlag(f.Name, f); err != nil {
 			log.Fatalf("BindPFlag: %s", err)
 		}
-		if err := h.viper.BindEnv(f.Name, h.getEnvName(f.Name)); err != nil {
+		if err := h.viper.BindEnv(f.Name, getEnvName(f.Name)); err != nil {
 			log.Fatalf("BindEnv: %s", err)
 		}
 	})
@@ -132,31 +162,29 @@ func (h *Hive) Viper() *viper.Viper {
 type defaults struct {
 	dig.Out
 
-	Flags       *pflag.FlagSet
-	Lifecycle   Lifecycle
-	Logger      logrus.FieldLogger
-	Shutdowner  Shutdowner
-	InvokerList cell.InvokerList
+	Flags             *pflag.FlagSet
+	Lifecycle         cell.Lifecycle
+	Logger            logrus.FieldLogger
+	Shutdowner        Shutdowner
+	InvokerList       cell.InvokerList
+	EmptyFullModuleID cell.FullModuleID
 }
 
 func (h *Hive) provideDefaults() error {
 	return h.container.Provide(func() defaults {
 		return defaults{
-			Flags:       h.flags,
-			Lifecycle:   h.lifecycle,
-			Logger:      log,
-			Shutdowner:  h,
-			InvokerList: h,
+			Flags:             h.flags,
+			Lifecycle:         h.lifecycle,
+			Logger:            log,
+			Shutdowner:        h,
+			InvokerList:       h,
+			EmptyFullModuleID: nil,
 		}
 	})
 }
 
 func (h *Hive) SetTimeouts(start, stop time.Duration) {
 	h.startTimeout, h.stopTimeout = start, stop
-}
-
-func (h *Hive) SetEnvPrefix(prefix string) {
-	h.envPrefix = prefix
 }
 
 // AddConfigOverride appends a config override function to modify
@@ -173,33 +201,29 @@ func (h *Hive) Run() error {
 	startCtx, cancel := context.WithTimeout(context.Background(), h.startTimeout)
 	defer cancel()
 
-	var errors []error
-
+	var errs error
 	if err := h.Start(startCtx); err != nil {
-		errors = append(errors, fmt.Errorf("failed to start: %w", err))
+		errs = errors.Join(errs, fmt.Errorf("failed to start: %w", err))
 	}
 
 	// If start was successful, wait for Shutdown() or interrupt.
-	if len(errors) == 0 {
-		shutdownErr := h.waitForSignalOrShutdown()
-		if shutdownErr != nil {
-			errors = append(errors, shutdownErr)
-		}
+	if errs == nil {
+		errs = errors.Join(errs, h.waitForSignalOrShutdown())
 	}
 
 	stopCtx, cancel := context.WithTimeout(context.Background(), h.stopTimeout)
 	defer cancel()
 
 	if err := h.Stop(stopCtx); err != nil {
-		errors = append(errors, fmt.Errorf("failed to stop: %w", err))
+		errs = errors.Join(errs, fmt.Errorf("failed to stop: %w", err))
 	}
-	return multierr.Combine(errors...)
+	return errs
 }
 
 func (h *Hive) waitForSignalOrShutdown() error {
 	signals := make(chan os.Signal, 1)
 	defer signal.Stop(signals)
-	signal.Notify(signals, os.Interrupt, unix.SIGINT, unix.SIGTERM)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
 	select {
 	case sig := <-signals:
 		log.WithField("signal", sig).Info("Signal received")
@@ -277,8 +301,14 @@ func (h *Hive) Start(ctx context.Context) error {
 	defer close(h.fatalOnTimeout(ctx))
 
 	log.Info("Starting")
-
-	return h.lifecycle.Start(ctx)
+	start := time.Now()
+	err := h.lifecycle.Start(ctx)
+	if err == nil {
+		log.WithField("duration", time.Since(start)).Info("Started")
+	} else {
+		log.WithError(err).WithField("duration", time.Since(start)).Error("Start failed")
+	}
+	return err
 }
 
 // Stop stops the hive. The context allows cancelling the stop.
@@ -303,11 +333,9 @@ func (h *Hive) fatalOnTimeout(ctx context.Context) chan struct{} {
 
 		// Context was cancelled. Give 5 more seconds and then
 		// go fatal.
-		time.Sleep(5 * time.Second)
-
 		select {
 		case <-terminated:
-		default:
+		case <-time.After(5 * time.Second):
 			log.Fatal("Start or stop failed to finish on time, aborting forcefully.")
 		}
 	}()
@@ -353,9 +381,22 @@ func (h *Hive) PrintDotGraph() {
 	}
 }
 
+// SetEnvPrefix globally sets the environment prefix to use with the hive package.
+// The given prefix will be upper-cased and a trailing underscore is added (if not present).
+//
+// This should be used early in initialization and only once as it affects all hives
+// in the program.
+func SetEnvPrefix(prefix string) {
+	prefix = strings.ToUpper(prefix)
+	if prefix != "" && !strings.HasSuffix(prefix, "_") {
+		prefix += "_"
+	}
+	envPrefix = prefix
+}
+
 // getEnvName returns the environment variable to be used for the given option name.
-func (h *Hive) getEnvName(option string) string {
+func getEnvName(option string) string {
 	under := strings.Replace(option, "-", "_", -1)
 	upper := strings.ToUpper(under)
-	return h.envPrefix + upper
+	return envPrefix + upper
 }

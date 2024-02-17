@@ -23,7 +23,7 @@ func (m *MockIPCache) GetNamedPorts() types.NamedPortMultiMap {
 
 func (m *MockIPCache) AddListener(listener ipcache.IPIdentityMappingListener) {}
 
-func (m *MockIPCache) AllocateCIDRs(prefixes []netip.Prefix, oldNIDs []identity.NumericIdentity, newlyAllocatedIdentities map[netip.Prefix]*identity.Identity) ([]*identity.Identity, error) {
+func (m *MockIPCache) AllocateCIDRs(prefixes []netip.Prefix, newlyAllocatedIdentities map[netip.Prefix]*identity.Identity) ([]*identity.Identity, error) {
 	return nil, nil
 }
 
@@ -49,6 +49,13 @@ func (m *MockIPCache) RemoveLabelsExcluded(lbls labels.Labels, toExclude map[net
 
 func (m *MockIPCache) DeleteOnMetadataMatch(IP string, source source.Source, namespace, name string) (namedPortsChanged bool) {
 	return false
+}
+
+func (m *MockIPCache) UpsertPrefixes(prefixes []netip.Prefix, src source.Source, resource ipcacheTypes.ResourceID) uint64 {
+	return 0
+}
+
+func (m *MockIPCache) RemovePrefixes(prefixes []netip.Prefix, src source.Source, resource ipcacheTypes.ResourceID) {
 }
 
 func NewMockIPCache() *MockIPCache {

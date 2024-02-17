@@ -6,12 +6,10 @@ package nat
 import (
 	"errors"
 	"fmt"
-	"os"
 	"strconv"
-	"syscall"
 	"unsafe"
 
-	"golang.org/x/sys/unix"
+	"github.com/cilium/ebpf"
 
 	"github.com/cilium/cilium/pkg/bpf"
 	cmtypes "github.com/cilium/cilium/pkg/clustermesh/types"
@@ -19,75 +17,106 @@ import (
 )
 
 const (
-	mapNamePerClusterSnat4Global = "cilium_per_cluster_snat_v4_external"
-	mapNamePerClusterSnat6Global = "cilium_per_cluster_snat_v6_external"
-	innerMapNamePrefix4          = MapNameSnat4Global + "_"
-	innerMapNamePrefix6          = MapNameSnat6Global + "_"
-	perClusterNATMapMaxEntries   = cmtypes.ClusterIDMax + 1
+	perClusterOuterMapPrefix = "cilium_per_cluster_snat_"
+	perClusterIPv4OuterMap   = perClusterOuterMapPrefix + "v4_external"
+	perClusterIPv6OuterMap   = perClusterOuterMapPrefix + "v6_external"
 )
 
-// Global interface to interact with IPv4 and v6 NAT maps. We can choose the
-// implementation of this at startup time by choosing InitPerClusterNATMaps
-// or InitDummyPerClusterNATMaps for initialization.
-var PerClusterNATMaps PerClusterNATMapper
+// ClusterOuterMapName returns the name of the outer per-cluster NAT map
+// for the given IP family. It can be overwritten for testing purposes.
+var ClusterOuterMapName = clusterOuterMapName
 
-// An interface to interact with the global map.
+func clusterOuterMapName(family IPFamily) string {
+	if family == IPv4 {
+		return perClusterIPv4OuterMap
+	}
+	return perClusterIPv6OuterMap
+}
+
+func ClusterOuterMapNameTestOverride(prefix string) {
+	ClusterOuterMapName = func(family IPFamily) string {
+		return prefix + "_" + clusterOuterMapName(family)
+	}
+}
+
+// ClusterInnerMapName returns the name of the inner per-cluster NAT map
+// for the given IP family and cluster ID.
+func ClusterInnerMapName(family IPFamily, clusterID uint32) string {
+	return ClusterOuterMapName(family) + "_" + strconv.FormatUint(uint64(clusterID), 10)
+}
+
+var _ PerClusterNATMapper = (*perClusterNATMaps)(nil)
+
+// An interface to manage the per-cluster NAT maps.
 type PerClusterNATMapper interface {
-	UpdateClusterNATMaps(clusterID uint32) error
+	// Create enforces the presence of the outer per-cluster NAT maps.
+	OpenOrCreate() error
+	// Close closes the outer per-cluster NAT maps handlers.
+	Close() error
+
+	// CreateClusterNATMaps enforces the presence of the inner maps for
+	// the given cluster ID. It must be called after that OpenOrCreate()
+	// has returned successfully.
+	CreateClusterNATMaps(clusterID uint32) error
+	// DeleteClusterNATMaps deletes the inner maps for the given cluster ID.
+	// It must be called after that OpenOrCreate() has returned successfully.
 	DeleteClusterNATMaps(clusterID uint32) error
-	GetClusterNATMap(clusterID uint32, v4 bool) (*Map, error)
-	Cleanup()
+}
+
+// NewPerClusterNATMaps returns a new instance of the per-cluster NAT maps manager.
+func NewPerClusterNATMaps(ipv4, ipv6 bool) *perClusterNATMaps {
+	return newPerClusterNATMaps(ipv4, ipv6, maxEntries())
+}
+
+// GetClusterNATMap returns the per-cluster map for the given cluster ID. The
+// returned map needs to be opened by the caller, and it is not guaranteed to exist.
+func GetClusterNATMap(clusterID uint32, family IPFamily) (*Map, error) {
+	maps := NewPerClusterNATMaps(family == IPv4, family == IPv6)
+	return maps.getClusterNATMap(clusterID, family)
+}
+
+// CleanupPerClusterNATMaps deletes the per-cluster NAT maps, including the inner ones.
+func CleanupPerClusterNATMaps(ipv4, ipv6 bool) error {
+	maps := NewPerClusterNATMaps(ipv4, ipv6)
+	return maps.cleanup()
 }
 
 // A structure that holds per-cluster IPv4 and v6 NAT maps. It implements
 // PerClusterNATMapper.
 type perClusterNATMaps struct {
 	lock.RWMutex
-	v4Map *PerClusterNATMap
-	v6Map *PerClusterNATMap
-}
-
-// A structure that holds dummy IPv4 and v6 NAT maps for testing. It
-// implements PerClusterNATMapper.
-type dummyPerClusterNATMaps struct {
-	lock.RWMutex
-	v4Map map[uint32]struct{}
-	v6Map map[uint32]struct{}
+	v4Map *perClusterNATMap
+	v6Map *perClusterNATMap
 }
 
 // A map-in-map that holds per-cluster NAT maps.
-type PerClusterNATMap struct {
+type perClusterNATMap struct {
 	*bpf.Map
-	v4              bool
+	family          IPFamily
 	innerMapEntries int
 }
 
-// +k8s:deepcopy-gen=true
-// +k8s:deepcopy-gen:interfaces=github.com/cilium/cilium/pkg/bpf.MapKey
 type PerClusterNATMapKey struct {
 	ClusterID uint32
 }
 
-func (k *PerClusterNATMapKey) String() string            { return strconv.FormatUint(uint64(k.ClusterID), 10) }
-func (k *PerClusterNATMapKey) GetKeyPtr() unsafe.Pointer { return unsafe.Pointer(k) }
-func (k *PerClusterNATMapKey) NewValue() bpf.MapValue    { return &PerClusterNATMapVal{} }
+func (k *PerClusterNATMapKey) String() string  { return strconv.FormatUint(uint64(k.ClusterID), 10) }
+func (n *PerClusterNATMapKey) New() bpf.MapKey { return &PerClusterNATMapKey{} }
 
-// +k8s:deepcopy-gen=true
-// +k8s:deepcopy-gen:interfaces=github.com/cilium/cilium/pkg/bpf.MapValue
 type PerClusterNATMapVal struct {
 	Fd uint32
 }
 
-func (v *PerClusterNATMapVal) String() string              { return fmt.Sprintf("fd=%d", v.Fd) }
-func (v *PerClusterNATMapVal) GetValuePtr() unsafe.Pointer { return unsafe.Pointer(v) }
+func (v *PerClusterNATMapVal) String() string    { return fmt.Sprintf("fd=%d", v.Fd) }
+func (n *PerClusterNATMapVal) New() bpf.MapValue { return &PerClusterNATMapVal{} }
 
-func newPerClusterNATMap(name string, v4 bool, innerMapEntries int) (*PerClusterNATMap, error) {
+func newPerClusterNATMap(family IPFamily, innerMapEntries int) *perClusterNATMap {
 	var (
 		keySize uint32
 		valSize uint32
 	)
 
-	if v4 {
+	if family == IPv4 {
 		keySize = uint32(unsafe.Sizeof(NatKey4{}))
 		valSize = uint32(unsafe.Sizeof(NatEntry4{}))
 	} else {
@@ -95,319 +124,176 @@ func newPerClusterNATMap(name string, v4 bool, innerMapEntries int) (*PerCluster
 		valSize = uint32(unsafe.Sizeof(NatEntry6{}))
 	}
 
-	fd, err := bpf.CreateMap(
-		bpf.MapTypeLRUHash,
-		keySize,
-		valSize,
-		uint32(innerMapEntries),
-		0, 0,
-		name+"_tmp",
-	)
-	if err != nil {
-		return nil, err
+	inner := &ebpf.MapSpec{
+		Type:       ebpf.LRUHash,
+		KeySize:    keySize,
+		ValueSize:  valSize,
+		MaxEntries: uint32(innerMapEntries),
 	}
 
-	defer syscall.Close(fd)
-
-	om := bpf.NewMap(
-		name,
-		bpf.MapTypeArrayOfMaps,
+	om := bpf.NewMapWithInnerSpec(
+		ClusterOuterMapName(family),
+		ebpf.ArrayOfMaps,
 		&PerClusterNATMapKey{},
-		int(unsafe.Sizeof(PerClusterNATMapKey{})),
 		&PerClusterNATMapVal{},
-		int(unsafe.Sizeof(PerClusterNATMapVal{})),
-		perClusterNATMapMaxEntries,
+		int(cmtypes.ClusterIDMax+1),
 		0,
-		uint32(fd),
-		bpf.ConvertKeyValue,
+		inner,
 	)
 
-	if _, err := om.OpenOrCreate(); err != nil {
-		return nil, err
-	}
-
-	return &PerClusterNATMap{
+	return &perClusterNATMap{
 		Map:             om,
-		v4:              v4,
+		family:          family,
 		innerMapEntries: innerMapEntries,
-	}, nil
-}
-
-func (om *PerClusterNATMap) newInnerMap(name string) *Map {
-	return NewMap(name, om.v4, om.innerMapEntries)
-}
-
-func (om *PerClusterNATMap) getInnerMapName(clusterID uint32) string {
-	if om.v4 {
-		return innerMapNamePrefix4 + strconv.FormatUint(uint64(clusterID), 10)
-	} else {
-		return innerMapNamePrefix6 + strconv.FormatUint(uint64(clusterID), 10)
 	}
 }
 
-func (om *PerClusterNATMap) updateClusterNATMap(clusterID uint32) error {
-	if err := cmtypes.ValidateClusterID(clusterID); err != nil {
-		return err
-	}
+func (om *perClusterNATMap) newInnerMap(clusterID uint32) *Map {
+	return NewMap(ClusterInnerMapName(om.family, clusterID), om.family, om.innerMapEntries)
+}
 
-	im := om.newInnerMap(om.getInnerMapName(clusterID))
-
-	_, err := im.OpenOrCreate()
-	if err != nil {
-		return err
+func (om *perClusterNATMap) createClusterNATMap(clusterID uint32) error {
+	im := om.newInnerMap(clusterID)
+	if err := im.OpenOrCreate(); err != nil {
+		return fmt.Errorf("create inner map: %w", err)
 	}
 
 	defer im.Close()
 
 	if err := om.Update(
 		&PerClusterNATMapKey{clusterID},
-		&PerClusterNATMapVal{uint32(im.GetFd())},
+		&PerClusterNATMapVal{uint32(im.FD())},
 	); err != nil {
-		return err
+		return fmt.Errorf("update outer map: %w", err)
 	}
 
 	return nil
 }
 
-func (om *PerClusterNATMap) deleteClusterNATMap(clusterID uint32) error {
-	if err := cmtypes.ValidateClusterID(clusterID); err != nil {
-		return err
+func (om *perClusterNATMap) deleteClusterNATMap(clusterID uint32) error {
+	im := om.newInnerMap(clusterID)
+	if err := im.Unpin(); err != nil {
+		return fmt.Errorf("delete inner map: %w", err)
 	}
-
-	im := om.newInnerMap(om.getInnerMapName(clusterID))
-
-	if _, err := im.OpenOrCreate(); err != nil {
-		return err
-	}
-
-	// Release opened file descriptor and bpffs entry
-	im.Close()
-	im.Unpin()
 
 	// Detach inner map from outer map. At this point, no
 	// one should have the reference of the inner map after
 	// this call.
 	if _, err := om.SilentDelete(&PerClusterNATMapKey{clusterID}); err != nil {
-		return err
+		return fmt.Errorf("update outer map: %w", err)
 	}
 
 	return nil
 }
 
-func (om *PerClusterNATMap) getClusterNATMap(clusterID uint32) (*Map, error) {
+func (om *perClusterNATMap) cleanup() error {
+	var errs []error
+
+	for id := uint32(1); id <= cmtypes.ClusterIDMax; id++ {
+		im := om.newInnerMap(id)
+		if err := im.Unpin(); err != nil {
+			errs = append(errs, fmt.Errorf("delete inner map for cluster ID %v: %w", id, err))
+		}
+	}
+
+	if err := om.Unpin(); err != nil {
+		errs = append(errs, fmt.Errorf("delete outer map: %w", err))
+	}
+
+	return errors.Join(errs...)
+}
+
+func newPerClusterNATMaps(ipv4, ipv6 bool, innerMapEntries int) *perClusterNATMaps {
+	var gm perClusterNATMaps
+
+	if ipv4 {
+		gm.v4Map = newPerClusterNATMap(IPv4, innerMapEntries)
+	}
+
+	if ipv6 {
+		gm.v6Map = newPerClusterNATMap(IPv6, innerMapEntries)
+	}
+
+	return &gm
+}
+
+func (gm *perClusterNATMaps) OpenOrCreate() (err error) {
+	return gm.foreach(
+		func(om *perClusterNATMap) error { return om.OpenOrCreate() },
+	)
+}
+
+func (gm *perClusterNATMaps) Close() (err error) {
+	return gm.foreach(
+		func(om *perClusterNATMap) error { return om.Close() },
+	)
+}
+
+func (gm *perClusterNATMaps) CreateClusterNATMaps(clusterID uint32) error {
+	if err := cmtypes.ValidateClusterID(clusterID); err != nil {
+		return err
+	}
+
+	return gm.foreach(
+		func(om *perClusterNATMap) error { return om.createClusterNATMap(clusterID) },
+	)
+}
+
+func (gm *perClusterNATMaps) DeleteClusterNATMaps(clusterID uint32) error {
+	if err := cmtypes.ValidateClusterID(clusterID); err != nil {
+		return err
+	}
+
+	return gm.foreach(func(om *perClusterNATMap) error {
+		return om.deleteClusterNATMap(clusterID)
+	})
+}
+
+func (gm *perClusterNATMaps) getClusterNATMap(clusterID uint32, family IPFamily) (*Map, error) {
 	if err := cmtypes.ValidateClusterID(clusterID); err != nil {
 		return nil, err
 	}
 
-	im := om.newInnerMap(om.getInnerMapName(clusterID))
+	gm.RLock()
+	defer gm.RUnlock()
 
-	if err := im.Open(); err != nil {
-		if pathErr, ok := err.(*os.PathError); ok && errors.Is(pathErr.Err, unix.ENOENT) {
-			return nil, nil
-		}
+	if family == IPv4 && gm.v4Map == nil || family == IPv6 && gm.v6Map == nil {
+		return nil, fmt.Errorf("IP family %s not enabled", family)
 	}
 
-	return im, nil
-}
-
-func (om *PerClusterNATMap) cleanup() {
-	for i := uint32(1); i < perClusterNATMapMaxEntries; i++ {
-		om.deleteClusterNATMap(i)
-	}
-	om.Unpin()
-	om.Close()
-}
-
-func InitPerClusterNATMaps(ipv4, ipv6 bool, innerMapEntries int) error {
-	gm, err := newPerClusterNATMaps(ipv4, ipv6, innerMapEntries)
-	if err != nil {
-		return err
+	if family == IPv4 {
+		return gm.v4Map.newInnerMap(clusterID), nil
 	}
 
-	PerClusterNATMaps = gm
-
-	return nil
+	return gm.v6Map.newInnerMap(clusterID), nil
 }
 
-func newPerClusterNATMaps(ipv4, ipv6 bool, innerMapEntries int) (*perClusterNATMaps, error) {
-	var err error
+func (gm *perClusterNATMaps) cleanup() error {
+	return gm.foreach(func(om *perClusterNATMap) error {
+		return om.cleanup()
+	})
+}
 
-	gm := &perClusterNATMaps{}
+func (gm *perClusterNATMaps) foreach(fn func(om *perClusterNATMap) error) error {
+	gm.Lock()
+	defer gm.Unlock()
 
-	defer func() {
-		if err != nil {
-			for _, om := range []*PerClusterNATMap{gm.v4Map, gm.v6Map} {
-				if om != nil {
-					om.Unpin()
-					om.Close()
-				}
+	var errs []error
+
+	// Attempt to perform the given operation on all maps, and collect all
+	// errors that are encountered. We do not implement a rollback mechanism
+	// in case of failures to keep the overall logic simple, as it is likely
+	// that the consumer of the different methods will nonetheless retry again
+	// the same operation on error. Hence, the rollback would only introduce
+	// additional churn, and it might not be even possible in certain cases
+	// (e.g., for deletion operations, to restore the previous state).
+	for _, om := range []*perClusterNATMap{gm.v4Map, gm.v6Map} {
+		if om != nil {
+			if err := fn(om); err != nil {
+				errs = append(errs, fmt.Errorf("%s: %w", om.family, err))
 			}
 		}
-	}()
-
-	if ipv4 {
-		gm.v4Map, err = newPerClusterNATMap(mapNamePerClusterSnat4Global, true, innerMapEntries)
-		if err != nil {
-			return nil, err
-		}
 	}
 
-	if ipv6 {
-		gm.v6Map, err = newPerClusterNATMap(mapNamePerClusterSnat6Global, false, innerMapEntries)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	return gm, nil
-}
-
-func (gm *perClusterNATMaps) UpdateClusterNATMaps(clusterID uint32) error {
-	gm.Lock()
-	defer gm.Unlock()
-
-	if gm.v4Map != nil {
-		if err := gm.v4Map.updateClusterNATMap(clusterID); err != nil {
-			return err
-		}
-	}
-
-	if gm.v6Map != nil {
-		if err := gm.v6Map.updateClusterNATMap(clusterID); err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-func (gm *perClusterNATMaps) DeleteClusterNATMaps(clusterID uint32) error {
-	gm.Lock()
-	defer gm.Unlock()
-
-	if gm.v4Map != nil {
-		if err := gm.v4Map.deleteClusterNATMap(clusterID); err != nil {
-			return err
-		}
-	}
-
-	if gm.v6Map != nil {
-		if err := gm.v6Map.deleteClusterNATMap(clusterID); err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-func (gm *perClusterNATMaps) GetClusterNATMap(clusterID uint32, v4 bool) (*Map, error) {
-	gm.RLock()
-	defer gm.RUnlock()
-
-	if v4 {
-		if im, err := gm.v4Map.getClusterNATMap(clusterID); err != nil {
-			return nil, err
-		} else {
-			return im, nil
-		}
-	} else {
-		if im, err := gm.v6Map.getClusterNATMap(clusterID); err != nil {
-			return nil, err
-		} else {
-			return im, nil
-		}
-	}
-}
-
-func (gm *perClusterNATMaps) Cleanup() {
-	gm.Lock()
-	defer gm.Unlock()
-
-	if gm.v4Map != nil {
-		gm.v4Map.cleanup()
-	}
-
-	if gm.v6Map != nil {
-		gm.v6Map.cleanup()
-	}
-}
-
-func InitDummyPerClusterNATMaps(ipv4, ipv6 bool, innerMapEntries int) error {
-	gm, err := newDummyPerClusterNATMaps(ipv4, ipv6, innerMapEntries)
-	if err != nil {
-		return err
-	}
-
-	PerClusterNATMaps = gm
-
-	return nil
-}
-
-func newDummyPerClusterNATMaps(ipv4, ipv6 bool, innerMapEntries int) (*dummyPerClusterNATMaps, error) {
-	gm := &dummyPerClusterNATMaps{}
-
-	if ipv4 {
-		gm.v4Map = make(map[uint32]struct{})
-	}
-
-	if ipv6 {
-		gm.v6Map = make(map[uint32]struct{})
-	}
-
-	return gm, nil
-}
-
-func (gm *dummyPerClusterNATMaps) UpdateClusterNATMaps(clusterID uint32) error {
-	gm.Lock()
-	defer gm.Unlock()
-
-	if gm.v4Map != nil {
-		gm.v4Map[clusterID] = struct{}{}
-	}
-
-	if gm.v6Map != nil {
-		gm.v6Map[clusterID] = struct{}{}
-	}
-
-	return nil
-}
-
-func (gm *dummyPerClusterNATMaps) DeleteClusterNATMaps(clusterID uint32) error {
-	gm.Lock()
-	defer gm.Unlock()
-
-	if gm.v4Map != nil {
-		delete(gm.v4Map, clusterID)
-	}
-
-	if gm.v6Map != nil {
-		delete(gm.v6Map, clusterID)
-	}
-
-	return nil
-}
-
-func (gm *dummyPerClusterNATMaps) GetClusterNATMap(clusterID uint32, v4 bool) (*Map, error) {
-	gm.RLock()
-	defer gm.RUnlock()
-
-	if v4 {
-		if _, ok := gm.v4Map[clusterID]; ok {
-			return &Map{}, nil
-		}
-		return nil, nil
-	} else {
-		if _, ok := gm.v6Map[clusterID]; ok {
-			return &Map{}, nil
-		}
-		return nil, nil
-	}
-}
-
-func (gm *dummyPerClusterNATMaps) Cleanup() {
-	for i := uint32(1); i < perClusterNATMapMaxEntries; i++ {
-		gm.DeleteClusterNATMaps(i)
-	}
-	gm.v4Map = nil
-	gm.v6Map = nil
+	return errors.Join(errs...)
 }

@@ -11,6 +11,11 @@
 #include "hash.h"
 #include "ids.h"
 #include "nat_46x64.h"
+#include "ratelimit.h"
+
+#ifndef SKIP_CALLS_MAP
+#include "drop.h"
+#endif
 
 #ifdef ENABLE_IPV6
 struct {
@@ -190,6 +195,20 @@ struct {
 #define cilium_dbg_lb(a, b, c, d)
 #endif
 
+static __always_inline bool lb_is_svc_proto(__u8 proto)
+{
+	switch (proto) {
+	case IPPROTO_TCP:
+	case IPPROTO_UDP:
+#ifdef ENABLE_SCTP
+	case IPPROTO_SCTP:
+#endif /* ENABLE_SCTP */
+		return true;
+	default:
+		return false;
+	}
+}
+
 static __always_inline
 bool lb4_svc_is_loadbalancer(const struct lb4_service *svc __maybe_unused)
 {
@@ -365,9 +384,8 @@ static __always_inline int reverse_map_l4_port(struct __ctx_buff *ctx, __u8 next
 			int ret;
 
 			/* Port offsets for UDP and TCP are the same */
-			ret = l4_load_port(ctx, l4_off + TCP_SPORT_OFF, &old_port);
-			if (IS_ERR(ret))
-				return ret;
+			if (l4_load_port(ctx, l4_off + TCP_SPORT_OFF, &old_port) < 0)
+				return DROP_INVALID;
 
 			if (port != old_port) {
 #ifdef ENABLE_SCTP
@@ -428,8 +446,6 @@ static __always_inline int __lb6_rev_nat(struct __ctx_buff *ctx, int l4_off,
 {
 	struct csum_offset csum_off = {};
 	union v6addr old_saddr;
-	union v6addr tmp;
-	__u8 *new_saddr;
 	__be32 sum;
 	int ret;
 
@@ -446,25 +462,29 @@ static __always_inline int __lb6_rev_nat(struct __ctx_buff *ctx, int l4_off,
 	if (flags & REV_NAT_F_TUPLE_SADDR) {
 		ipv6_addr_copy(&old_saddr, &tuple->saddr);
 		ipv6_addr_copy(&tuple->saddr, &nat->address);
-		new_saddr = tuple->saddr.addr;
 	} else {
 		if (ipv6_load_saddr(ctx, ETH_HLEN, &old_saddr) < 0)
 			return DROP_INVALID;
-
-		ipv6_addr_copy(&tmp, &nat->address);
-		new_saddr = tmp.addr;
 	}
 
-	ret = ipv6_store_saddr(ctx, new_saddr, ETH_HLEN);
+	ret = ipv6_store_saddr(ctx, nat->address.addr, ETH_HLEN);
 	if (IS_ERR(ret))
 		return DROP_WRITE_ERROR;
 
-	sum = csum_diff(old_saddr.addr, 16, new_saddr, 16, 0);
+	sum = csum_diff(old_saddr.addr, 16, nat->address.addr, 16, 0);
 	if (csum_off.offset &&
 	    csum_l4_replace(ctx, l4_off, &csum_off, 0, sum, BPF_F_PSEUDO_HDR) < 0)
 		return DROP_CSUM_L4;
 
 	return 0;
+}
+
+static __always_inline struct lb6_reverse_nat *
+lb6_lookup_rev_nat_entry(struct __ctx_buff *ctx __maybe_unused, __u16 index)
+{
+	cilium_dbg_lb(ctx, DBG_LB6_REVERSE_NAT_LOOKUP, index, 0);
+
+	return map_lookup_elem(&LB6_REVERSE_NAT_MAP, &index);
 }
 
 /** Perform IPv6 reverse NAT based on reverse NAT index
@@ -479,8 +499,7 @@ static __always_inline int lb6_rev_nat(struct __ctx_buff *ctx, int l4_off,
 {
 	struct lb6_reverse_nat *nat;
 
-	cilium_dbg_lb(ctx, DBG_LB6_REVERSE_NAT_LOOKUP, index, 0);
-	nat = map_lookup_elem(&LB6_REVERSE_NAT_MAP, &index);
+	nat = lb6_lookup_rev_nat_entry(ctx, index);
 	if (nat == NULL)
 		return 0;
 
@@ -520,7 +539,7 @@ lb6_extract_tuple(struct __ctx_buff *ctx, struct ipv6hdr *ip6, int l3_off,
 	ipv6_addr_copy(&tuple->daddr, (union v6addr *)&ip6->daddr);
 	ipv6_addr_copy(&tuple->saddr, (union v6addr *)&ip6->saddr);
 
-	ret = ipv6_hdrlen(ctx, &tuple->nexthdr);
+	ret = ipv6_hdrlen_offset(ctx, &tuple->nexthdr, l3_off);
 	if (ret < 0)
 		return ret;
 
@@ -536,7 +555,7 @@ lb6_extract_tuple(struct __ctx_buff *ctx, struct ipv6hdr *ip6, int l3_off,
 			return DROP_CT_INVALID_HDR;
 		return 0;
 	case IPPROTO_ICMPV6:
-		return DROP_NO_SERVICE;
+		return DROP_UNSUPP_SERVICE_PROTO;
 	default:
 		return DROP_UNKNOWN_L4;
 	}
@@ -732,7 +751,7 @@ __lb6_affinity_backend_id(const struct lb6_service *svc, bool netns_cookie,
 	};
 	struct lb_affinity_val *val;
 
-	ipv6_addr_copy(&key.client_id.client_ip, &id->client_ip);
+	ipv6_addr_copy_unaligned(&key.client_id.client_ip, &id->client_ip);
 
 	val = map_lookup_elem(&LB6_AFFINITY_MAP, &key);
 	if (val != NULL) {
@@ -781,7 +800,7 @@ __lb6_update_affinity(const struct lb6_service *svc, bool netns_cookie,
 		.last_used	= now,
 	};
 
-	ipv6_addr_copy(&key.client_id.client_ip, &id->client_ip);
+	ipv6_addr_copy_unaligned(&key.client_id.client_ip, &id->client_ip);
 
 	map_update_elem(&LB6_AFFINITY_MAP, &key, &val, 0);
 }
@@ -854,7 +873,8 @@ static __always_inline int lb6_local(const void *map, struct __ctx_buff *ctx,
 		return DROP_NO_SERVICE;
 
 	/* See lb4_local comments re svc endpoint lookup process */
-	ret = ct_lb_lookup6(map, tuple, ctx, l4_off, CT_SERVICE, state, &monitor);
+	ret = ct_lazy_lookup6(map, tuple, ctx, l4_off, CT_SERVICE,
+			      SCOPE_REVERSE, CT_ENTRY_ANY, state, &monitor);
 	switch (ret) {
 	case CT_NEW:
 #ifdef ENABLE_SESSION_AFFINITY
@@ -871,81 +891,85 @@ static __always_inline int lb6_local(const void *map, struct __ctx_buff *ctx,
 			backend_id = lb6_select_backend_id(ctx, key, tuple, svc);
 			backend = lb6_lookup_backend(ctx, backend_id);
 			if (backend == NULL)
-				goto drop_no_service;
+				goto no_service;
 		}
 
 		state->backend_id = backend_id;
 		state->rev_nat_index = svc->rev_nat_index;
+		state->proxy_redirect = false;
+		state->from_l7lb = false;
 
-		ret = ct_create6(map, NULL, tuple, ctx, CT_SERVICE, state, false, false, ext_err);
+		ret = ct_create6(map, NULL, tuple, ctx, CT_SERVICE, state, ext_err);
 		/* Fail closed, if the conntrack entry create fails drop
 		 * service lookup.
 		 */
 		if (IS_ERR(ret))
 			goto drop_err;
-		goto update_state;
+
+		break;
 	case CT_REPLY:
 		/* See lb4_local comment */
 		if (state->rev_nat_index == 0) {
 			state->rev_nat_index = svc->rev_nat_index;
 			ct_update_rev_nat_index(map, tuple, state);
 		}
+
+		/* See lb4_local comment */
+		if (state->rev_nat_index != svc->rev_nat_index) {
+#ifdef ENABLE_SESSION_AFFINITY
+			if (lb6_svc_is_affinity(svc))
+				backend_id = lb6_affinity_backend_id_by_addr(svc,
+									     &client_id);
+#endif
+			if (!backend_id) {
+				backend_id = lb6_select_backend_id(ctx, key, tuple, svc);
+				if (!backend_id)
+					goto no_service;
+			}
+
+			state->rev_nat_index = svc->rev_nat_index;
+			ct_update_svc_entry(map, tuple, backend_id, svc->rev_nat_index);
+		} else {
+			backend_id = state->backend_id;
+		}
+
+		/* If the lookup fails it means the user deleted the backend out from
+		 * underneath us. To resolve this fall back to hash. If this is a TCP
+		 * session we are likely to get a TCP RST.
+		 */
+		backend = lb6_lookup_backend(ctx, backend_id);
+		if (unlikely(!backend || backend->flags != BE_STATE_ACTIVE)) {
+			/* Drain existing connections, but redirect new ones to only
+			 * active backends.
+			 */
+			if (backend && !state->syn)
+				break;
+
+			svc = lb6_lookup_service(key, false, true);
+			if (!svc)
+				goto no_service;
+			backend_id = lb6_select_backend_id(ctx, key, tuple, svc);
+			backend = lb6_lookup_backend(ctx, backend_id);
+			if (!backend)
+				goto no_service;
+
+			state->rev_nat_index = svc->rev_nat_index;
+			ct_update_svc_entry(map, tuple, backend_id, svc->rev_nat_index);
+		}
+
 		break;
 	default:
 		ret = DROP_UNKNOWN_CT;
 		goto drop_err;
 	}
 
-	/* See lb4_local comment */
-	if (state->rev_nat_index != svc->rev_nat_index) {
-#ifdef ENABLE_SESSION_AFFINITY
-		if (lb6_svc_is_affinity(svc))
-			backend_id = lb6_affinity_backend_id_by_addr(svc,
-								     &client_id);
-#endif
-		if (!backend_id) {
-			backend_id = lb6_select_backend_id(ctx, key, tuple, svc);
-			if (!backend_id)
-				goto drop_no_service;
-		}
-
-		state->backend_id = backend_id;
-		ct_update_backend_id(map, tuple, state);
-		state->rev_nat_index = svc->rev_nat_index;
-		ct_update_rev_nat_index(map, tuple, state);
-	}
-	/* If the lookup fails it means the user deleted the backend out from
-	 * underneath us. To resolve this fall back to hash. If this is a TCP
-	 * session we are likely to get a TCP RST.
-	 */
-	backend = lb6_lookup_backend(ctx, state->backend_id);
-	if (unlikely(!backend || backend->flags != BE_STATE_ACTIVE)) {
-		/* Drain existing connections, but redirect new ones to only
-		 * active backends.
-		 */
-		if (backend && !state->syn)
-			goto update_state;
-		key->backend_slot = 0;
-		svc = lb6_lookup_service(key, false, true);
-		if (!svc)
-			goto drop_no_service;
-		backend_id = lb6_select_backend_id(ctx, key, tuple, svc);
-		backend = lb6_lookup_backend(ctx, backend_id);
-		if (!backend)
-			goto drop_no_service;
-		state->backend_id = backend_id;
-		ct_update_backend_id(map, tuple, state);
-	}
-update_state:
 	/* Restore flags so that SERVICE flag is only used in used when the
 	 * service lookup happens and future lookups use EGRESS or INGRESS.
 	 */
 	tuple->flags = flags;
-	state->rev_nat_index = svc->rev_nat_index;
 #ifdef ENABLE_SESSION_AFFINITY
 	if (lb6_svc_is_affinity(svc))
-		lb6_update_affinity_by_addr(svc, &client_id,
-					    state->backend_id);
+		lb6_update_affinity_by_addr(svc, &client_id, backend_id);
 #endif
 
 	ipv6_addr_copy(&tuple->daddr, &backend->address);
@@ -958,7 +982,7 @@ update_state:
 
 	return lb6_xlate(ctx, tuple->nexthdr, l3_off, l4_off,
 			 key, backend, skip_l3_xlate);
-drop_no_service:
+no_service:
 	ret = DROP_NO_SERVICE;
 drop_err:
 	tuple->flags = flags;
@@ -989,14 +1013,11 @@ static __always_inline void lb6_ctx_restore_state(struct __ctx_buff *ctx,
 						  struct ct_state *state,
 						 __u16 *proxy_port)
 {
-	state->rev_nat_index = (__u16)ctx_load_meta(ctx, CB_CT_STATE);
-	/* Clear to not leak state to later stages of the datapath. */
-	ctx_store_meta(ctx, CB_CT_STATE, 0);
+	state->rev_nat_index = (__u16)ctx_load_and_clear_meta(ctx, CB_CT_STATE);
 
 	/* No loopback support for IPv6, see lb6_local() above. */
 
-	*proxy_port = ctx_load_meta(ctx, CB_PROXY_MAGIC) >> 16;
-	ctx_store_meta(ctx, CB_PROXY_MAGIC, 0);
+	*proxy_port = ctx_load_and_clear_meta(ctx, CB_PROXY_MAGIC) >> 16;
 }
 
 #else
@@ -1034,35 +1055,23 @@ lb6_to_lb4_service(const struct lb6_service *svc __maybe_unused)
 static __always_inline int __lb4_rev_nat(struct __ctx_buff *ctx, int l3_off, int l4_off,
 					 struct ipv4_ct_tuple *tuple, int flags,
 					 const struct lb4_reverse_nat *nat,
-					 const struct ct_state *ct_state, bool has_l4_header)
+					 bool loopback __maybe_unused, bool has_l4_header)
 {
-	struct csum_offset csum_off = {};
-	__be32 old_sip, new_sip, sum = 0;
+	__be32 old_sip, sum = 0;
 	int ret;
 
 	cilium_dbg_lb(ctx, DBG_LB4_REVERSE_NAT, nat->address, nat->port);
 
-	if (has_l4_header)
-		csum_l4_offset_and_flags(tuple->nexthdr, &csum_off);
-
-	if (nat->port && has_l4_header) {
-		ret = reverse_map_l4_port(ctx, tuple->nexthdr, nat->port, l4_off, &csum_off);
-		if (IS_ERR(ret))
-			return ret;
-	}
-
 	if (flags & REV_NAT_F_TUPLE_SADDR) {
 		old_sip = tuple->saddr;
-		tuple->saddr = new_sip = nat->address;
+		tuple->saddr = nat->address;
 	} else {
-		ret = ctx_load_bytes(ctx, l3_off + offsetof(struct iphdr, saddr), &old_sip, 4);
-		if (IS_ERR(ret))
-			return ret;
-
-		new_sip = nat->address;
+		if (ctx_load_bytes(ctx, l3_off + offsetof(struct iphdr, saddr), &old_sip, 4) < 0)
+			return DROP_INVALID;
 	}
 
-	if (ct_state->loopback) {
+#ifndef DISABLE_LOOPBACK_LB
+	if (loopback) {
 		/* The packet was looped back to the sending endpoint on the
 		 * forward service translation. This implies that the original
 		 * source address of the packet is the source address of the
@@ -1071,9 +1080,8 @@ static __always_inline int __lb4_rev_nat(struct __ctx_buff *ctx, int l3_off, int
 		 */
 		__be32 old_dip;
 
-		ret = ctx_load_bytes(ctx, l3_off + offsetof(struct iphdr, daddr), &old_dip, 4);
-		if (IS_ERR(ret))
-			return ret;
+		if (ctx_load_bytes(ctx, l3_off + offsetof(struct iphdr, daddr), &old_dip, 4) < 0)
+			return DROP_INVALID;
 
 		cilium_dbg_lb(ctx, DBG_LB4_LOOPBACK_SNAT_REV, old_dip, old_sip);
 
@@ -1086,44 +1094,65 @@ static __always_inline int __lb4_rev_nat(struct __ctx_buff *ctx, int l3_off, int
 		/* Update the tuple address which is representing the destination address */
 		tuple->saddr = old_sip;
 	}
+#endif
 
 	ret = ctx_store_bytes(ctx, l3_off + offsetof(struct iphdr, saddr),
-			      &new_sip, 4, 0);
+			      &nat->address, 4, 0);
 	if (IS_ERR(ret))
 		return DROP_WRITE_ERROR;
 
-	sum = csum_diff(&old_sip, 4, &new_sip, 4, sum);
+	sum = csum_diff(&old_sip, 4, &nat->address, 4, sum);
 	if (ipv4_csum_update_by_diff(ctx, l3_off, sum) < 0)
 		return DROP_CSUM_L3;
 
-	if (csum_off.offset &&
-	    csum_l4_replace(ctx, l4_off, &csum_off, 0, sum, BPF_F_PSEUDO_HDR) < 0)
-		return DROP_CSUM_L4;
+	if (has_l4_header) {
+		struct csum_offset csum_off = {};
+
+		csum_l4_offset_and_flags(tuple->nexthdr, &csum_off);
+
+		if (nat->port) {
+			ret = reverse_map_l4_port(ctx, tuple->nexthdr,
+						  nat->port, l4_off, &csum_off);
+			if (IS_ERR(ret))
+				return ret;
+		}
+
+		if (csum_off.offset &&
+		    csum_l4_replace(ctx, l4_off, &csum_off, 0, sum, BPF_F_PSEUDO_HDR) < 0)
+			return DROP_CSUM_L4;
+	}
 
 	return 0;
 }
 
+static __always_inline struct lb4_reverse_nat *
+lb4_lookup_rev_nat_entry(struct __ctx_buff *ctx __maybe_unused, __u16 index)
+{
+	cilium_dbg_lb(ctx, DBG_LB4_REVERSE_NAT_LOOKUP, index, 0);
+
+	return map_lookup_elem(&LB4_REVERSE_NAT_MAP, &index);
+}
 
 /** Perform IPv4 reverse NAT based on reverse NAT index
  * @arg ctx		packet
  * @arg l3_off		offset to L3
  * @arg l4_off		offset to L4
  * @arg index		reverse NAT index
+ * @arg loopback	loopback connection
  * @arg tuple		tuple
  */
 static __always_inline int lb4_rev_nat(struct __ctx_buff *ctx, int l3_off, int l4_off,
-				       struct ct_state *ct_state,
+				       __u16 index, bool loopback,
 				       struct ipv4_ct_tuple *tuple, int flags, bool has_l4_header)
 {
 	struct lb4_reverse_nat *nat;
 
-	cilium_dbg_lb(ctx, DBG_LB4_REVERSE_NAT_LOOKUP, ct_state->rev_nat_index, 0);
-	nat = map_lookup_elem(&LB4_REVERSE_NAT_MAP, &ct_state->rev_nat_index);
+	nat = lb4_lookup_rev_nat_entry(ctx, index);
 	if (nat == NULL)
 		return 0;
 
 	return __lb4_rev_nat(ctx, l3_off, l4_off, tuple, flags, nat,
-			     ct_state, has_l4_header);
+			     loopback, has_l4_header);
 }
 
 static __always_inline void
@@ -1166,20 +1195,14 @@ lb4_extract_tuple(struct __ctx_buff *ctx, struct iphdr *ip4, int l3_off, int *l4
 #ifdef ENABLE_SCTP
 	case IPPROTO_SCTP:
 #endif  /* ENABLE_SCTP */
-#ifdef ENABLE_IPV4_FRAGMENTS
-		ret = ipv4_handle_fragmentation(ctx, ip4, *l4_off,
-						CT_EGRESS,
-						(struct ipv4_frag_l4ports *)&tuple->dport,
-						NULL);
-#else
-		ret = l4_load_ports(ctx, *l4_off, &tuple->dport);
-#endif
+		ret = ipv4_load_l4_ports(ctx, ip4, *l4_off, CT_EGRESS,
+					 &tuple->dport, NULL);
 
 		if (IS_ERR(ret))
 			return ret;
 		return 0;
 	case IPPROTO_ICMP:
-		return DROP_NO_SERVICE;
+		return DROP_UNSUPP_SERVICE_PROTO;
 	default:
 		return DROP_UNKNOWN_L4;
 	}
@@ -1500,7 +1523,7 @@ lb4_to_lb6(struct __ctx_buff *ctx __maybe_unused,
 }
 
 static __always_inline int lb4_local(const void *map, struct __ctx_buff *ctx,
-				     int l3_off, int l4_off,
+				     bool is_fragment, int l3_off, int l4_off,
 				     struct lb4_key *key,
 				     struct ipv4_ct_tuple *tuple,
 				     const struct lb4_service *svc,
@@ -1525,8 +1548,8 @@ static __always_inline int lb4_local(const void *map, struct __ctx_buff *ctx,
 	if (unlikely(svc->count == 0))
 		return DROP_NO_SERVICE;
 
-	ret = ct_lb_lookup4(map, tuple, ctx, l4_off, has_l4_header, CT_SERVICE,
-			    state, &monitor);
+	ret = ct_lazy_lookup4(map, tuple, ctx, is_fragment, l4_off, has_l4_header,
+			      CT_SERVICE, SCOPE_REVERSE, CT_ENTRY_ANY, state, &monitor);
 	switch (ret) {
 	case CT_NEW:
 #ifdef ENABLE_SESSION_AFFINITY
@@ -1544,19 +1567,22 @@ static __always_inline int lb4_local(const void *map, struct __ctx_buff *ctx,
 			backend_id = lb4_select_backend_id(ctx, key, tuple, svc);
 			backend = lb4_lookup_backend(ctx, backend_id);
 			if (backend == NULL)
-				goto drop_no_service;
+				goto no_service;
 		}
 
 		state->backend_id = backend_id;
 		state->rev_nat_index = svc->rev_nat_index;
+		state->proxy_redirect = false;
+		state->from_l7lb = false;
 
-		ret = ct_create4(map, NULL, tuple, ctx, CT_SERVICE, state, false, false, ext_err);
+		ret = ct_create4(map, NULL, tuple, ctx, CT_SERVICE, state, ext_err);
 		/* Fail closed, if the conntrack entry create fails drop
 		 * service lookup.
 		 */
 		if (IS_ERR(ret))
 			goto drop_err;
-		goto update_state;
+
+		break;
 	case CT_REPLY:
 		/* For backward-compatibility we need to update reverse NAT
 		 * index in the CT_SERVICE entry for old connections, as later
@@ -1568,59 +1594,62 @@ static __always_inline int lb4_local(const void *map, struct __ctx_buff *ctx,
 			state->rev_nat_index = svc->rev_nat_index;
 			ct_update_rev_nat_index(map, tuple, state);
 		}
+
+		/* If the CT_SERVICE entry is from a non-related connection (e.g.
+		 * endpoint has been removed, but its CT entries were not (it is
+		 * totally possible due to the bug in DumpReliablyWithCallback)),
+		 * then a wrong (=from unrelated service) backend can be selected.
+		 * To avoid this, check that reverse NAT indices match. If not,
+		 * select a new backend.
+		 */
+		if (state->rev_nat_index != svc->rev_nat_index) {
+#ifdef ENABLE_SESSION_AFFINITY
+			if (lb4_svc_is_affinity(svc))
+				backend_id = lb4_affinity_backend_id_by_addr(svc,
+									     &client_id);
+#endif
+			if (!backend_id) {
+				backend_id = lb4_select_backend_id(ctx, key, tuple, svc);
+				if (!backend_id)
+					goto no_service;
+			}
+
+			state->rev_nat_index = svc->rev_nat_index;
+			ct_update_svc_entry(map, tuple, backend_id, svc->rev_nat_index);
+		} else {
+			backend_id = state->backend_id;
+		}
+
+		/* If the lookup fails it means the user deleted the backend out from
+		 * underneath us. To resolve this fall back to hash. If this is a TCP
+		 * session we are likely to get a TCP RST.
+		 */
+		backend = lb4_lookup_backend(ctx, backend_id);
+		if (unlikely(!backend || backend->flags != BE_STATE_ACTIVE)) {
+			/* Drain existing connections, but redirect new ones to only
+			 * active backends.
+			 */
+			if (backend && !state->syn)
+				break;
+
+			svc = lb4_lookup_service(key, false, true);
+			if (!svc)
+				goto no_service;
+			backend_id = lb4_select_backend_id(ctx, key, tuple, svc);
+			backend = lb4_lookup_backend(ctx, backend_id);
+			if (!backend)
+				goto no_service;
+
+			state->rev_nat_index = svc->rev_nat_index;
+			ct_update_svc_entry(map, tuple, backend_id, svc->rev_nat_index);
+		}
+
 		break;
 	default:
 		ret = DROP_UNKNOWN_CT;
 		goto drop_err;
 	}
 
-	/* If the CT_SERVICE entry is from a non-related connection (e.g.
-	 * endpoint has been removed, but its CT entries were not (it is
-	 * totally possible due to the bug in DumpReliablyWithCallback)),
-	 * then a wrong (=from unrelated service) backend can be selected.
-	 * To avoid this, check that reverse NAT indices match. If not,
-	 * select a new backend.
-	 */
-	if (state->rev_nat_index != svc->rev_nat_index) {
-#ifdef ENABLE_SESSION_AFFINITY
-		if (lb4_svc_is_affinity(svc))
-			backend_id = lb4_affinity_backend_id_by_addr(svc,
-								     &client_id);
-#endif
-		if (!backend_id) {
-			backend_id = lb4_select_backend_id(ctx, key, tuple, svc);
-			if (!backend_id)
-				goto drop_no_service;
-		}
-
-		state->backend_id = backend_id;
-		ct_update_backend_id(map, tuple, state);
-		state->rev_nat_index = svc->rev_nat_index;
-		ct_update_rev_nat_index(map, tuple, state);
-	}
-	/* If the lookup fails it means the user deleted the backend out from
-	 * underneath us. To resolve this fall back to hash. If this is a TCP
-	 * session we are likely to get a TCP RST.
-	 */
-	backend = lb4_lookup_backend(ctx, state->backend_id);
-	if (unlikely(!backend || backend->flags != BE_STATE_ACTIVE)) {
-		/* Drain existing connections, but redirect new ones to only
-		 * active backends.
-		 */
-		if (backend && !state->syn)
-			goto update_state;
-		key->backend_slot = 0;
-		svc = lb4_lookup_service(key, false, true);
-		if (!svc)
-			goto drop_no_service;
-		backend_id = lb4_select_backend_id(ctx, key, tuple, svc);
-		backend = lb4_lookup_backend(ctx, backend_id);
-		if (!backend)
-			goto drop_no_service;
-		state->backend_id = backend_id;
-		ct_update_backend_id(map, tuple, state);
-	}
-update_state:
 #ifdef ENABLE_CLUSTER_AWARE_ADDRESSING
 	*cluster_id = backend->cluster_id;
 #endif
@@ -1629,12 +1658,9 @@ update_state:
 	 * service lookup happens and future lookups use EGRESS or INGRESS.
 	 */
 	tuple->flags = flags;
-	state->rev_nat_index = svc->rev_nat_index;
-	state->addr = backend->address;
 #ifdef ENABLE_SESSION_AFFINITY
 	if (lb4_svc_is_affinity(svc))
-		lb4_update_affinity_by_addr(svc, &client_id,
-					    state->backend_id);
+		lb4_update_affinity_by_addr(svc, &client_id, backend_id);
 #endif
 #ifndef DISABLE_LOOPBACK_LB
 	/* Special loopback case: The origin endpoint has transmitted to a
@@ -1647,8 +1673,6 @@ update_state:
 	if (saddr == backend->address) {
 		new_saddr = IPV4_LOOPBACK;
 		state->loopback = 1;
-		state->addr = new_saddr;
-		state->svc_addr = saddr;
 	}
 
 	if (!state->loopback)
@@ -1665,7 +1689,7 @@ update_state:
 	return lb4_xlate(ctx, &new_saddr, &saddr,
 			 tuple->nexthdr, l3_off, l4_off, key,
 			 backend, has_l4_header, skip_l3_xlate);
-drop_no_service:
+no_service:
 	ret = DROP_NO_SERVICE;
 drop_err:
 	tuple->flags = flags;
@@ -1685,7 +1709,11 @@ static __always_inline void lb4_ctx_store_state(struct __ctx_buff *ctx,
 {
 	ctx_store_meta(ctx, CB_PROXY_MAGIC, (__u32)proxy_port << 16);
 	ctx_store_meta(ctx, CB_CT_STATE, (__u32)state->rev_nat_index << 16 |
+#ifndef DISABLE_LOOPBACK_LB
 		       state->loopback);
+#else
+		       0);
+#endif
 	ctx_store_meta(ctx, CB_CLUSTER_ID_EGRESS, cluster_id);
 }
 
@@ -1696,32 +1724,372 @@ static __always_inline void lb4_ctx_store_state(struct __ctx_buff *ctx,
  */
 static __always_inline void
 lb4_ctx_restore_state(struct __ctx_buff *ctx, struct ct_state *state,
-		       __u32 daddr __maybe_unused, __u16 *proxy_port,
-		       __u32 *cluster_id __maybe_unused)
+		       __u16 *proxy_port, __u32 *cluster_id __maybe_unused)
 {
-	__u32 meta = ctx_load_meta(ctx, CB_CT_STATE);
+	__u32 meta = ctx_load_and_clear_meta(ctx, CB_CT_STATE);
 #ifndef DISABLE_LOOPBACK_LB
-	if (meta & 1) {
+	if (meta & 1)
 		state->loopback = 1;
-		state->addr = IPV4_LOOPBACK;
-		state->svc_addr = daddr; /* backend address after xlate */
-	}
 #endif
 	state->rev_nat_index = meta >> 16;
 
-	/* Clear to not leak state to later stages of the datapath. */
-	ctx_store_meta(ctx, CB_CT_STATE, 0);
-
-	*proxy_port = ctx_load_meta(ctx, CB_PROXY_MAGIC) >> 16;
-	ctx_store_meta(ctx, CB_PROXY_MAGIC, 0);
+	*proxy_port = ctx_load_and_clear_meta(ctx, CB_PROXY_MAGIC) >> 16;
 
 #ifdef ENABLE_CLUSTER_AWARE_ADDRESSING
-	*cluster_id = ctx_load_meta(ctx, CB_CLUSTER_ID_EGRESS);
-	ctx_store_meta(ctx, CB_CLUSTER_ID_EGRESS, 0);
+	*cluster_id = ctx_load_and_clear_meta(ctx, CB_CLUSTER_ID_EGRESS);
 #endif
 }
 
+/* Because we use tail calls and this file is included in bpf_sock.h */
+#ifndef SKIP_CALLS_MAP
+#ifdef SERVICE_NO_BACKEND_RESPONSE
+
+#define ICMP_PACKET_MAX_SAMPLE_SIZE 64
+
+static __always_inline
+__wsum icmp_wsum_accumulate(void *data_start, void *data_end, int sample_len);
+
+static __always_inline
+int __tail_no_service_ipv4(struct __ctx_buff *ctx)
+{
+	void *data, *data_end;
+	struct ethhdr *ethhdr;
+	struct iphdr *ip4;
+	struct icmphdr *icmphdr;
+	union macaddr smac = {};
+	union macaddr dmac = {};
+	__be32	saddr;
+	__be32	daddr;
+	__u8	tos;
+	__wsum csum;
+	int sample_len;
+	int ret;
+	const int inner_offset = sizeof(struct ethhdr) + sizeof(struct iphdr) +
+		sizeof(struct icmphdr);
+
+	if (!revalidate_data(ctx, &data, &data_end, &ip4))
+		return DROP_INVALID;
+
+	/* copy the incoming src and dest IPs and mac addresses to the stack.
+	 * the pointers will not be valid after adding headroom.
+	 */
+
+	if (eth_load_saddr(ctx, smac.addr, 0) < 0)
+		return DROP_INVALID;
+
+	if (eth_load_daddr(ctx, dmac.addr, 0) < 0)
+		return DROP_INVALID;
+
+	saddr = ip4->saddr;
+	daddr = ip4->daddr;
+	tos = ip4->tos;
+
+	/* Resize to ethernet header + 64 bytes or less */
+	sample_len = ctx_full_len(ctx);
+	if (sample_len > ICMP_PACKET_MAX_SAMPLE_SIZE)
+		sample_len = ICMP_PACKET_MAX_SAMPLE_SIZE;
+	ctx_adjust_troom(ctx, sample_len + sizeof(struct ethhdr) - ctx_full_len(ctx));
+
+	data = ctx_data(ctx);
+	data_end = ctx_data_end(ctx);
+
+	/* Calculate the checksum of the ICMP sample */
+	csum = icmp_wsum_accumulate(data + sizeof(struct ethhdr), data_end, sample_len);
+
+	/* We need to insert a IPv4 and ICMP header before the original packet.
+	 * Make that room.
+	 */
+
+#if __ctx_is == __ctx_xdp
+	ret = xdp_adjust_head(ctx, 0 - (int)(sizeof(struct iphdr) + sizeof(struct icmphdr)));
+#else
+	ret = skb_adjust_room(ctx, sizeof(struct iphdr) + sizeof(struct icmphdr),
+			      BPF_ADJ_ROOM_MAC, 0);
+#endif
+
+	if (ret < 0)
+		return DROP_INVALID;
+
+	/* changing size invalidates pointers, so we need to re-fetch them. */
+	data = ctx_data(ctx);
+	data_end = ctx_data_end(ctx);
+
+	/* Bound check all 3 headers at once. */
+	if (data + inner_offset > data_end)
+		return DROP_INVALID;
+
+	/* Write reversed eth header, ready for egress */
+	ethhdr = data;
+	memcpy(ethhdr->h_dest, smac.addr, sizeof(smac.addr));
+	memcpy(ethhdr->h_source, dmac.addr, sizeof(dmac.addr));
+	ethhdr->h_proto = bpf_htons(ETH_P_IP);
+
+	/* Write reversed ip header, ready for egress */
+	ip4 = data + sizeof(struct ethhdr);
+	ip4->version = 4;
+	ip4->ihl = sizeof(struct iphdr) >> 2;
+	ip4->tos = tos;
+	ip4->tot_len = bpf_htons(sizeof(struct iphdr) + sizeof(struct icmphdr) +
+		       (__u16)sample_len);
+	ip4->id = 0;
+	ip4->frag_off = 0;
+	ip4->ttl = IPDEFTTL;
+	ip4->protocol = IPPROTO_ICMP;
+	ip4->check = 0;
+	ip4->daddr = saddr;
+	ip4->saddr = daddr;
+	ip4->check = csum_fold(csum_diff(ip4, 0, ip4, sizeof(struct iphdr), 0));
+
+	/* Write reversed icmp header */
+	icmphdr = data + sizeof(struct ethhdr) + sizeof(struct iphdr);
+	icmphdr->type = ICMP_DEST_UNREACH;
+	icmphdr->code = ICMP_PORT_UNREACH;
+	icmphdr->checksum = 0;
+	icmphdr->un.gateway = 0;
+
+	/* Add ICMP header checksum to sum of its body */
+	csum += csum_diff(icmphdr, 0, icmphdr, sizeof(struct icmphdr), 0);
+	icmphdr->checksum = csum_fold(csum);
+
+	/* Redirect ICMP to the interface we received it on. */
+	cilium_dbg_capture(ctx, DBG_CAPTURE_DELIVERY,
+			   ctx_get_ifindex(ctx));
+	return ctx_redirect(ctx, ctx_get_ifindex(ctx), 0);
+}
+
+__section_tail(CILIUM_MAP_CALLS, CILIUM_CALL_IPV4_NO_SERVICE)
+int tail_no_service_ipv4(struct __ctx_buff *ctx)
+{
+	__u32 src_sec_identity = ctx_load_meta(ctx, CB_SRC_LABEL);
+	int ret;
+
+	ret = __tail_no_service_ipv4(ctx);
+	if (IS_ERR(ret))
+		return send_drop_notify_error(ctx, src_sec_identity, ret,
+			CTX_ACT_DROP, METRIC_INGRESS);
+
+	return ret;
+}
+#endif /* SERVICE_NO_BACKEND_RESPONSE */
+#endif /* SKIP_CALLS_MAP */
+
 #endif /* ENABLE_IPV4 */
+
+#ifdef ENABLE_IPV6
+
+/* Because we use tail calls and this file is included in bpf_sock.h */
+#ifndef SKIP_CALLS_MAP
+#ifdef SERVICE_NO_BACKEND_RESPONSE
+
+#define ICMPV6_PACKET_MAX_SAMPLE_SIZE 1280 - sizeof(struct ipv6hdr) - sizeof(struct icmp6hdr)
+
+static __always_inline
+__wsum icmp_wsum_accumulate(void *data_start, void *data_end, int sample_len);
+
+/* The IPv6 pseudo-header */
+struct ipv6_pseudo_header_t {
+	union {
+		struct header {
+			struct in6_addr src_ip;
+			struct in6_addr dst_ip;
+			__be32 top_level_length;
+			__u8 zero[3];
+			__u8 next_header;
+		} __packed fields;
+		__u16 words[20];
+	};
+};
+
+static __always_inline
+int __tail_no_service_ipv6(struct __ctx_buff *ctx)
+{
+	void *data, *data_end;
+	struct ethhdr *ethhdr;
+	struct ipv6hdr *ip6;
+	struct icmp6hdr *icmphdr;
+	struct ipv6_pseudo_header_t pseudo_header;
+	union macaddr smac = {};
+	union macaddr dmac = {};
+	struct in6_addr saddr;
+	struct in6_addr daddr;
+	struct ratelimit_key rkey = {};
+	/* Rate limit to 100 ICMPv6 replies per second, burstable to 1000 responses/s */
+	struct ratelimit_settings settings = {
+		.bucket_size = 1000,
+		.tokens_per_topup = 100,
+		.topup_interval_ns = NSEC_PER_SEC,
+	};
+	__wsum csum;
+	__u64 sample_len;
+	int i;
+	int ret;
+	const int inner_offset = sizeof(struct ethhdr) + sizeof(struct ipv6hdr) +
+		sizeof(struct icmp6hdr);
+
+	rkey.netdev_idx = ctx_get_ifindex(ctx);
+	if (!ratelimit_check_and_take(&rkey, &settings))
+		return DROP_RATE_LIMITED;
+
+	if (!revalidate_data(ctx, &data, &data_end, &ip6))
+		return DROP_INVALID;
+
+	/* copy the incoming src and dest IPs and mac addresses to the stack.
+	 * the pointers will not be valid after adding headroom.
+	 */
+
+	if (eth_load_saddr(ctx, smac.addr, 0) < 0)
+		return DROP_INVALID;
+
+	if (eth_load_daddr(ctx, dmac.addr, 0) < 0)
+		return DROP_INVALID;
+
+	memcpy(&saddr, &ip6->saddr, sizeof(struct in6_addr));
+	memcpy(&daddr, &ip6->daddr, sizeof(struct in6_addr));
+
+	/* Resize to min MTU - IPv6 hdr + ICMPv6 hdr */
+	sample_len = ctx_full_len(ctx);
+	if (sample_len > (__u64)ICMPV6_PACKET_MAX_SAMPLE_SIZE)
+		sample_len = ICMPV6_PACKET_MAX_SAMPLE_SIZE;
+	ctx_adjust_troom(ctx, sample_len + sizeof(struct ethhdr) - ctx_full_len(ctx));
+
+	data = ctx_data(ctx);
+	data_end = ctx_data_end(ctx);
+
+	/* Calculate the unfolded checksum of the ICMPv6 sample */
+	csum = icmp_wsum_accumulate(data + sizeof(struct ethhdr), data_end, sample_len);
+
+	/* We need to insert a IPv6 and ICMPv6 header before the original packet.
+	 * Make that room.
+	 */
+
+#if __ctx_is == __ctx_xdp
+	ret = xdp_adjust_head(ctx, 0 - (int)(sizeof(struct ipv6hdr) + sizeof(struct icmp6hdr)));
+#else
+	ret = skb_adjust_room(ctx, sizeof(struct ipv6hdr) + sizeof(struct icmp6hdr),
+			      BPF_ADJ_ROOM_MAC, 0);
+#endif
+
+	if (ret < 0)
+		return DROP_INVALID;
+
+	/* changing size invalidates pointers, so we need to re-fetch them. */
+	data = ctx_data(ctx);
+	data_end = ctx_data_end(ctx);
+
+	/* Bound check all 3 headers at once. */
+	if (data + inner_offset > data_end)
+		return DROP_INVALID;
+
+	/* Write reversed eth header, ready for egress */
+	ethhdr = data;
+	memcpy(ethhdr->h_dest, smac.addr, sizeof(smac.addr));
+	memcpy(ethhdr->h_source, dmac.addr, sizeof(dmac.addr));
+	ethhdr->h_proto = bpf_htons(ETH_P_IPV6);
+
+	/* Write reversed ip header, ready for egress */
+	ip6 = data + sizeof(struct ethhdr);
+	ip6->version = 6;
+	ip6->priority = 0;
+	ip6->flow_lbl[0] = 0;
+	ip6->flow_lbl[1] = 0;
+	ip6->flow_lbl[2] = 0;
+	ip6->payload_len = bpf_htons(sizeof(struct icmp6hdr) + (__u16)sample_len);
+	ip6->nexthdr = IPPROTO_ICMPV6;
+	ip6->hop_limit = IPDEFTTL;
+	memcpy(&ip6->daddr, &saddr, sizeof(struct in6_addr));
+	memcpy(&ip6->saddr, &daddr, sizeof(struct in6_addr));
+
+	/* Write reversed icmp header */
+	icmphdr = data + sizeof(struct ethhdr) + sizeof(struct ipv6hdr);
+	icmphdr->icmp6_type = ICMPV6_DEST_UNREACH;
+	icmphdr->icmp6_code = ICMPV6_PORT_UNREACH;
+	icmphdr->icmp6_cksum = 0;
+	icmphdr->icmp6_dataun.un_data32[0] = 0;
+
+	/* Add the ICMP header to the checksum (only type and code are non-zero) */
+	csum += ((__u16)icmphdr->icmp6_code) << 8 | (__u16)icmphdr->icmp6_type;
+
+	/* Fill pseudo header */
+	memcpy(&pseudo_header.fields.src_ip, &ip6->saddr, sizeof(struct in6_addr));
+	memcpy(&pseudo_header.fields.dst_ip, &ip6->daddr, sizeof(struct in6_addr));
+	pseudo_header.fields.top_level_length = bpf_htonl(sizeof(struct icmp6hdr) +
+						(__u32)sample_len);
+	__bpf_memzero(pseudo_header.fields.zero, sizeof(pseudo_header.fields.zero));
+	pseudo_header.fields.next_header = IPPROTO_ICMPV6;
+
+	#pragma unroll
+	for (i = 0; i < (int)(sizeof(pseudo_header.words) / sizeof(__u16)); i++)
+		csum += pseudo_header.words[i];
+
+	icmphdr->icmp6_cksum = csum_fold(csum);
+
+	/* Redirect ICMP to the interface we received it on. */
+	cilium_dbg_capture(ctx, DBG_CAPTURE_DELIVERY,
+			   ctx_get_ifindex(ctx));
+	return ctx_redirect(ctx, ctx_get_ifindex(ctx), 0);
+}
+
+__section_tail(CILIUM_MAP_CALLS, CILIUM_CALL_IPV6_NO_SERVICE)
+int tail_no_service_ipv6(struct __ctx_buff *ctx)
+{
+	__u32 src_sec_identity = ctx_load_meta(ctx, CB_SRC_LABEL);
+	int ret;
+
+	ret = __tail_no_service_ipv6(ctx);
+	if (IS_ERR(ret))
+		return send_drop_notify_error(ctx, src_sec_identity, ret,
+			CTX_ACT_DROP, METRIC_INGRESS);
+
+	return ret;
+}
+#endif /* SERVICE_NO_BACKEND_RESPONSE */
+#endif /* SKIP_CALLS_MAP */
+#endif /* ENABLE_IPV6 */
+
+#ifdef SERVICE_NO_BACKEND_RESPONSE
+
+static __always_inline
+__wsum icmp_wsum_accumulate(void *data_start, void *data_end, int sample_len)
+{
+	/* Unrolled loop to calculate the checksum of the ICMP sample
+	 * Done manually because the compiler refuses with #pragma unroll
+	 */
+	__wsum wsum = 0;
+
+	#define body(i) if ((i) > sample_len) \
+		return wsum; \
+	if (data_start + (i) + sizeof(__u16) > data_end) { \
+		if (data_start + (i) + sizeof(__u8) <= data_end)\
+			wsum += *(__u8 *)(data_start + (i)); \
+		return wsum; \
+	} \
+	wsum += *(__u16 *)(data_start + (i));
+
+	#define body4(i) body(i)\
+		body(i + 2) \
+		body(i + 4) \
+		body(i + 6)
+
+	#define body16(i) body4(i)\
+		body4(i + 8) \
+		body4(i + 16) \
+		body4(i + 24)
+
+	#define body128(i) body16(i)\
+		body16(i + 32) \
+		body16(i + 64) \
+		body16(i + 96)
+
+	body128(0)
+	body128(256)
+	body128(512)
+	body128(768)
+	body128(1024)
+
+	return wsum;
+}
+
+#endif /* SERVICE_NO_BACKEND_RESPONSE */
 
 /* sock_local_cookie retrieves the socket cookie for the
  * passed socket structure.

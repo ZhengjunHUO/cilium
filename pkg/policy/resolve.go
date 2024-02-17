@@ -22,7 +22,7 @@ type selectorPolicy struct {
 	SelectorCache *SelectorCache
 
 	// L4Policy contains the computed L4 and L7 policy.
-	L4Policy *L4Policy
+	L4Policy L4Policy
 
 	// IngressPolicyEnabled specifies whether this policy contains any policy
 	// at ingress.
@@ -34,9 +34,7 @@ type selectorPolicy struct {
 }
 
 func (p *selectorPolicy) Attach(ctx PolicyContext) {
-	if p.L4Policy != nil {
-		p.L4Policy.Attach(ctx)
-	}
+	p.L4Policy.Attach(ctx)
 }
 
 // EndpointPolicy is a structure which contains the resolved policy across all
@@ -46,7 +44,7 @@ type EndpointPolicy struct {
 	// referring to a shared selectorPolicy!
 	*selectorPolicy
 
-	// PolicyMapState contains the state of this policy as it relates to the
+	// policyMapState contains the state of this policy as it relates to the
 	// datapath. In the future, this will be factored out of this object to
 	// decouple the policy as it relates to the datapath vs. its userspace
 	// representation.
@@ -54,7 +52,7 @@ type EndpointPolicy struct {
 	// Proxy port 0 indicates no proxy redirection.
 	// All fields within the Key and the proxy port must be in host byte-order.
 	// Must only be accessed with PolicyOwner (aka Endpoint) lock taken.
-	PolicyMapState MapState
+	policyMapState MapState
 
 	// policyMapChanges collects pending changes to the PolicyMapState
 	policyMapChanges MapChanges
@@ -66,60 +64,57 @@ type EndpointPolicy struct {
 // PolicyOwner is anything which consumes a EndpointPolicy.
 type PolicyOwner interface {
 	GetID() uint64
-	LookupRedirectPortLocked(ingress bool, protocol string, port uint16) uint16
+	LookupRedirectPort(ingress bool, protocol string, port uint16, listener string) (uint16, error)
+	GetRealizedRedirects() map[string]uint16
+	HasBPFPolicyMap() bool
 	GetNamedPort(ingress bool, name string, proto uint8) uint16
-	GetNamedPortLocked(ingress bool, name string, proto uint8) uint16
 	PolicyDebug(fields logrus.Fields, msg string)
 }
 
 // newSelectorPolicy returns an empty selectorPolicy stub.
-func newSelectorPolicy(revision uint64, selectorCache *SelectorCache) *selectorPolicy {
+func newSelectorPolicy(selectorCache *SelectorCache) *selectorPolicy {
 	return &selectorPolicy{
-		Revision:      revision,
+		Revision:      0,
 		SelectorCache: selectorCache,
+		L4Policy:      NewL4Policy(0),
 	}
 }
 
 // insertUser adds a user to the L4Policy so that incremental
 // updates of the L4Policy may be fowarded.
 func (p *selectorPolicy) insertUser(user *EndpointPolicy) {
-	if p.L4Policy != nil {
-		p.L4Policy.insertUser(user)
-	}
+	p.L4Policy.insertUser(user)
 }
 
 // removeUser removes a user from the L4Policy so the EndpointPolicy
 // can be freed when not needed any more
 func (p *selectorPolicy) removeUser(user *EndpointPolicy) {
-	if p.L4Policy != nil {
-		p.L4Policy.removeUser(user)
-	}
+	p.L4Policy.removeUser(user)
 }
 
 // Detach releases resources held by a selectorPolicy to enable
 // successful eventual GC.  Note that the selectorPolicy itself if not
 // modified in any way, so that it can be used concurrently.
 func (p *selectorPolicy) Detach() {
-	if p.L4Policy != nil {
-		p.L4Policy.Detach(p.SelectorCache)
-	}
+	p.L4Policy.Detach(p.SelectorCache)
 }
 
 // DistillPolicy filters down the specified selectorPolicy (which acts
 // upon selectors) into a set of concrete map entries based on the
 // SelectorCache. These can subsequently be plumbed into the datapath.
 //
-// Must be performed while holding the Repository lock.
-// PolicyOwner (aka Endpoint) is also locked during this call.
+// Called without holding the Selector cache or Repository locks.
+// PolicyOwner (aka Endpoint) is also unlocked during this call,
+// but the Endpoint's build mutex is held.
 func (p *selectorPolicy) DistillPolicy(policyOwner PolicyOwner, isHost bool) *EndpointPolicy {
 	calculatedPolicy := &EndpointPolicy{
 		selectorPolicy: p,
-		PolicyMapState: make(MapState),
+		policyMapState: NewMapState(nil),
 		PolicyOwner:    policyOwner,
 	}
 
 	if !p.IngressPolicyEnabled || !p.EgressPolicyEnabled {
-		calculatedPolicy.PolicyMapState.AllowAllIdentities(
+		calculatedPolicy.policyMapState.allowAllIdentities(
 			!p.IngressPolicyEnabled, !p.EgressPolicyEnabled)
 	}
 
@@ -139,13 +134,30 @@ func (p *selectorPolicy) DistillPolicy(policyOwner PolicyOwner, isHost bool) *En
 	// PolicyMapChanges will contain all changes that are applied
 	// after the computation of PolicyMapState has started.
 	p.SelectorCache.mutex.RLock()
-	calculatedPolicy.computeDesiredL4PolicyMapEntries()
+	calculatedPolicy.toMapState()
 	if !isHost {
-		calculatedPolicy.PolicyMapState.DetermineAllowLocalhostIngress()
+		calculatedPolicy.policyMapState.determineAllowLocalhostIngress()
 	}
 	p.SelectorCache.mutex.RUnlock()
 
 	return calculatedPolicy
+}
+
+// GetPolicyMap gets the policy map state as the interface
+// MapState
+func (p *EndpointPolicy) GetPolicyMap() MapState {
+	return p.policyMapState
+}
+
+// SetPolicyMap sets the policy map state as the interface
+// MapState. If the main argument is nil, then this method
+// will initialize a new MapState object for the caller.
+func (p *EndpointPolicy) SetPolicyMap(ms MapState) {
+	if ms == nil {
+		p.policyMapState = NewMapState(nil)
+		return
+	}
+	p.policyMapState = ms
 }
 
 // Detach removes EndpointPolicy references from selectorPolicy
@@ -155,42 +167,62 @@ func (p *EndpointPolicy) Detach() {
 	p.selectorPolicy.removeUser(p)
 }
 
-// computeDesiredL4PolicyMapEntries transforms the EndpointPolicy.L4Policy into
+// toMapState transforms the EndpointPolicy.L4Policy into
 // the datapath-friendly format inside EndpointPolicy.PolicyMapState.
-func (p *EndpointPolicy) computeDesiredL4PolicyMapEntries() {
-
-	if p.L4Policy == nil {
-		return
-	}
-	p.computeDirectionL4PolicyMapEntries(p.PolicyMapState, p.L4Policy.Ingress, trafficdirection.Ingress)
-	p.computeDirectionL4PolicyMapEntries(p.PolicyMapState, p.L4Policy.Egress, trafficdirection.Egress)
+// Called with selectorcache locked for reading.
+// Called without holding the Repository lock.
+// PolicyOwner (aka Endpoint) is also unlocked during this call,
+// but the Endpoint's build mutex is held.
+func (p *EndpointPolicy) toMapState() {
+	p.L4Policy.Ingress.toMapState(p)
+	p.L4Policy.Egress.toMapState(p)
 }
 
-func (p *EndpointPolicy) computeDirectionL4PolicyMapEntries(policyMapState MapState, l4PolicyMap L4PolicyMap, direction trafficdirection.TrafficDirection) {
-	for _, filter := range l4PolicyMap {
-		lookupDone := false
-		proxyport := uint16(0)
-		keysFromFilter := filter.ToMapState(p.PolicyOwner, direction, p.SelectorCache)
-		for keyFromFilter, entry := range keysFromFilter {
-			// Fix up the proxy port for entries that need proxy redirection
-			if entry.IsRedirectEntry() {
-				if !lookupDone {
-					// only lookup once for each filter
-					// Use 'destPort' from the key as it is already resolved
-					// from a named port if needed.
-					proxyport = p.PolicyOwner.LookupRedirectPortLocked(filter.Ingress, string(filter.Protocol), keyFromFilter.DestPort)
-					lookupDone = true
-				}
-				entry.ProxyPort = proxyport
-				// If the currently allocated proxy port is 0, this is a new
-				// redirect, for which no port has been allocated yet. Ignore
-				// it for now. This will be configured by
-				// e.addNewRedirectsFromDesiredPolicy() once the port has been allocated.
-				if !entry.IsRedirectEntry() {
-					continue
-				}
+// toMapState transforms the L4DirectionPolicy into
+// the datapath-friendly format inside EndpointPolicy.PolicyMapState.
+// Called with selectorcache locked for reading.
+// Called without holding the Repository lock.
+// PolicyOwner (aka Endpoint) is also unlocked during this call,
+// but the Endpoint's build mutex is held.
+func (l4policy L4DirectionPolicy) toMapState(p *EndpointPolicy) {
+	for _, l4 := range l4policy.PortRules {
+		l4.toMapState(p, l4policy.features, p.PolicyOwner.GetRealizedRedirects(), ChangeState{})
+	}
+}
+
+// createRedirectsFunc returns 'nil' if map changes should not be applied immemdiately,
+// otherwise the returned map is to be used to find redirect ports for map updates.
+type createRedirectsFunc func(*L4Filter) map[string]uint16
+
+// UpdateRedirects updates redirects in the EndpointPolicy's PolicyMapState by using the provided
+// function to create redirects. Changes to 'p.PolicyMapState' are collected in
+// 'adds' and 'updated' so that they can be reverted when needed.
+func (p *EndpointPolicy) UpdateRedirects(ingress bool, createRedirects createRedirectsFunc, changes ChangeState) {
+	l4policy := &p.L4Policy.Ingress
+	if ingress {
+		l4policy = &p.L4Policy.Egress
+	}
+
+	l4policy.updateRedirects(p, createRedirects, changes)
+}
+
+func (l4policy L4DirectionPolicy) updateRedirects(p *EndpointPolicy, createRedirects createRedirectsFunc, changes ChangeState) {
+	// Selectorcache needs to be locked for toMapState (GetLabels()) call
+	p.SelectorCache.mutex.RLock()
+	defer p.SelectorCache.mutex.RUnlock()
+
+	for _, l4 := range l4policy.PortRules {
+		if l4.IsRedirect() {
+			// Check if we are denying this specific L4 first regardless the L3, if there are any deny policies
+			if l4policy.features.contains(denyRules) && p.policyMapState.deniesL4(p.PolicyOwner, l4) {
+				continue
 			}
-			policyMapState.DenyPreferredInsert(keyFromFilter, entry, p.SelectorCache)
+
+			redirects := createRedirects(l4)
+			if redirects != nil {
+				// Set the proxy port in the policy map.
+				l4.toMapState(p, l4policy.features, redirects, changes)
+			}
 		}
 	}
 }
@@ -202,7 +234,8 @@ func (p *EndpointPolicy) computeDirectionL4PolicyMapEntries(policyMapState MapSt
 func (p *EndpointPolicy) ConsumeMapChanges() (adds, deletes Keys) {
 	p.selectorPolicy.SelectorCache.mutex.Lock()
 	defer p.selectorPolicy.SelectorCache.mutex.Unlock()
-	return p.policyMapChanges.consumeMapChanges(p.PolicyMapState, p.SelectorCache)
+	features := p.selectorPolicy.L4Policy.Ingress.features | p.selectorPolicy.L4Policy.Egress.features
+	return p.policyMapChanges.consumeMapChanges(p.PolicyOwner, p.policyMapState, features, p.SelectorCache)
 }
 
 // AllowsIdentity returns whether the specified policy allows
@@ -219,7 +252,7 @@ func (p *EndpointPolicy) AllowsIdentity(identity identity.NumericIdentity) (ingr
 		ingress = true
 	} else {
 		key.TrafficDirection = trafficdirection.Ingress.Uint8()
-		if v, exists := p.PolicyMapState[key]; exists && !v.IsDeny {
+		if v, exists := p.policyMapState.Get(key); exists && !v.IsDeny {
 			ingress = true
 		}
 	}
@@ -228,7 +261,7 @@ func (p *EndpointPolicy) AllowsIdentity(identity identity.NumericIdentity) (ingr
 		egress = true
 	} else {
 		key.TrafficDirection = trafficdirection.Egress.Uint8()
-		if v, exists := p.PolicyMapState[key]; exists && !v.IsDeny {
+		if v, exists := p.policyMapState.Get(key); exists && !v.IsDeny {
 			egress = true
 		}
 	}
@@ -239,6 +272,7 @@ func (p *EndpointPolicy) AllowsIdentity(identity identity.NumericIdentity) (ingr
 // NewEndpointPolicy returns an empty EndpointPolicy stub.
 func NewEndpointPolicy(repo *Repository) *EndpointPolicy {
 	return &EndpointPolicy{
-		selectorPolicy: newSelectorPolicy(0, repo.GetSelectorCache()),
+		selectorPolicy: newSelectorPolicy(repo.GetSelectorCache()),
+		policyMapState: NewMapState(nil),
 	}
 }

@@ -28,6 +28,9 @@
 
 #define NEXTHDR_MAX             255
 
+#define IPV6_SADDR_OFF		offsetof(struct ipv6hdr, saddr)
+#define IPV6_DADDR_OFF		offsetof(struct ipv6hdr, daddr)
+
 static __always_inline int ipv6_optlen(const struct ipv6_opt_hdr *opthdr)
 {
 	return (opthdr->hdrlen + 1) << 3;
@@ -86,19 +89,22 @@ static __always_inline int ipv6_hdrlen(struct __ctx_buff *ctx, __u8 *nexthdr)
 static __always_inline void ipv6_addr_copy(union v6addr *dst,
 					   const union v6addr *src)
 {
+	memcpy(dst, src, sizeof(*dst));
+}
+
+static __always_inline void ipv6_addr_copy_unaligned(union v6addr *dst,
+						     const union v6addr *src)
+{
 	dst->d1 = src->d1;
 	dst->d2 = src->d2;
 }
 
-static __always_inline __u64 ipv6_addrcmp(const union v6addr *a,
-					  const union v6addr *b)
+static __always_inline bool ipv6_addr_equals(const union v6addr *a,
+					     const union v6addr *b)
 {
-	__u64 tmp;
-
-	tmp = a->d1 - b->d1;
-	if (!tmp)
-		tmp = a->d2 - b->d2;
-	return tmp;
+	if (a->d1 != b->d1)
+		return false;
+	return a->d2 == b->d2;
 }
 
 /* Only works with contiguous masks. */
@@ -139,7 +145,7 @@ static __always_inline int ipv6_dec_hoplimit(struct __ctx_buff *ctx, int off)
 		return DROP_INVALID;
 
 	if (hl <= 1)
-		return 1;
+		return DROP_TTL_EXCEEDED;
 	hl--;
 	if (ctx_store_bytes(ctx, off + offsetof(struct ipv6hdr, hop_limit),
 			    &hl, sizeof(hl), BPF_F_RECOMPUTE_CSUM) < 0)

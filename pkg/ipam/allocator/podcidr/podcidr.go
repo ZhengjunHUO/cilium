@@ -8,9 +8,6 @@ import (
 	"fmt"
 	"net"
 	"strings"
-	"time"
-
-	"github.com/cilium/cilium/pkg/ipam/allocator/clusterpool/cidralloc"
 
 	"github.com/sirupsen/logrus"
 	k8sErrors "k8s.io/apimachinery/pkg/api/errors"
@@ -19,13 +16,13 @@ import (
 	"github.com/cilium/cilium/pkg/controller"
 	ipPkg "github.com/cilium/cilium/pkg/ip"
 	"github.com/cilium/cilium/pkg/ipam"
-	ipamOption "github.com/cilium/cilium/pkg/ipam/option"
+	"github.com/cilium/cilium/pkg/ipam/allocator/clusterpool/cidralloc"
 	v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/cilium/pkg/logging/logfields"
-	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/revert"
+	"github.com/cilium/cilium/pkg/time"
 	"github.com/cilium/cilium/pkg/trigger"
 )
 
@@ -36,7 +33,11 @@ const (
 	v6AllocatorType = "IPv6"
 )
 
-var log = logging.DefaultLogger.WithField(logfields.LogSubsys, "pod-cidr")
+var (
+	log = logging.DefaultLogger.WithField(logfields.LogSubsys, "pod-cidr")
+
+	ciliumNodesPodCidrControllerGroup = controller.NewGroup("update-cilium-nodes-pod-cidr")
+)
 
 // ErrAllocatorNotFound is an error that should be used in case the node tries
 // to allocate a CIDR for an allocator that does not exist.
@@ -204,8 +205,10 @@ func NewNodesPodCIDRManager(
 		TriggerFunc: func([]string) {
 			// Trigger execute UpdateController multiple times so that we
 			// keep retrying the sync against k8s in case of failure.
-			n.k8sReSyncController.UpdateController("update-cilium-nodes-pod-cidr",
+			n.k8sReSyncController.UpdateController(
+				"update-cilium-nodes-pod-cidr",
 				controller.ControllerParams{
+					Group: ciliumNodesPodCidrControllerGroup,
 					DoFunc: func(context.Context) error {
 						n.Mutex.Lock()
 						defer n.Mutex.Unlock()
@@ -322,64 +325,32 @@ func syncToK8s(nodeGetterUpdater ipam.CiliumNodeGetterUpdater, ciliumNodesToK8s 
 	return
 }
 
-// Create will re-allocate the node podCIDRs. In case the node already has
-// podCIDRs allocated, the podCIDR allocator will try to allocate those CIDRs
-// internally. In case the node does not have any podCIDR set, its allocation
-// will only happen once n.Resync has been called at least one time.
-// In case the CIDRs were able to be allocated, the CiliumNode will have its
-// podCIDRs fields set with the allocated CIDRs.
-// In case the CIDRs were unable to be allocated, this function will return
-// true and the node will have its status updated into kubernetes with the
-// error message by the NodesPodCIDRManager.
-func (n *NodesPodCIDRManager) Create(node *v2.CiliumNode) bool {
-	return n.Update(node)
-}
-
-// Update will re-allocate the node podCIDRs. In case the node already has
+// Upsert will re-allocate the node podCIDRs. In case the node already has
 // podCIDRs allocated, the podCIDR allocator will try to allocate those CIDRs.
 // In case the CIDRs were able to be allocated, the CiliumNode will have its
 // podCIDRs fields set with the allocated CIDRs.
 // In case the CIDRs were unable to be allocated, this function will return
 // true and the node will have its status updated into kubernetes with the
 // error message by the NodesPodCIDRManager.
-func (n *NodesPodCIDRManager) Update(node *v2.CiliumNode) bool {
+func (n *NodesPodCIDRManager) Upsert(node *v2.CiliumNode) {
 	n.Mutex.Lock()
 	defer n.Mutex.Unlock()
-	return n.update(node)
+	n.upsertLocked(node)
 }
 
 // Needs n.Mutex to be held.
-func (n *NodesPodCIDRManager) update(node *v2.CiliumNode) bool {
-	var (
-		updateStatus, updateSpec bool
-		cn                       *v2.CiliumNode
-		err                      error
-	)
-	if option.Config.IPAMMode() == ipamOption.IPAMClusterPoolV2 {
-		cn, updateSpec, updateStatus, err = n.allocateNodeV2(node)
-		if err != nil {
-			return false
-		}
-	} else {
-		// FIXME: This code block falls back to the old behavior of clusterpool,
-		// where we only assign one pod CIDR for IPv4 and IPv6. Once v2 becomes
-		// fully backwards compatible with v1, we can remove this else block.
-		var allocated bool
-		cn, allocated, updateStatus, err = n.allocateNode(node)
-		if err != nil {
-			return false
-		}
-		// if allocated is false it means that we were unable to allocate
-		// a CIDR so we need to update the status of the node into k8s.
-		updateStatus = !allocated && updateStatus
-		// ClusterPool v1 never updates both the spec and the status
-		updateSpec = !updateStatus
+func (n *NodesPodCIDRManager) upsertLocked(node *v2.CiliumNode) {
+	cn, allocated, updateStatus, err := n.allocateNode(node)
+	if err != nil {
+		return
 	}
 	if cn == nil {
 		// no-op
-		return true
+		return
 	}
-	if updateStatus {
+	// if allocated is false it means that we were unable to allocate
+	// a CIDR so we need to update the status of the node into k8s.
+	if !allocated && updateStatus {
 		// the n.syncNode will never fail because it's only adding elements to a
 		// map.
 		// NodesPodCIDRManager will later on sync the node into k8s by the
@@ -393,17 +364,15 @@ func (n *NodesPodCIDRManager) update(node *v2.CiliumNode) bool {
 		} else {
 			n.syncNode(k8sOpCreate, cn)
 		}
+		return
 	}
-	if updateSpec {
-		// If the resource version is != "" it means the object already exists
-		// in kubernetes so we should perform an update instead of a create.
-		if cn.GetResourceVersion() != "" {
-			n.syncNode(k8sOpUpdate, cn)
-		} else {
-			n.syncNode(k8sOpCreate, cn)
-		}
+	// If the resource version is != "" it means the object already exists
+	// in kubernetes so we should perform an update instead of a create.
+	if cn.GetResourceVersion() != "" {
+		n.syncNode(k8sOpUpdate, cn)
+	} else {
+		n.syncNode(k8sOpCreate, cn)
 	}
-	return true
 }
 
 // Delete deletes the node from the allocator and releases the associated
@@ -424,7 +393,6 @@ func (n *NodesPodCIDRManager) Delete(node *v2.CiliumNode) {
 		op: k8sOpDelete,
 	}
 	n.k8sReSync.Trigger()
-	return
 }
 
 // Resync resyncs the nodes with k8s.
@@ -436,7 +404,7 @@ func (n *NodesPodCIDRManager) Resync(context.Context, time.Time) {
 		// is called as now we are allowed to allocate podCIDRs for nodes
 		// without any podCIDR.
 		for _, cn := range n.nodesToAllocate {
-			n.update(cn)
+			n.upsertLocked(cn)
 		}
 		n.nodesToAllocate = nil
 	}

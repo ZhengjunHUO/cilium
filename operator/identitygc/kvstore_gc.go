@@ -10,7 +10,6 @@ import (
 
 	"github.com/sirupsen/logrus"
 
-	"github.com/cilium/cilium/operator/metrics"
 	"github.com/cilium/cilium/pkg/allocator"
 	ciliumIdentity "github.com/cilium/cilium/pkg/identity"
 	"github.com/cilium/cilium/pkg/identity/cache"
@@ -28,13 +27,12 @@ func (igc *GC) startKVStoreModeGC(ctx context.Context) error {
 		return fmt.Errorf("unable to initialize kvstore backend for identity allocation")
 	}
 
-	ciliumIdentity.InitMinMaxIdentityAllocation(igc.allocationCfg)
-	minID := idpool.ID(ciliumIdentity.MinimalAllocationIdentity)
-	maxID := idpool.ID(ciliumIdentity.MaximumAllocationIdentity)
+	minID := idpool.ID(ciliumIdentity.GetMinimalAllocationIdentity())
+	maxID := idpool.ID(ciliumIdentity.GetMaximumAllocationIdentity())
 	log.WithFields(map[string]interface{}{
 		"min":        minID,
 		"max":        maxID,
-		"cluster-id": igc.allocationCfg.LocalClusterID(),
+		"cluster-id": igc.clusterInfo.ID,
 	}).Info("Garbage Collecting identities between range")
 
 	igc.allocator = allocator.NewAllocatorForGC(backend, allocator.WithMin(minID), allocator.WithMax(maxID))
@@ -49,25 +47,30 @@ func (igc *GC) runKVStoreModeGC(ctx context.Context) error {
 	defer gcTimerDone()
 	for {
 		now := time.Now()
+
 		keysToDelete, gcStats, err := igc.allocator.RunGC(igc.rateLimiter, keysToDeletePrev)
 		gcDuration := time.Since(now)
 		if err != nil {
 			igc.logger.WithError(err).Warning("Unable to run security identity garbage collector")
 
-			if igc.enableMetrics {
-				igc.failedRuns++
-				metrics.IdentityGCRuns.WithLabelValues(metrics.LabelValueOutcomeFail).Set(float64(igc.failedRuns))
-			}
+			igc.failedRuns++
+			igc.metrics.IdentityGCRuns.WithLabelValues(LabelValueOutcomeFail).Set(float64(igc.failedRuns))
 		} else {
+			// Best effort to run auth identity GC
+			err = igc.runAuthGC(ctx, keysToDeletePrev)
+			if err != nil {
+				igc.logger.WithField("identities-to-delete", keysToDeletePrev).
+					WithError(err).
+					Warning("Unable to run auth identity garbage collector")
+			}
+
 			keysToDeletePrev = keysToDelete
 
-			if igc.enableMetrics {
-				igc.successfulRuns++
-				metrics.IdentityGCRuns.WithLabelValues(metrics.LabelValueOutcomeSuccess).Set(float64(igc.successfulRuns))
+			igc.successfulRuns++
+			igc.metrics.IdentityGCRuns.WithLabelValues(LabelValueOutcomeSuccess).Set(float64(igc.successfulRuns))
 
-				metrics.IdentityGCSize.WithLabelValues(metrics.LabelValueOutcomeAlive).Set(float64(gcStats.Alive))
-				metrics.IdentityGCSize.WithLabelValues(metrics.LabelValueOutcomeDeleted).Set(float64(gcStats.Deleted))
-			}
+			igc.metrics.IdentityGCSize.WithLabelValues(LabelValueOutcomeAlive).Set(float64(gcStats.Alive))
+			igc.metrics.IdentityGCSize.WithLabelValues(LabelValueOutcomeDeleted).Set(float64(gcStats.Deleted))
 		}
 
 		if igc.gcInterval <= gcDuration {
@@ -95,4 +98,18 @@ func (igc *GC) runKVStoreModeGC(ctx context.Context) error {
 			"identities-to-delete": keysToDeletePrev,
 		}).Debug("Will delete identities if they are still unused")
 	}
+}
+
+func (igc *GC) runAuthGC(ctx context.Context, staleKeys map[string]uint64) error {
+	// Wait until we can delete an identity
+	if err := igc.rateLimiter.Wait(ctx); err != nil {
+		return err
+	}
+
+	for k := range staleKeys {
+		if err := igc.authIdentityClient.Delete(ctx, k); err != nil {
+			return err
+		}
+	}
+	return nil
 }

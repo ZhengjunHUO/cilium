@@ -15,13 +15,17 @@ type ``LoadBalancer``. This functionality is usually left up to a cloud provider
 however, when deploying in a private cloud environment, these facilities are not
 always available.
 
-LB IPAM works in conjunction with features like the :ref:`bgp_control_plane`. Where
+LB IPAM works in conjunction with features such as :ref:`bgp_control_plane` and :ref:`l2_announcements`. Where
 LB IPAM is responsible for allocation and assigning of IPs to Service objects and
 other features are responsible for load balancing and/or advertisement of these
 IPs. 
 
+Use :ref:`bgp_control_plane` to advertise the IP addresses assigned by LB IPAM over BGP and :ref:`l2_announcements` to advertise them locally.
+
 LB IPAM is always enabled but dormant. The controller is awoken when the first
 IP Pool is added to the cluster.
+
+.. _lb_ipam_pools:
 
 Pools
 #####
@@ -38,9 +42,12 @@ A basic IP Pools with both an IPv4 and IPv6 range looks like this:
     metadata:
       name: "blue-pool"
     spec:
-      cidrs:
+      blocks:
       - cidr: "10.0.10.0/24"
       - cidr: "2004::0/64"
+      - start: "20.0.20.100"
+        stop: "20.0.20.200"
+      - start: "1.2.3.4"
 
 After adding the pool to the cluster, it appears like so.
 
@@ -50,11 +57,32 @@ After adding the pool to the cluster, it appears like so.
     NAME        DISABLED   CONFLICTING   IPS AVAILABLE   AGE
     blue-pool   false      False         65788           2s
 
-.. note::
-    The amount of available IPs in the pool is lower than the actual sum of all
-    usable IPs in the CIDRs because the allocation logic is limited to 65536 IPs
-    per CIDR. CIDRs containing more than 65536 IPs can be broken down into multiple
-    smaller CIDRs to achieve full utilization.
+CIDRs, Ranges and reserved IPs
+------------------------------
+
+An IP pool can have multiple blocks of IPs. A block can be specified with CIDR
+notation (<prefix>/<bits>) or a range notation with a start and stop IP. As
+pictured in :ref:`lb_ipam_pools`.
+
+CIDRs are often used to specify routable IP ranges. By convention, the first
+and the last IP of a CIDR are reserved. The first IP is the 
+"network address" and the last IP is the "broadcast address". In some networks
+these IPs are not usable and they do not always play well with all network 
+equipment. LB-IPAM will not assign these by default. Exceptions are /32 and 
+/31 IPv4 CIDRs and /128 and /127 IPv6 CIDRs since these only have 1 or 2 IPs 
+respectively.
+
+If you wish to use the first and last IPs of CIDRs, you can set the 
+``.spec.allowFirstLastIPs`` field to ``yes``.
+
+Since Ranges are typically used to indicate subsections of routable IP ranges,
+no IPs are reserved.
+
+.. warning::
+
+  In v1.15, ``.spec.allowFirstLastIPs`` defaults to ``no``. This will change to
+  ``yes`` in v1.16. Please set this field explicitly if you rely on the field
+  being set to ``no``.
 
 Service Selectors
 -----------------
@@ -70,7 +98,7 @@ The pool will allocate to any service if no service selector is specified.
     metadata:
       name: "blue-pool"
     spec:
-      cidrs:
+      blocks:
       - cidr: "20.0.10.0/24"
       serviceSelector:
         matchExpressions:
@@ -81,7 +109,7 @@ The pool will allocate to any service if no service selector is specified.
     metadata:
       name: "red-pool"
     spec:
-      cidrs:
+      blocks:
       - cidr: "20.0.10.0/24"
       serviceSelector:
         matchLabels:
@@ -106,7 +134,7 @@ For example:
     metadata:
       name: "blue-pool"
     spec:
-      cidrs:
+      blocks:
       - cidr: "20.0.10.0/24"
       serviceSelector:
         matchLabels:
@@ -135,7 +163,7 @@ The reason for the conflict is stated in the status and can be accessed like so
 
 .. code-block:: shell-session
 
-    $ kubectl get ippools/red-pool -o jsonpath='{.status.conditions[?(@.type=="io.cilium/conflict")].message}'
+    $ kubectl get ippools/red-pool -o jsonpath='{.status.conditions[?(@.type=="cilium.io/PoolConflict")].message}'
     Pool conflicts since CIDR '20.0.10.0/24' overlaps CIDR '20.0.10.0/24' from IP Pool 'blue-pool'
 
 or
@@ -153,7 +181,7 @@ or
             Observed Generation:   1
             Reason:                cidr_overlap
             Status:                True
-            Type:                  io.cilium/conflict
+            Type:                  cilium.io/PoolConflict
         #[...]
 
 Disabling a Pool
@@ -170,7 +198,7 @@ an administrator to slowly drain pool or reserve a pool for future use.
     metadata:
       name: "blue-pool"
     spec:
-      cidrs:
+      blocks:
       - cidr: "20.0.10.0/24"
       disabled: true
 
@@ -188,14 +216,14 @@ the amount of used and available IPs. A machine parsable output can be obtained 
 
 .. code-block:: shell-session
 
-    $ kubectl get ippools -o jsonpath='{.items[*].status.conditions[?(@.type!="io.cilium/conflict")]}' | jq
+    $ kubectl get ippools -o jsonpath='{.items[*].status.conditions[?(@.type!="cilium.io/PoolConflict")]}' | jq
     {
       "lastTransitionTime": "2022-10-25T14:08:55Z",
       "message": "254",
       "observedGeneration": 1,
       "reason": "noreason",
       "status": "Unknown",
-      "type": "io.cilium/ips-total"
+      "type": "cilium.io/IPsTotal"
     }
     {
       "lastTransitionTime": "2022-10-25T14:08:55Z",
@@ -203,7 +231,7 @@ the amount of used and available IPs. A machine parsable output can be obtained 
       "observedGeneration": 1,
       "reason": "noreason",
       "status": "Unknown",
-      "type": "io.cilium/ips-available"
+      "type": "cilium.io/IPsAvailable"
     }
     {
       "lastTransitionTime": "2022-10-25T14:08:55Z",
@@ -211,7 +239,7 @@ the amount of used and available IPs. A machine parsable output can be obtained 
       "observedGeneration": 1,
       "reason": "noreason",
       "status": "Unknown",
-      "type": "io.cilium/ips-used"
+      "type": "cilium.io/IPsUsed"
     }
 
 Or human readable output like so
@@ -234,19 +262,19 @@ Or human readable output like so
         Observed Generation:   1
         Reason:                noreason
         Status:                Unknown
-        Type:                  io.cilium/ips-total
+        Type:                  cilium.io/IPsTotal
         Last Transition Time:  2022-10-25T14:08:55Z
         Message:               254
         Observed Generation:   1
         Reason:                noreason
         Status:                Unknown
-        Type:                  io.cilium/ips-available
+        Type:                  cilium.io/IPsAvailable
         Last Transition Time:  2022-10-25T14:08:55Z
         Message:               0
         Observed Generation:   1
         Reason:                noreason
         Status:                Unknown
-        Type:                  io.cilium/ips-used
+        Type:                  cilium.io/IPsUsed
 
 Services
 ########
@@ -372,12 +400,15 @@ Services can request specific IPs. The legacy way of doing so is via ``.spec.loa
 which takes a single IP address. This method has been deprecated in k8s v1.24 but is supported
 until its future removal.
 
-The new way of requesting specific IPs is to use annotations, ``io.cilium/lb-ipam-ips`` in the case
+The new way of requesting specific IPs is to use annotations, ``lbipam.cilium.io/ips`` in the case
 of Cilium LB IPAM. This annotation takes a comma-separated list of IP addresses, allowing for
 multiple IPs to be requested at once.
 
 The service selector of the IP Pool still applies, requested IPs will not be allocated or assigned
 if the services don't match the pool's selector.
+
+Don't configure the annotation to request the first or last IP of an IP pool. They are reserved 
+for the network and broadcast addresses respectively.
 
 .. code-block:: yaml
 
@@ -389,7 +420,7 @@ if the services don't match the pool's selector.
       labels:
         color: blue
       annotations:
-        "io.cilium/lb-ipam-ips": "20.0.10.100,20.0.10.200"
+        "lbipam.cilium.io/ips": "20.0.10.100,20.0.10.200"
     spec:
       type: LoadBalancer
       ports:
@@ -400,3 +431,51 @@ if the services don't match the pool's selector.
     $ kubectl -n example get svc                
     NAME           TYPE           CLUSTER-IP     EXTERNAL-IP               PORT(S)          AGE
     service-blue   LoadBalancer   10.96.26.105   20.0.10.100,20.0.10.200   1234:30363/TCP   43s
+
+Sharing Keys
+------------
+
+Services can share the same IP or set of IPs with other services. This is done by setting the ``lbipam.cilium.io/sharing-key`` annotation on the service.
+Services that have the same sharing key annotation will share the same IP or set of IPs. The sharing key is a string that can be any value.
+
+.. code-block:: yaml
+
+  apiVersion: v1
+  kind: Service
+  metadata:
+    name: service-blue
+    namespace: example
+    labels:
+      color: blue
+    annotations:
+      "lbipam.cilium.io/sharing-key": "1234"
+  spec:
+    type: LoadBalancer
+    ports:
+    - port: 1234
+  ---
+  apiVersion: v1
+  kind: Service
+  metadata:
+    name: service-red
+    namespace: example
+    labels:
+      color: red
+    annotations:
+      "lbipam.cilium.io/sharing-key": "1234"
+  spec:
+    type: LoadBalancer
+    ports:
+    - port: 2345
+
+.. code-block:: shell-session
+
+  $ kubectl -n example get svc
+  NAME           TYPE           CLUSTER-IP     EXTERNAL-IP               PORT(S)          AGE
+  service-blue   LoadBalancer   10.96.26.105   20.0.10.100               1234:30363/TCP   43s
+  service-red    LoadBalancer   10.96.26.106   20.0.10.100               2345:30131/TCP   43s
+
+As long as the services do not have conflicting ports, they will be allocated the same IP. If the services have conflicting ports, they will be allocated different IPs, which will be added to the set of IPs belonging to the sharing key.
+If a service has a sharing key and also requests a specific IP, the service will be allocated the requested IP and it will be added to the set of IPs belonging to that sharing key.
+
+By default, sharing IPs across namespaces is not allowed. To allow sharing across a namespace, set the ``lbipam.cilium.io/sharing-cross-namespace`` annotation to the namespaces the service can be shared with. The value must be a comma-separated list of namespaces. The annotation must be present on both services. You can allow all namespaces with ``*``.

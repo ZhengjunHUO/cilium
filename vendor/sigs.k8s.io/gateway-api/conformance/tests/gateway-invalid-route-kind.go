@@ -22,7 +22,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
-	"sigs.k8s.io/gateway-api/apis/v1beta1"
+	v1 "sigs.k8s.io/gateway-api/apis/v1"
 	"sigs.k8s.io/gateway-api/conformance/utils/kubernetes"
 	"sigs.k8s.io/gateway-api/conformance/utils/suite"
 )
@@ -34,18 +34,22 @@ func init() {
 var GatewayInvalidRouteKind = suite.ConformanceTest{
 	ShortName:   "GatewayInvalidRouteKind",
 	Description: "A Gateway in the gateway-conformance-infra namespace should fail to become ready an invalid Route kind is specified.",
-	Manifests:   []string{"tests/gateway-invalid-route-kind.yaml"},
+	Features: []suite.SupportedFeature{
+		suite.SupportGateway,
+	},
+	Manifests: []string{"tests/gateway-invalid-route-kind.yaml"},
 	Test: func(t *testing.T, s *suite.ConformanceTestSuite) {
 		t.Run("Gateway listener should have a false ResolvedRefs condition with reason InvalidRouteKinds and no supportedKinds", func(t *testing.T) {
 			gwNN := types.NamespacedName{Name: "gateway-only-invalid-route-kind", Namespace: "gateway-conformance-infra"}
-			listeners := []v1beta1.ListenerStatus{{
-				Name:           v1beta1.SectionName("http"),
-				SupportedKinds: []v1beta1.RouteGroupKind{},
+			listeners := []v1.ListenerStatus{{
+				Name:           v1.SectionName("http"),
+				SupportedKinds: []v1.RouteGroupKind{},
 				Conditions: []metav1.Condition{{
-					Type:   string(v1beta1.ListenerConditionResolvedRefs),
+					Type:   string(v1.ListenerConditionResolvedRefs),
 					Status: metav1.ConditionFalse,
-					Reason: string(v1beta1.ListenerReasonInvalidRouteKinds),
+					Reason: string(v1.ListenerReasonInvalidRouteKinds),
 				}},
+				AttachedRoutes: 0,
 			}}
 
 			kubernetes.GatewayStatusMustHaveListeners(t, s.Client, s.TimeoutConfig, gwNN, listeners)
@@ -53,17 +57,18 @@ var GatewayInvalidRouteKind = suite.ConformanceTest{
 
 		t.Run("Gateway listener should have a false ResolvedRefs condition with reason InvalidRouteKinds and HTTPRoute must be put in the supportedKinds", func(t *testing.T) {
 			gwNN := types.NamespacedName{Name: "gateway-supported-and-invalid-route-kind", Namespace: "gateway-conformance-infra"}
-			listeners := []v1beta1.ListenerStatus{{
-				Name: v1beta1.SectionName("http"),
-				SupportedKinds: []v1beta1.RouteGroupKind{{
-					Group: (*v1beta1.Group)(&v1beta1.GroupVersion.Group),
-					Kind:  v1beta1.Kind("HTTPRoute"),
+			listeners := []v1.ListenerStatus{{
+				Name: v1.SectionName("http"),
+				SupportedKinds: []v1.RouteGroupKind{{
+					Group: (*v1.Group)(&v1.GroupVersion.Group),
+					Kind:  v1.Kind("HTTPRoute"),
 				}},
 				Conditions: []metav1.Condition{{
-					Type:   string(v1beta1.ListenerConditionResolvedRefs),
+					Type:   string(v1.ListenerConditionResolvedRefs),
 					Status: metav1.ConditionFalse,
-					Reason: string(v1beta1.ListenerReasonInvalidRouteKinds),
+					Reason: string(v1.ListenerReasonInvalidRouteKinds),
 				}},
+				AttachedRoutes: 0,
 			}}
 
 			kubernetes.GatewayStatusMustHaveListeners(t, s.Client, s.TimeoutConfig, gwNN, listeners)

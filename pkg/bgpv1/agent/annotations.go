@@ -5,14 +5,12 @@ package agent
 
 import (
 	"errors"
-	"math"
-	"net"
+	"fmt"
+	"net/netip"
 	"strconv"
 	"strings"
-)
 
-const (
-	BGPVRouterAnnoPrefix = "cilium.io/bgp-virtual-router."
+	"github.com/cilium/cilium/pkg/annotation"
 )
 
 // ErrNotVRouterAnno is an error returned from parseAnnotation() when the
@@ -81,28 +79,22 @@ func (e ErrAttrib) Error() string {
 //	local-port=port (int):  the local port to listen on for incoming BGP connections
 type Attributes struct {
 	// The local ASN of the virtual router these Attributes targets.
-	ASN int
+	ASN int64
 	// The router ID to use for the virtual router with the above local ASN.
 	RouterID string
 	// The local BGP port to listen on.
-	LocalPort int
+	LocalPort int32
 }
 
 // AnnotationMap coorelates a parsed Annotations structure with the local
 // ASN its annotating.
-type AnnotationMap map[int]Attributes
+type AnnotationMap map[int64]Attributes
 
-// ErrMulti holds multiple errors and formats them sanely when printed.
-type ErrMulti struct {
-	errs []error
-}
-
-func (e ErrMulti) Error() string {
-	s := strings.Builder{}
-	for _, err := range e.errs {
-		s.WriteString(err.Error() + ",")
+func (a AnnotationMap) ResolveRouterID(localASN int64) (string, error) {
+	if attr, ok := a[localASN]; ok && attr.RouterID != "" {
+		return attr.RouterID, nil
 	}
-	return s.String()
+	return "", fmt.Errorf("router id not specified by annotation, cannot resolve router id for local ASN %v", localASN)
 }
 
 // NewAnnotationMap parses a Node's annotations into a AnnotationMap
@@ -125,7 +117,7 @@ func NewAnnotationMap(a map[string]string) (AnnotationMap, error) {
 		am[asn] = attrs
 	}
 	if len(errs) > 0 {
-		return am, ErrMulti{errs}
+		return am, errors.Join(errs...)
 	}
 	return am, nil
 }
@@ -134,23 +126,23 @@ func NewAnnotationMap(a map[string]string) (AnnotationMap, error) {
 // annotation into an Attributes structure.
 //
 // Errors returned by this parse method are defined at top of file.
-func parseAnnotation(key string, value string) (int, Attributes, error) {
+func parseAnnotation(key string, value string) (int64, Attributes, error) {
 	var out Attributes
 	// is this an annotation we care about?
-	if !strings.HasPrefix(key, BGPVRouterAnnoPrefix) {
+	if !strings.HasPrefix(key, annotation.BGPVRouterAnnoPrefix) {
 		return 0, out, ErrNotVRouterAnno{key}
 	}
 
 	// parse out asn from annotation key, if split at "." will be 3rd element
-	var asn int
+	var asn int64
 	if anno := strings.Split(key, "."); len(anno) != 3 {
 		return 0, out, ErrNoASNAnno{key}
 	} else {
-		var err error
-		asn, err = strconv.Atoi(anno[2])
+		asn64, err := strconv.ParseUint(anno[2], 10, 32)
 		if err != nil {
-			return 0, out, ErrASNAnno{}
+			return 0, out, ErrASNAnno{"could not parse ASN as a 32bit integer", anno[2], key}
 		}
+		asn = int64(asn64)
 	}
 	out.ASN = asn
 
@@ -167,20 +159,20 @@ func parseAnnotation(key string, value string) (int, Attributes, error) {
 		}
 		switch kv[0] {
 		case "router-id":
-			ip := net.ParseIP(kv[1])
-			if ip.IsUnspecified() {
-				return 0, out, ErrAttrib{key, kv[0], "could not parse in an IPv4 address"}
+			addr, err := netip.ParseAddr(kv[1])
+			if err != nil {
+				return 0, out, ErrAttrib{key, kv[0], "could not parse router-id as an IPv4 address"}
+			}
+			if !addr.Is4() {
+				return 0, out, ErrAttrib{key, kv[0], "router-id must be a valid IPv4 address"}
 			}
 			out.RouterID = kv[1]
 		case "local-port":
-			port, err := strconv.ParseInt(kv[1], 10, 0)
+			port, err := strconv.ParseInt(kv[1], 10, 16)
 			if err != nil {
-				return 0, out, ErrAttrib{key, kv[0], "could not parse into port number"}
+				return 0, out, ErrAttrib{key, kv[0], "could not parse into port number as 16bit integer"}
 			}
-			if port > math.MaxUint16 {
-				return 0, out, ErrAttrib{key, kv[0], "local port must be smaller then 65535"}
-			}
-			out.LocalPort = int(port)
+			out.LocalPort = int32(port)
 		}
 	}
 	return asn, out, nil

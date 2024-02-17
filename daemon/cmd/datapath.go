@@ -6,18 +6,14 @@ package cmd
 import (
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/sirupsen/logrus"
 	"github.com/vishvananda/netlink"
 
 	"github.com/cilium/cilium/pkg/cidr"
-	"github.com/cilium/cilium/pkg/common"
-	"github.com/cilium/cilium/pkg/controller"
-	datapathIpcache "github.com/cilium/cilium/pkg/datapath/ipcache"
-	"github.com/cilium/cilium/pkg/datapath/linux/ipsec"
 	"github.com/cilium/cilium/pkg/datapath/linux/linux_defaults"
 	"github.com/cilium/cilium/pkg/datapath/linux/route"
 	datapath "github.com/cilium/cilium/pkg/datapath/types"
@@ -25,12 +21,10 @@ import (
 	"github.com/cilium/cilium/pkg/endpointmanager"
 	"github.com/cilium/cilium/pkg/identity"
 	ippkg "github.com/cilium/cilium/pkg/ip"
-	"github.com/cilium/cilium/pkg/ipcache"
+	ipcachetypes "github.com/cilium/cilium/pkg/ipcache/types"
 	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/maps/ctmap"
-	"github.com/cilium/cilium/pkg/maps/egressmap"
-	"github.com/cilium/cilium/pkg/maps/eventsmap"
 	"github.com/cilium/cilium/pkg/maps/fragmap"
 	ipcachemap "github.com/cilium/cilium/pkg/maps/ipcache"
 	"github.com/cilium/cilium/pkg/maps/ipmasq"
@@ -39,12 +33,12 @@ import (
 	"github.com/cilium/cilium/pkg/maps/metricsmap"
 	"github.com/cilium/cilium/pkg/maps/nat"
 	"github.com/cilium/cilium/pkg/maps/neighborsmap"
-	"github.com/cilium/cilium/pkg/maps/nodemap"
 	"github.com/cilium/cilium/pkg/maps/policymap"
-	"github.com/cilium/cilium/pkg/maps/signalmap"
 	"github.com/cilium/cilium/pkg/maps/srv6map"
 	"github.com/cilium/cilium/pkg/maps/tunnel"
 	"github.com/cilium/cilium/pkg/maps/vtep"
+	"github.com/cilium/cilium/pkg/maps/worldcidrsmap"
+	"github.com/cilium/cilium/pkg/metrics"
 	"github.com/cilium/cilium/pkg/mtu"
 	"github.com/cilium/cilium/pkg/node"
 	"github.com/cilium/cilium/pkg/option"
@@ -55,34 +49,6 @@ import (
 func (d *Daemon) LocalConfig() *datapath.LocalNodeConfiguration {
 	d.nodeDiscovery.WaitForLocalNodeInit()
 	return &d.nodeDiscovery.LocalConfig
-}
-
-func (d *Daemon) createNodeConfigHeaderfile() error {
-	nodeConfigPath := option.Config.GetNodeConfigPath()
-	f, err := os.Create(nodeConfigPath)
-	if err != nil {
-		log.WithError(err).WithField(logfields.Path, nodeConfigPath).Fatal("Failed to create node configuration file")
-		return err
-	}
-	defer f.Close()
-
-	if err = d.datapath.WriteNodeConfig(f, &d.nodeDiscovery.LocalConfig); err != nil {
-		log.WithError(err).WithField(logfields.Path, nodeConfigPath).Fatal("Failed to write node configuration file")
-		return err
-	}
-	return nil
-}
-
-func deleteHostDevice() {
-	link, err := netlink.LinkByName(defaults.HostDevice)
-	if err != nil {
-		log.WithError(err).Warningf("Unable to lookup host device %s. No old cilium_host interface exists", defaults.HostDevice)
-		return
-	}
-
-	if err := netlink.LinkDel(link); err != nil {
-		log.WithError(err).Errorf("Unable to delete host device %s to change allocation CIDR", defaults.HostDevice)
-	}
 }
 
 // listFilterIfs returns a map of interfaces based on the given filter.
@@ -175,10 +141,6 @@ func (e *EndpointMapManager) RemoveMapPath(path string) {
 	}
 }
 
-func endParallelMapMode() {
-	ipcachemap.IPCacheMap().EndParallelMode()
-}
-
 // syncHostIPs adds local host entries to bpf lxcmap, as well as ipcache, if
 // needed, and also notifies the daemon and network policy hosts cache if
 // changes were made.
@@ -187,7 +149,11 @@ func (d *Daemon) syncHostIPs() error {
 		return nil
 	}
 
-	specialIdentities := []identity.IPIdentityPair{}
+	type ipIDLabel struct {
+		identity.IPIdentityPair
+		labels.Labels
+	}
+	specialIdentities := make([]ipIDLabel, 0, 2)
 
 	if option.Config.EnableIPv4 {
 		addrs, err := d.datapath.LocalNodeAddressing().IPv4().LocalAddresses()
@@ -201,20 +167,30 @@ func (d *Daemon) syncHostIPs() error {
 			}
 
 			if len(ip) > 0 {
-				specialIdentities = append(specialIdentities,
+				specialIdentities = append(specialIdentities, ipIDLabel{
 					identity.IPIdentityPair{
 						IP: ip,
 						ID: identity.ReservedIdentityHost,
-					})
+					},
+					labels.LabelHost,
+				})
 			}
 		}
 
-		specialIdentities = append(specialIdentities,
+		ipv4Ident := identity.ReservedIdentityWorldIPv4
+		ipv4Label := labels.LabelWorldIPv4
+		if !option.Config.EnableIPv6 {
+			ipv4Ident = identity.ReservedIdentityWorld
+			ipv4Label = labels.LabelWorld
+		}
+		specialIdentities = append(specialIdentities, ipIDLabel{
 			identity.IPIdentityPair{
 				IP:   net.IPv4zero,
 				Mask: net.CIDRMask(0, net.IPv4len*8),
-				ID:   identity.ReservedIdentityWorld,
-			})
+				ID:   ipv4Ident,
+			},
+			ipv4Label,
+		})
 	}
 
 	if option.Config.EnableIPv6 {
@@ -230,20 +206,30 @@ func (d *Daemon) syncHostIPs() error {
 			}
 
 			if len(ip) > 0 {
-				specialIdentities = append(specialIdentities,
+				specialIdentities = append(specialIdentities, ipIDLabel{
 					identity.IPIdentityPair{
 						IP: ip,
 						ID: identity.ReservedIdentityHost,
-					})
+					},
+					labels.LabelHost,
+				})
 			}
 		}
 
-		specialIdentities = append(specialIdentities,
+		ipv6Ident := identity.ReservedIdentityWorldIPv6
+		ipv6Label := labels.LabelWorldIPv6
+		if !option.Config.EnableIPv4 {
+			ipv6Ident = identity.ReservedIdentityWorld
+			ipv6Label = labels.LabelWorld
+		}
+		specialIdentities = append(specialIdentities, ipIDLabel{
 			identity.IPIdentityPair{
 				IP:   net.IPv6zero,
 				Mask: net.CIDRMask(0, net.IPv6len*8),
-				ID:   identity.ReservedIdentityWorld,
-			})
+				ID:   ipv6Ident,
+			},
+			ipv6Label,
+		})
 	}
 
 	existingEndpoints, err := lxcmap.DumpToMap()
@@ -251,31 +237,31 @@ func (d *Daemon) syncHostIPs() error {
 		return err
 	}
 
-	for _, ipIDPair := range specialIdentities {
-		hostKey := node.GetIPsecKeyIdentity()
-		isHost := ipIDPair.ID == identity.ReservedIdentityHost
+	daemonResourceID := ipcachetypes.NewResourceID(ipcachetypes.ResourceKindDaemon, "", "reserved")
+	for _, ipIDLblsPair := range specialIdentities {
+		isHost := ipIDLblsPair.ID == identity.ReservedIdentityHost
 		if isHost {
-			added, err := lxcmap.SyncHostEntry(ipIDPair.IP)
+			added, err := lxcmap.SyncHostEntry(ipIDLblsPair.IP)
 			if err != nil {
 				return fmt.Errorf("Unable to add host entry to endpoint map: %s", err)
 			}
 			if added {
-				log.WithField(logfields.IPAddr, ipIDPair.IP).Debugf("Added local ip to endpoint map")
+				log.WithField(logfields.IPAddr, ipIDLblsPair.IP).Debugf("Added local ip to endpoint map")
 			}
 		}
 
-		delete(existingEndpoints, ipIDPair.IP.String())
+		delete(existingEndpoints, ipIDLblsPair.IP.String())
 
-		// Upsert will not propagate (reserved:foo->ID) mappings across the cluster,
-		// and we specifically don't want to do so.
-		//
-		// This upsert will fail with ErrOverwrite continuously as long as the
-		// EP / CN watcher have found an apiserver IP and upserted it into the
-		// ipcache. Until then, it is expected to succeed.
-		d.ipcache.Upsert(ipIDPair.PrefixString(), nil, hostKey, nil, ipcache.Identity{
-			ID:     ipIDPair.ID,
-			Source: d.sourceByIP(ipIDPair.IP, source.Local),
-		})
+		lbls := ipIDLblsPair.Labels
+		if ipIDLblsPair.ID.IsWorld() {
+			p := netip.PrefixFrom(ippkg.MustAddrFromIP(ipIDLblsPair.IP), 0)
+			d.ipcache.OverrideIdentity(p, lbls, source.Local, daemonResourceID)
+		} else {
+			d.ipcache.UpsertLabels(ippkg.IPToNetPrefix(ipIDLblsPair.IP),
+				lbls,
+				source.Local, daemonResourceID,
+			)
+		}
 	}
 
 	// existingEndpoints is a map from endpoint IP to endpoint info. Referring
@@ -290,9 +276,18 @@ func (d *Daemon) syncHostIPs() error {
 				log.Debugf("Removed outdated host IP %s from endpoint map", hostIP)
 			}
 
-			d.ipcache.Delete(hostIP, d.sourceByIP(ip, source.Local))
+			d.ipcache.RemoveLabels(ippkg.IPToNetPrefix(ip), labels.LabelHost, daemonResourceID)
 		}
 	}
+
+	// we have a reference to all ifindex values, so we update the related metric
+	maxIfindex := uint32(0)
+	for _, endpoint := range existingEndpoints {
+		if endpoint.IfIndex > maxIfindex {
+			maxIfindex = endpoint.IfIndex
+		}
+	}
+	metrics.EndpointMaxIfindex.Set(float64(maxIfindex))
 
 	if option.Config.EnableVTEP {
 		err := setupVTEPMapping()
@@ -303,24 +298,9 @@ func (d *Daemon) syncHostIPs() error {
 		if err != nil {
 			return err
 		}
-
 	}
 
 	return nil
-}
-
-func (d *Daemon) sourceByIP(ip net.IP, defaultSrc source.Source) source.Source {
-	if addr, ok := ippkg.AddrFromIP(ip); ok {
-		lbls := d.ipcache.GetIDMetadataByIP(addr)
-		if lbls.Has(labels.LabelKubeAPIServer[labels.IDNameKubeAPIServer]) {
-			return source.KubeAPIServer
-		}
-	} else {
-		log.WithFields(logrus.Fields{
-			logfields.IPAddr: ip,
-		}).Warning("BUG: Invalid addr detected in host stack. Please report this bug to the Cilium developers.")
-	}
-	return defaultSrc
 }
 
 // initMaps opens all BPF maps (and creates them if they do not exist). This
@@ -331,41 +311,31 @@ func (d *Daemon) initMaps() error {
 		return nil
 	}
 
-	if _, err := lxcmap.LXCMap().OpenOrCreate(); err != nil {
-		return err
+	if err := lxcmap.LXCMap().OpenOrCreate(); err != nil {
+		return fmt.Errorf("initializing lxc map: %w", err)
 	}
 
-	// The ipcache is shared between endpoints. Parallel mode needs to be
-	// used to allow existing endpoints that have not been regenerated yet
-	// to continue using the existing ipcache until the endpoint is
-	// regenerated for the first time. Existing endpoints are using a
-	// policy map which is potentially out of sync as local identities are
-	// re-allocated on startup. Parallel mode allows to continue using the
-	// old version until regeneration. Note that the old version is not
-	// updated with new identities. This is fine as any new identity
-	// appearing would require a regeneration of the endpoint anyway in
-	// order for the endpoint to gain the privilege of communication.
-	if _, err := ipcachemap.IPCacheMap().OpenParallel(); err != nil {
-		return err
-	}
-
-	if err := nodemap.NodeMap().OpenOrCreate(); err != nil {
-		return err
+	// The ipcache is shared between endpoints. Unpin the old ipcache map created
+	// by any previous instances of the agent to prevent new endpoints from
+	// picking up the old map pin. The old ipcache will continue to be used by
+	// loaded bpf programs, it will just no longer be updated by the agent.
+	//
+	// This is to allow existing endpoints that have not been regenerated yet to
+	// continue using the existing ipcache until the endpoint is regenerated for
+	// the first time and its bpf programs have been replaced. Existing endpoints
+	// are using a policy map which is potentially out of sync as local identities
+	// are re-allocated on startup.
+	if err := ipcachemap.IPCacheMap().Recreate(); err != nil {
+		return fmt.Errorf("initializing ipcache map: %w", err)
 	}
 
 	if err := metricsmap.Metrics.OpenOrCreate(); err != nil {
-		return err
+		return fmt.Errorf("initializing metrics map: %w", err)
 	}
 
 	if option.Config.TunnelingEnabled() {
-		if _, err := tunnel.TunnelMap().OpenOrCreate(); err != nil {
-			return err
-		}
-	}
-
-	if option.Config.EnableIPv4EgressGateway {
-		if err := egressmap.InitEgressMaps(option.Config.EgressGatewayPolicyMapEntries); err != nil {
-			return err
+		if err := tunnel.TunnelMap().Recreate(); err != nil {
+			return fmt.Errorf("initializing tunnel map: %w", err)
 		}
 	}
 
@@ -373,9 +343,15 @@ func (d *Daemon) initMaps() error {
 		srv6map.CreateMaps()
 	}
 
+	if option.Config.EnableHighScaleIPcache {
+		if err := worldcidrsmap.InitWorldCIDRsMap(); err != nil {
+			return fmt.Errorf("initializing world CIDRs map: %w", err)
+		}
+	}
+
 	if option.Config.EnableVTEP {
-		if _, err := vtep.VtepMap().OpenOrCreate(); err != nil {
-			return err
+		if err := vtep.VtepMap().Recreate(); err != nil {
+			return fmt.Errorf("initializing vtep map: %w", err)
 		}
 	}
 
@@ -384,18 +360,8 @@ func (d *Daemon) initMaps() error {
 		log.WithError(err).Fatal("Unable to initialize service maps")
 	}
 
-	possibleCPUs := common.GetNumPossibleCPUs(log)
-
-	if err := eventsmap.InitMap(possibleCPUs); err != nil {
-		return err
-	}
-
-	if err := signalmap.InitMap(possibleCPUs); err != nil {
-		return err
-	}
-
 	if err := policymap.InitCallMaps(option.Config.EnableEnvoyConfig); err != nil {
-		return err
+		return fmt.Errorf("initializing policy map: %w", err)
 	}
 
 	for _, ep := range d.endpointManager.GetEndpoints() {
@@ -408,65 +374,56 @@ func (d *Daemon) initMaps() error {
 		}
 		for _, m := range ctmap.LocalMaps(ep, option.Config.EnableIPv4,
 			option.Config.EnableIPv6) {
-			if _, err := m.Create(); err != nil {
-				return err
+			if err := m.Create(); err != nil {
+				return fmt.Errorf("initializing conntrack map %s: %w", m.Name(), err)
 			}
 		}
 	}
 	for _, m := range ctmap.GlobalMaps(option.Config.EnableIPv4,
 		option.Config.EnableIPv6) {
-		if _, err := m.Create(); err != nil {
-			return err
+		if err := m.Create(); err != nil {
+			return fmt.Errorf("initializing conntrack map %s: %w", m.Name(), err)
 		}
 	}
 
 	ipv4Nat, ipv6Nat := nat.GlobalMaps(option.Config.EnableIPv4,
 		option.Config.EnableIPv6, option.Config.EnableNodePort)
 	if ipv4Nat != nil {
-		if _, err := ipv4Nat.Create(); err != nil {
-			return err
+		if err := ipv4Nat.Create(); err != nil {
+			return fmt.Errorf("initializing ipv4nat map: %w", err)
 		}
 	}
 	if ipv6Nat != nil {
-		if _, err := ipv6Nat.Create(); err != nil {
-			return err
+		if err := ipv6Nat.Create(); err != nil {
+			return fmt.Errorf("initializing ipv6nat map: %w", err)
 		}
 	}
 
 	if option.Config.EnableNodePort {
 		if err := neighborsmap.InitMaps(option.Config.EnableIPv4,
 			option.Config.EnableIPv6); err != nil {
-			return err
+			return fmt.Errorf("initializing neighbors map: %w", err)
 		}
 	}
 
 	if option.Config.EnableIPv4FragmentsTracking {
 		if err := fragmap.InitMap(option.Config.FragmentsMapEntries); err != nil {
-			return err
+			return fmt.Errorf("initializing fragments map: %w", err)
 		}
 	}
 
-	// Set up the list of IPCache listeners in the daemon, to be
-	// used by syncEndpointsAndHostIPs()
-	// xDS cache will be added later by calling AddListener(), but only if necessary.
-	d.ipcache.SetListeners([]ipcache.IPIdentityMappingListener{
-		datapathIpcache.NewListener(d, d, d.ipcache),
-	})
-
-	if option.Config.EnableIPv4 && option.Config.EnableIPMasqAgent {
-		if _, err := ipmasq.IPMasq4Map().OpenOrCreate(); err != nil {
-			return err
+	if option.Config.EnableIPMasqAgent {
+		if option.Config.EnableIPv4Masquerade {
+			if err := ipmasq.IPMasq4Map().OpenOrCreate(); err != nil {
+				return fmt.Errorf("initializing IPv4 masquerading map: %w", err)
+			}
+		}
+		if option.Config.EnableIPv6Masquerade {
+			if err := ipmasq.IPMasq6Map().OpenOrCreate(); err != nil {
+				return fmt.Errorf("initializing IPv6 masquerading map: %w", err)
+			}
 		}
 	}
-
-	// Start the controller for periodic sync of the metrics map with
-	// the prometheus server.
-	controller.NewManager().UpdateController("metricsmap-bpf-prom-sync",
-		controller.ControllerParams{
-			DoFunc:      metricsmap.SyncMetricsMap,
-			RunInterval: 5 * time.Second,
-			Context:     d.ctx,
-		})
 
 	if !option.Config.RestoreState {
 		// If we are not restoring state, all endpoints can be
@@ -475,30 +432,30 @@ func (d *Daemon) initMaps() error {
 	}
 
 	if option.Config.EnableSessionAffinity {
-		if _, err := lbmap.AffinityMatchMap.OpenOrCreate(); err != nil {
-			return err
+		if err := lbmap.AffinityMatchMap.OpenOrCreate(); err != nil {
+			return fmt.Errorf("initializing affinity match map: %w", err)
 		}
 		if option.Config.EnableIPv4 {
-			if _, err := lbmap.Affinity4Map.OpenOrCreate(); err != nil {
-				return err
+			if err := lbmap.Affinity4Map.OpenOrCreate(); err != nil {
+				return fmt.Errorf("initializing affinity v4 map: %w", err)
 			}
 		}
 		if option.Config.EnableIPv6 {
-			if _, err := lbmap.Affinity6Map.OpenOrCreate(); err != nil {
-				return err
+			if err := lbmap.Affinity6Map.OpenOrCreate(); err != nil {
+				return fmt.Errorf("initializing affinity v6 map: %w", err)
 			}
 		}
 	}
 
 	if option.Config.EnableSVCSourceRangeCheck {
 		if option.Config.EnableIPv4 {
-			if _, err := lbmap.SourceRange4Map.OpenOrCreate(); err != nil {
-				return err
+			if err := lbmap.SourceRange4Map.OpenOrCreate(); err != nil {
+				return fmt.Errorf("initializing source range v4 map: %w", err)
 			}
 		}
 		if option.Config.EnableIPv6 {
-			if _, err := lbmap.SourceRange6Map.OpenOrCreate(); err != nil {
-				return err
+			if err := lbmap.SourceRange6Map.OpenOrCreate(); err != nil {
+				return fmt.Errorf("initializing source range v6 map: %w", err)
 			}
 		}
 	}
@@ -510,23 +467,6 @@ func (d *Daemon) initMaps() error {
 	}
 
 	return nil
-}
-
-func setupIPSec() (int, uint8, error) {
-	if !option.Config.EncryptNode {
-		ipsec.DeleteIPsecEncryptRoute()
-	}
-
-	if !option.Config.EnableIPSec {
-		return 0, 0, nil
-	}
-
-	authKeySize, spi, err := ipsec.LoadIPSecKeysFile(option.Config.IPSecKeyFile)
-	if err != nil {
-		return 0, 0, err
-	}
-	node.SetIPsecKeyIdentity(spi)
-	return authKeySize, spi, nil
 }
 
 func setupVTEPMapping() error {
@@ -624,7 +564,7 @@ func setupRouteToVtepCidr() error {
 			To:       prefix.IPNet,
 			Table:    linux_defaults.RouteTableVtep,
 		}
-		if err := route.DeleteRule(rule); err != nil {
+		if err := route.DeleteRule(netlink.FAMILY_V4, rule); err != nil {
 			return fmt.Errorf("Delete VTEP CIDR rule error: %w", err)
 		}
 	}

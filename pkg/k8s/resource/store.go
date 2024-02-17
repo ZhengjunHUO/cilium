@@ -23,14 +23,28 @@ type Store[T k8sRuntime.Object] interface {
 	// GetByKey returns the latest version of the object with given key.
 	GetByKey(key Key) (item T, exists bool, err error)
 
+	// IndexKeys returns the keys of the stored objects whose set of indexed values
+	// for the index includes the given indexed value.
+	IndexKeys(indexName, indexedValue string) ([]string, error)
+
+	// ByIndex returns the stored objects whose set of indexed values for the index
+	// includes the given indexed value.
+	ByIndex(indexName, indexedValue string) ([]T, error)
+
 	// CacheStore returns the underlying cache.Store instance. Use for temporary
 	// compatibility purposes only!
 	CacheStore() cache.Store
+
+	// Release the store and allows the associated resource to stop its informer if
+	// this is the last reference to it.
+	// This is a no-op if the resource is not releasable.
+	Release()
 }
 
-// typedStore implements Store on top of an untyped cache.Store.
+// typedStore implements Store on top of an untyped cache.Indexer.
 type typedStore[T k8sRuntime.Object] struct {
-	store cache.Store
+	store   cache.Indexer
+	release func()
 }
 
 var _ Store[*corev1.Node] = &typedStore[*corev1.Node]{}
@@ -61,8 +75,28 @@ func (s *typedStore[T]) GetByKey(key Key) (item T, exists bool, err error) {
 	return
 }
 
+func (s *typedStore[T]) IndexKeys(indexName, indexedValue string) ([]string, error) {
+	return s.store.IndexKeys(indexName, indexedValue)
+}
+
+func (s *typedStore[T]) ByIndex(indexName, indexedValue string) ([]T, error) {
+	itemsAny, err := s.store.ByIndex(indexName, indexedValue)
+	if err != nil {
+		return nil, err
+	}
+	items := make([]T, 0, len(itemsAny))
+	for _, item := range itemsAny {
+		items = append(items, item.(T))
+	}
+	return items, nil
+}
+
 func (s *typedStore[T]) CacheStore() cache.Store {
 	return s.store
+}
+
+func (s *typedStore[T]) Release() {
+	s.release()
 }
 
 type KeyIter interface {

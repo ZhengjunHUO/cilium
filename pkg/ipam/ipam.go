@@ -8,13 +8,13 @@ import (
 
 	"github.com/sirupsen/logrus"
 
-	"github.com/cilium/cilium/pkg/cidr"
+	agentK8s "github.com/cilium/cilium/daemon/k8s"
 	"github.com/cilium/cilium/pkg/datapath/types"
 	ipamOption "github.com/cilium/cilium/pkg/ipam/option"
 	"github.com/cilium/cilium/pkg/k8s/client"
-	"github.com/cilium/cilium/pkg/k8s/watchers/subscriber"
 	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/cilium/pkg/logging/logfields"
+	"github.com/cilium/cilium/pkg/option"
 )
 
 var (
@@ -40,44 +40,12 @@ func DeriveFamily(ip net.IP) Family {
 	return IPv4
 }
 
-// Configuration is the configuration passed into the IPAM subsystem
-type Configuration interface {
-	// IPv4Enabled must return true when IPv4 is enabled
-	IPv4Enabled() bool
-
-	// IPv6 must return true when IPv6 is enabled
-	IPv6Enabled() bool
-
-	// IPAMMode returns the IPAM mode
-	IPAMMode() string
-
-	// HealthCheckingEnabled must return true when health-checking is
-	// enabled
-	HealthCheckingEnabled() bool
-
-	// UnreachableRoutesEnabled returns true when unreachable-routes is
-	// enabled
-	UnreachableRoutesEnabled() bool
-
-	// SetIPv4NativeRoutingCIDR is called by the IPAM module to announce
-	// the native IPv4 routing CIDR if it exists
-	SetIPv4NativeRoutingCIDR(cidr *cidr.CIDR)
-
-	// IPv4NativeRoutingCIDR is called by the IPAM module retrieve
-	// the native IPv4 routing CIDR if it exists
-	GetIPv4NativeRoutingCIDR() *cidr.CIDR
-}
-
 // Owner is the interface the owner of an IPAM allocator has to implement
 type Owner interface {
 	// UpdateCiliumNodeResource is called to create/update the CiliumNode
 	// resource. The function must block until the custom resource has been
 	// created.
 	UpdateCiliumNodeResource()
-
-	// LocalAllocCIDRsUpdated informs the agent that the local allocation CIDRs have
-	// changed.
-	LocalAllocCIDRsUpdated(ipv4AllocCIDRs, ipv6AllocCIDRs []*cidr.CIDR)
 }
 
 // K8sEventRegister is used to register and handle events as they are processed
@@ -91,24 +59,23 @@ type K8sEventRegister interface {
 	// K8sEventProcessed is called to do metrics accounting for each processed
 	// Kubernetes event.
 	K8sEventProcessed(scope string, action string, status bool)
-
-	// RegisterCiliumNodeSubscriber allows registration of subscriber.CiliumNode
-	// implementations. Events for all CiliumNode events (not just the local one)
-	// will be sent to the subscriber.
-	RegisterCiliumNodeSubscriber(s subscriber.CiliumNode)
 }
 
 type MtuConfiguration interface {
 	GetDeviceMTU() int
 }
 
+type Metadata interface {
+	GetIPPoolForPod(owner string, family Family) (pool string, err error)
+}
+
 // NewIPAM returns a new IP address manager
-func NewIPAM(nodeAddressing types.NodeAddressing, c Configuration, owner Owner, k8sEventReg K8sEventRegister, mtuConfig MtuConfiguration, clientset client.Clientset) *IPAM {
+func NewIPAM(nodeAddressing types.NodeAddressing, c *option.DaemonConfig, owner Owner, k8sEventReg K8sEventRegister, node agentK8s.LocalCiliumNodeResource, mtuConfig MtuConfiguration, clientset client.Clientset) *IPAM {
 	ipam := &IPAM{
 		nodeAddressing:   nodeAddressing,
 		config:           c,
 		owner:            map[Pool]map[string]string{},
-		expirationTimers: map[string]string{},
+		expirationTimers: map[timerKey]expirationTimer{},
 		excludedIPs:      map[string]string{},
 	}
 
@@ -126,14 +93,15 @@ func NewIPAM(nodeAddressing types.NodeAddressing, c Configuration, owner Owner, 
 		if c.IPv4Enabled() {
 			ipam.IPv4Allocator = newHostScopeAllocator(nodeAddressing.IPv4().AllocationCIDR().IPNet)
 		}
-	case ipamOption.IPAMClusterPoolV2:
-		log.Info("Initializing ClusterPool v2 IPAM")
+	case ipamOption.IPAMMultiPool:
+		log.Info("Initializing MultiPool IPAM")
+		manager := newMultiPoolManager(c, node, owner, clientset.CiliumV2().CiliumNodes())
 
 		if c.IPv6Enabled() {
-			ipam.IPv6Allocator = newClusterPoolAllocator(IPv6, c, owner, k8sEventReg, clientset)
+			ipam.IPv6Allocator = manager.Allocator(IPv6)
 		}
 		if c.IPv4Enabled() {
-			ipam.IPv4Allocator = newClusterPoolAllocator(IPv4, c, owner, k8sEventReg, clientset)
+			ipam.IPv4Allocator = manager.Allocator(IPv4)
 		}
 	case ipamOption.IPAMCRD, ipamOption.IPAMENI, ipamOption.IPAMAzure, ipamOption.IPAMAlibabaCloud:
 		log.Info("Initializing CRD-based IPAM")
@@ -157,6 +125,12 @@ func NewIPAM(nodeAddressing types.NodeAddressing, c Configuration, owner Owner, 
 	}
 
 	return ipam
+}
+
+// WithMetadata sets an optional Metadata provider, which IPAM will use to
+// determine what IPAM pool an IP owner should allocate its IP from
+func (ipam *IPAM) WithMetadata(m Metadata) {
+	ipam.metadata = m
 }
 
 // getIPOwner returns the owner for an IP in a particular pool or the empty
@@ -208,7 +182,12 @@ func (ipam *IPAM) isIPExcluded(ip net.IP, pool Pool) (string, bool) {
 // PoolOrDefault returns the default pool if no pool is specified.
 func PoolOrDefault(pool string) Pool {
 	if pool == "" {
-		return PoolDefault
+		return PoolDefault()
 	}
 	return Pool(pool)
+}
+
+// PoolDefault returns the default pool
+func PoolDefault() Pool {
+	return Pool(option.Config.IPAMDefaultIPPool)
 }

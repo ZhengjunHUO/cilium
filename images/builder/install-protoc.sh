@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Copyright Authors of Cilium
 # SPDX-License-Identifier: Apache-2.0
@@ -8,7 +8,7 @@ set -o errexit
 set -o pipefail
 set -o nounset
 
-protoc_version="22.3"
+protoc_version="24.0"
 arch=$(arch)
 if [[ "${arch}" == "aarch64" ]]; then
   arch="aarch_64"

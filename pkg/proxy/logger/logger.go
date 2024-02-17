@@ -4,9 +4,7 @@
 package logger
 
 import (
-	"net"
-	"strconv"
-	"time"
+	"net/netip"
 
 	"github.com/sirupsen/logrus"
 
@@ -17,6 +15,7 @@ import (
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/node"
 	"github.com/cilium/cilium/pkg/proxy/accesslog"
+	"github.com/cilium/cilium/pkg/time"
 )
 
 var (
@@ -134,28 +133,20 @@ type AddressingInfo struct {
 // to the logrecord
 func (logTags) Addressing(i AddressingInfo) LogTag {
 	return func(lr *LogRecord) {
-		ipstr, port, err := net.SplitHostPort(i.SrcIPPort)
+		addrPort, err := netip.ParseAddrPort(i.SrcIPPort)
 		if err == nil {
-			ip := net.ParseIP(ipstr)
-			if ip != nil && ip.To4() == nil {
+			if addrPort.Addr().Is6() {
 				lr.IPVersion = accesslog.VersionIPV6
 			}
 
-			p, err := strconv.ParseUint(port, 10, 16)
-			if err == nil {
-				lr.SourceEndpoint.Port = uint16(p)
-				endpointInfoRegistry.FillEndpointInfo(&lr.SourceEndpoint, ip, i.SrcIdentity)
-			}
+			lr.SourceEndpoint.Port = addrPort.Port()
+			endpointInfoRegistry.FillEndpointInfo(&lr.SourceEndpoint, addrPort.Addr(), i.SrcIdentity)
 		}
 
-		ipstr, port, err = net.SplitHostPort(i.DstIPPort)
+		addrPort, err = netip.ParseAddrPort(i.DstIPPort)
 		if err == nil {
-			ip := net.ParseIP(ipstr)
-			p, err := strconv.ParseUint(port, 10, 16)
-			if err == nil {
-				lr.DestinationEndpoint.Port = uint16(p)
-				endpointInfoRegistry.FillEndpointInfo(&lr.DestinationEndpoint, ip, i.DstIdentity)
-			}
+			lr.DestinationEndpoint.Port = addrPort.Port()
+			endpointInfoRegistry.FillEndpointInfo(&lr.DestinationEndpoint, addrPort.Addr(), i.DstIdentity)
 		}
 	}
 }
@@ -264,4 +255,16 @@ func SetMetadata(md []string) {
 	defer logMutex.Unlock()
 
 	metadata = md
+}
+
+// EndpointInfoRegistry provides endpoint information lookup by endpoint IP address.
+type EndpointInfoRegistry interface {
+	// FillEndpointInfo resolves the labels of the specified identity if known locally.
+	// If 'id' is passed as zero, will locate the EP by 'ip', and also fill info.ID, if found.
+	// Fills in the following info member fields:
+	//  - info.IPv4           (if 'ip' is IPv4)
+	//  - info.IPv6           (if 'ip' is not IPv4)
+	//  - info.Identity       (defaults to WORLD if not known)
+	//  - info.Labels         (only if identity is found)
+	FillEndpointInfo(info *accesslog.EndpointInfo, addr netip.Addr, id identity.NumericIdentity)
 }

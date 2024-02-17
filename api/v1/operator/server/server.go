@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/go-openapi/loads"
+	"github.com/go-openapi/runtime/middleware"
 	"github.com/go-openapi/swag"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/pflag"
@@ -41,21 +42,26 @@ var Cell = cell.Module(
 	"cilium operator server",
 
 	cell.Provide(newForCell),
+	APICell,
 )
 
-type serverParams struct {
+// APICell provides the restapi.CiliumOperatorAPI type, populated
+// with the request handlers. This cell is an alternative to 'Cell' when only
+// the API type is required and not the full server implementation.
+var APICell = cell.Provide(newAPI)
+
+type apiParams struct {
 	cell.In
 
-	Lifecycle  hive.Lifecycle
-	Shutdowner hive.Shutdowner
-	Logger     logrus.FieldLogger
-	Spec       *Spec
+	Spec *Spec
+
+	Middleware middleware.Builder `name:"cilium-operator-middleware" optional:"true"`
 
 	OperatorGetHealthzHandler operator.GetHealthzHandler
 	MetricsGetMetricsHandler  metrics.GetMetricsHandler
 }
 
-func newForCell(p serverParams) (*Server, error) {
+func newAPI(p apiParams) *restapi.CiliumOperatorAPI {
 	api := restapi.NewCiliumOperatorAPI(p.Spec.Document)
 
 	// Construct the API from the provided handlers
@@ -63,11 +69,31 @@ func newForCell(p serverParams) (*Server, error) {
 	api.OperatorGetHealthzHandler = p.OperatorGetHealthzHandler
 	api.MetricsGetMetricsHandler = p.MetricsGetMetricsHandler
 
-	s := NewServer(api)
+	// Inject custom middleware if provided by Hive
+	if p.Middleware != nil {
+		api.Middleware = func(builder middleware.Builder) http.Handler {
+			return p.Middleware(api.Context().APIHandler(builder))
+		}
+	}
+
+	return api
+}
+
+type serverParams struct {
+	cell.In
+
+	Lifecycle  cell.Lifecycle
+	Shutdowner hive.Shutdowner
+	Logger     logrus.FieldLogger
+	Spec       *Spec
+	API        *restapi.CiliumOperatorAPI
+}
+
+func newForCell(p serverParams) (*Server, error) {
+	s := NewServer(p.API)
 	s.shutdowner = p.Shutdowner
 	s.logger = p.Logger
 	p.Lifecycle.Append(s)
-
 	return s, nil
 }
 
@@ -256,6 +282,12 @@ func (s *Server) SetAPI(api *restapi.CiliumOperatorAPI) {
 	s.handler = configureAPI(api)
 }
 
+// GetAPI returns the configured API. Modifications on the API must be performed
+// before server is started.
+func (s *Server) GetAPI() *restapi.CiliumOperatorAPI {
+	return s.api
+}
+
 func (s *Server) hasScheme(scheme string) bool {
 	schemes := s.EnabledListeners
 	if len(schemes) == 0 {
@@ -280,7 +312,7 @@ func (s *Server) Serve() error {
 }
 
 // Start the server
-func (s *Server) Start(hive.HookContext) (err error) {
+func (s *Server) Start(cell.HookContext) (err error) {
 	s.ConfigureAPI()
 
 	if !s.hasListeners {
@@ -541,7 +573,7 @@ func (s *Server) Shutdown() error {
 	return s.Stop(ctx)
 }
 
-func (s *Server) Stop(ctx hive.HookContext) error {
+func (s *Server) Stop(ctx cell.HookContext) error {
 	// first execute the pre-shutdown hook
 	s.api.PreServerShutdown()
 

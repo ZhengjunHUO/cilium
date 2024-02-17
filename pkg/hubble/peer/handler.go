@@ -4,11 +4,8 @@
 package peer
 
 import (
-	"context"
-	"net"
 	"strings"
 
-	"github.com/cilium/cilium/api/v1/models"
 	peerpb "github.com/cilium/cilium/api/v1/peer"
 	datapath "github.com/cilium/cilium/pkg/datapath/types"
 	ciliumDefaults "github.com/cilium/cilium/pkg/defaults"
@@ -38,6 +35,10 @@ func newHandler(withoutTLSInfo bool, addressPref serviceoption.AddressFamilyPref
 		tls:         !withoutTLSInfo,
 		addressPref: addressPref,
 	}
+}
+
+func (h *handler) Name() string {
+	return "hubble-peer"
 }
 
 // Ensure that Service implements the NodeHandler interface so that it can be
@@ -96,6 +97,10 @@ func (h *handler) NodeDelete(n types.Node) error {
 	return nil
 }
 
+// AllNodeValidateImplementation implements
+func (h handler) AllNodeValidateImplementation() {
+}
+
 // NodeValidateImplementation implements
 // datapath.NodeHandler.NodeValidateImplementation. It is a no-op.
 func (h handler) NodeValidateImplementation(_ types.Node) error {
@@ -110,43 +115,9 @@ func (h handler) NodeConfigurationChanged(_ datapath.LocalNodeConfiguration) err
 	return nil
 }
 
-// NodeNeighDiscoveryEnabled implements
-// datapath.NodeHandler.NodeNeighDiscoveryEnabled. It is a no-op.
-func (h handler) NodeNeighDiscoveryEnabled() bool {
-	// no-op
-	return false
-}
-
-// NodeNeighborRefresh implements
-// datapath.NodeHandler.NodeNeighborRefresh. It is a no-op.
-func (h handler) NodeNeighborRefresh(_ context.Context, _ types.Node) {
-	// no-op
-	return
-}
-
-func (h handler) NodeCleanNeighbors(migrateOnly bool) {
-	// no-op
-	return
-}
-
 // Close frees handler resources.
 func (h *handler) Close() {
 	close(h.stop)
-}
-
-func (h *handler) AllocateNodeID(_ net.IP) uint16 {
-	// no-op
-	return 0
-}
-
-func (h *handler) DumpNodeIDs() []*models.NodeID {
-	// no-op
-	return nil
-}
-
-func (h *handler) RestoreNodeIDs() {
-	// no-op
-	return
 }
 
 // newChangeNotification creates a new change notification with the provided

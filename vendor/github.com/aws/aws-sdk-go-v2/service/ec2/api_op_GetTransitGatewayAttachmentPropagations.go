@@ -38,14 +38,12 @@ type GetTransitGatewayAttachmentPropagationsInput struct {
 
 	// Checks whether you have the required permissions for the action, without
 	// actually making the request, and provides an error response. If you have the
-	// required permissions, the error response is DryRunOperation. Otherwise, it is
-	// UnauthorizedOperation.
+	// required permissions, the error response is DryRunOperation . Otherwise, it is
+	// UnauthorizedOperation .
 	DryRun *bool
 
 	// One or more filters. The possible values are:
-	//
-	// * transit-gateway-route-table-id
-	// - The ID of the transit gateway route table.
+	//   - transit-gateway-route-table-id - The ID of the transit gateway route table.
 	Filters []types.Filter
 
 	// The maximum number of results to return with a single call. To retrieve the
@@ -74,12 +72,22 @@ type GetTransitGatewayAttachmentPropagationsOutput struct {
 }
 
 func (c *Client) addOperationGetTransitGatewayAttachmentPropagationsMiddlewares(stack *middleware.Stack, options Options) (err error) {
+	if err := stack.Serialize.Add(&setOperationInputMiddleware{}, middleware.After); err != nil {
+		return err
+	}
 	err = stack.Serialize.Add(&awsEc2query_serializeOpGetTransitGatewayAttachmentPropagations{}, middleware.After)
 	if err != nil {
 		return err
 	}
 	err = stack.Deserialize.Add(&awsEc2query_deserializeOpGetTransitGatewayAttachmentPropagations{}, middleware.After)
 	if err != nil {
+		return err
+	}
+	if err := addProtocolFinalizerMiddlewares(stack, options, "GetTransitGatewayAttachmentPropagations"); err != nil {
+		return fmt.Errorf("add protocol finalizers: %v", err)
+	}
+
+	if err = addlegacyEndpointContextSetter(stack, options); err != nil {
 		return err
 	}
 	if err = addSetLoggerMiddleware(stack, options); err != nil {
@@ -100,16 +108,13 @@ func (c *Client) addOperationGetTransitGatewayAttachmentPropagationsMiddlewares(
 	if err = addRetryMiddlewares(stack, options); err != nil {
 		return err
 	}
-	if err = addHTTPSignerV4Middleware(stack, options); err != nil {
-		return err
-	}
 	if err = awsmiddleware.AddRawResponseToMetadata(stack); err != nil {
 		return err
 	}
 	if err = awsmiddleware.AddRecordResponseTiming(stack); err != nil {
 		return err
 	}
-	if err = addClientUserAgent(stack); err != nil {
+	if err = addClientUserAgent(stack, options); err != nil {
 		return err
 	}
 	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
@@ -118,10 +123,16 @@ func (c *Client) addOperationGetTransitGatewayAttachmentPropagationsMiddlewares(
 	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
 		return err
 	}
+	if err = addSetLegacyContextSigningOptionsMiddleware(stack); err != nil {
+		return err
+	}
 	if err = addOpGetTransitGatewayAttachmentPropagationsValidationMiddleware(stack); err != nil {
 		return err
 	}
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opGetTransitGatewayAttachmentPropagations(options.Region), middleware.Before); err != nil {
+		return err
+	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
@@ -133,19 +144,22 @@ func (c *Client) addOperationGetTransitGatewayAttachmentPropagationsMiddlewares(
 	if err = addRequestResponseLogging(stack, options); err != nil {
 		return err
 	}
+	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
+		return err
+	}
 	return nil
 }
 
-// GetTransitGatewayAttachmentPropagationsAPIClient is a client that implements the
-// GetTransitGatewayAttachmentPropagations operation.
+// GetTransitGatewayAttachmentPropagationsAPIClient is a client that implements
+// the GetTransitGatewayAttachmentPropagations operation.
 type GetTransitGatewayAttachmentPropagationsAPIClient interface {
 	GetTransitGatewayAttachmentPropagations(context.Context, *GetTransitGatewayAttachmentPropagationsInput, ...func(*Options)) (*GetTransitGatewayAttachmentPropagationsOutput, error)
 }
 
 var _ GetTransitGatewayAttachmentPropagationsAPIClient = (*Client)(nil)
 
-// GetTransitGatewayAttachmentPropagationsPaginatorOptions is the paginator options
-// for GetTransitGatewayAttachmentPropagations
+// GetTransitGatewayAttachmentPropagationsPaginatorOptions is the paginator
+// options for GetTransitGatewayAttachmentPropagations
 type GetTransitGatewayAttachmentPropagationsPaginatorOptions struct {
 	// The maximum number of results to return with a single call. To retrieve the
 	// remaining results, make another call with the returned nextToken value.
@@ -234,7 +248,6 @@ func newServiceMetadataMiddleware_opGetTransitGatewayAttachmentPropagations(regi
 	return &awsmiddleware.RegisterServiceMetadata{
 		Region:        region,
 		ServiceID:     ServiceID,
-		SigningName:   "ec2",
 		OperationName: "GetTransitGatewayAttachmentPropagations",
 	}
 }

@@ -7,19 +7,18 @@ import (
 	"context"
 	"net/netip"
 	"sync"
-	"time"
 
 	"github.com/cilium/cilium/pkg/endpoint"
 	"github.com/cilium/cilium/pkg/endpoint/regeneration"
-	"github.com/cilium/cilium/pkg/hive"
 	"github.com/cilium/cilium/pkg/hive/cell"
 	"github.com/cilium/cilium/pkg/identity/cache"
 	"github.com/cilium/cilium/pkg/ipcache"
 	"github.com/cilium/cilium/pkg/k8s/client"
-	"github.com/cilium/cilium/pkg/k8s/watchers"
-	"github.com/cilium/cilium/pkg/k8s/watchers/subscriber"
+	"github.com/cilium/cilium/pkg/metrics"
+	"github.com/cilium/cilium/pkg/node"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/policy"
+	"github.com/cilium/cilium/pkg/time"
 )
 
 // Cell provides the EndpointManager which maintains the collection of locally
@@ -32,6 +31,7 @@ var Cell = cell.Module(
 
 	cell.Config(defaultEndpointManagerConfig),
 	cell.Provide(newDefaultEndpointManager),
+	cell.ProvidePrivate(newEndpointSynchronizer),
 )
 
 type EndpointsLookup interface {
@@ -41,8 +41,8 @@ type EndpointsLookup interface {
 	// LookupCiliumID looks up endpoint by endpoint ID
 	LookupCiliumID(id uint16) *endpoint.Endpoint
 
-	// LookupContainerID looks up endpoint by container ID
-	LookupContainerID(id string) *endpoint.Endpoint
+	// LookupCNIAttachmentID looks up endpoint by CNI attachment ID
+	LookupCNIAttachmentID(id string) *endpoint.Endpoint
 
 	// LookupIPv4 looks up endpoint by IPv4 address
 	LookupIPv4(ipv4 string) *endpoint.Endpoint
@@ -53,8 +53,14 @@ type EndpointsLookup interface {
 	// LookupIP looks up endpoint by IP address
 	LookupIP(ip netip.Addr) (ep *endpoint.Endpoint)
 
-	// LookupPodName looks up endpoint by namespace + pod name, e.g. "prod/pod-0"
-	LookupPodName(name string) *endpoint.Endpoint
+	// LookupCEPName looks up endpoints by namespace + cep name, e.g. "prod/cep-0"
+	LookupCEPName(name string) (ep *endpoint.Endpoint)
+
+	// GetEndpointsByPodName looks up endpoints by namespace + pod name, e.g. "prod/pod-0"
+	GetEndpointsByPodName(name string) []*endpoint.Endpoint
+
+	// GetEndpointsByContainerID looks up endpoints by container ID
+	GetEndpointsByContainerID(containerID string) []*endpoint.Endpoint
 
 	// GetEndpoints returns a slice of all endpoints present in endpoint manager.
 	GetEndpoints() []*endpoint.Endpoint
@@ -67,11 +73,30 @@ type EndpointsLookup interface {
 
 	// HostEndpointExists returns true if the host endpoint exists.
 	HostEndpointExists() bool
+
+	// GetIngressEndpoint returns the ingress endpoint.
+	GetIngressEndpoint() *endpoint.Endpoint
+
+	// IngressEndpointExists returns true if the ingress endpoint exists.
+	IngressEndpointExists() bool
 }
 
 type EndpointsModify interface {
 	// AddEndpoint takes the prepared endpoint object and starts managing it.
 	AddEndpoint(owner regeneration.Owner, ep *endpoint.Endpoint, reason string) (err error)
+
+	// AddIngressEndpoint creates an Endpoint representing Cilium Ingress on this node without a
+	// corresponding container necessarily existing. This is needed to be able to ingest and
+	// sync network policies applicable to Cilium Ingress to Envoy.
+	AddIngressEndpoint(
+		ctx context.Context,
+		owner regeneration.Owner,
+		policyGetter policyRepoGetter,
+		ipcache *ipcache.IPCache,
+		proxy endpoint.EndpointProxy,
+		allocator cache.IdentityAllocator,
+		reason string,
+	) error
 
 	AddHostEndpoint(
 		ctx context.Context,
@@ -101,12 +126,7 @@ type EndpointsModify interface {
 type EndpointManager interface {
 	EndpointsLookup
 	EndpointsModify
-	subscriber.Node
 	EndpointResourceSynchronizer
-
-	// InitMetrics hooks the EndpointManager into the metrics subsystem. This can
-	// only be done once, globally, otherwise the metrics library will panic.
-	InitMetrics()
 
 	// Subscribe to endpoint events.
 	Subscribe(s Subscriber)
@@ -153,6 +173,13 @@ type EndpointManager interface {
 	CallbackForEndpointsAtPolicyRev(ctx context.Context, rev uint64, done func(time.Time)) error
 }
 
+// EndpointResourceSynchronizer is an interface which synchronizes CiliumEndpoint
+// resources with Kubernetes.
+type EndpointResourceSynchronizer interface {
+	RunK8sCiliumEndpointSync(ep *endpoint.Endpoint, conf endpoint.EndpointStatusConfiguration, hr cell.HealthReporter)
+	DeleteK8sCiliumEndpointSync(e *endpoint.Endpoint)
+}
+
 var (
 	_ EndpointsLookup = &endpointManager{}
 	_ EndpointsModify = &endpointManager{}
@@ -162,9 +189,13 @@ var (
 type endpointManagerParams struct {
 	cell.In
 
-	Lifecycle hive.Lifecycle
-	Config    EndpointManagerConfig
-	Clientset client.Clientset
+	Lifecycle       cell.Lifecycle
+	Config          EndpointManagerConfig
+	Clientset       client.Clientset
+	MetricsRegistry *metrics.Registry
+	Scope           cell.Scope
+	EPSynchronizer  EndpointResourceSynchronizer
+	LocalNodeStore  *node.LocalNodeStore
 }
 
 type endpointManagerOut struct {
@@ -178,15 +209,15 @@ type endpointManagerOut struct {
 func newDefaultEndpointManager(p endpointManagerParams) endpointManagerOut {
 	checker := endpoint.CheckHealth
 
-	mgr := New(&watchers.EndpointSynchronizer{Clientset: p.Clientset})
+	mgr := New(p.EPSynchronizer, p.LocalNodeStore, p.Scope)
 	if p.Config.EndpointGCInterval > 0 {
 		ctx, cancel := context.WithCancel(context.Background())
-		p.Lifecycle.Append(hive.Hook{
-			OnStart: func(hive.HookContext) error {
+		p.Lifecycle.Append(cell.Hook{
+			OnStart: func(cell.HookContext) error {
 				mgr.WithPeriodicEndpointGC(ctx, checker, p.Config.EndpointGCInterval)
 				return nil
 			},
-			OnStop: func(hive.HookContext) error {
+			OnStop: func(cell.HookContext) error {
 				cancel()
 				mgr.controllers.RemoveAllAndWait()
 				return nil
@@ -194,11 +225,21 @@ func newDefaultEndpointManager(p endpointManagerParams) endpointManagerOut {
 		})
 	}
 
-	mgr.InitMetrics()
+	mgr.InitMetrics(p.MetricsRegistry)
 
 	return endpointManagerOut{
 		Lookup:  mgr,
 		Modify:  mgr,
 		Manager: mgr,
 	}
+}
+
+type endpointSynchronizerParams struct {
+	cell.In
+
+	Clientset client.Clientset
+}
+
+func newEndpointSynchronizer(p endpointSynchronizerParams) EndpointResourceSynchronizer {
+	return &EndpointSynchronizer{Clientset: p.Clientset}
 }

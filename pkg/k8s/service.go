@@ -6,6 +6,7 @@ package k8s
 import (
 	"context"
 	"fmt"
+	"maps"
 	"net"
 	"net/url"
 	"strings"
@@ -16,7 +17,6 @@ import (
 	"github.com/cilium/cilium/pkg/annotation"
 	"github.com/cilium/cilium/pkg/cidr"
 	cmtypes "github.com/cilium/cilium/pkg/clustermesh/types"
-	"github.com/cilium/cilium/pkg/comparator"
 	"github.com/cilium/cilium/pkg/datapath/types"
 	"github.com/cilium/cilium/pkg/ip"
 	slim_corev1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/core/v1"
@@ -69,11 +69,12 @@ func getAnnotationServiceAffinity(svc *slim_corev1.Service) string {
 }
 
 func getAnnotationTopologyAwareHints(svc *slim_corev1.Service) bool {
-	if value, ok := svc.ObjectMeta.Annotations[v1.AnnotationTopologyAwareHints]; ok {
-		return strings.ToLower(value) == "auto"
+	// v1.DeprecatedAnnotationTopologyAwareHints has precedence over v1.AnnotationTopologyMode.
+	value, ok := svc.ObjectMeta.Annotations[v1.DeprecatedAnnotationTopologyAwareHints]
+	if !ok {
+		value = svc.ObjectMeta.Annotations[v1.AnnotationTopologyMode]
 	}
-
-	return false
+	return !(value == "" || value == "disabled" || value == "Disabled")
 }
 
 // isValidServiceFrontendIP returns true if the provided service frontend IP address type
@@ -110,15 +111,12 @@ func ParseService(svc *slim_corev1.Service, nodeAddressing types.NodeAddressing)
 	switch svc.Spec.Type {
 	case slim_corev1.ServiceTypeClusterIP:
 		svcType = loadbalancer.SVCTypeClusterIP
-		break
 
 	case slim_corev1.ServiceTypeNodePort:
 		svcType = loadbalancer.SVCTypeNodePort
-		break
 
 	case slim_corev1.ServiceTypeLoadBalancer:
 		svcType = loadbalancer.SVCTypeLoadBalancer
-		break
 
 	case slim_corev1.ServiceTypeExternalName:
 		// External-name services must be ignored
@@ -155,17 +153,16 @@ func ParseService(svc *slim_corev1.Service, nodeAddressing types.NodeAddressing)
 
 	var extTrafficPolicy loadbalancer.SVCTrafficPolicy
 	switch svc.Spec.ExternalTrafficPolicy {
-	case slim_corev1.ServiceExternalTrafficPolicyTypeLocal:
+	case slim_corev1.ServiceExternalTrafficPolicyLocal:
 		extTrafficPolicy = loadbalancer.SVCTrafficPolicyLocal
 	default:
 		extTrafficPolicy = loadbalancer.SVCTrafficPolicyCluster
 	}
 
 	var intTrafficPolicy loadbalancer.SVCTrafficPolicy
-	switch svc.Spec.InternalTrafficPolicy {
-	case slim_corev1.ServiceInternalTrafficPolicyTypeLocal:
+	if svc.Spec.InternalTrafficPolicy != nil && *svc.Spec.InternalTrafficPolicy == slim_corev1.ServiceInternalTrafficPolicyLocal {
 		intTrafficPolicy = loadbalancer.SVCTrafficPolicyLocal
-	default:
+	} else {
 		intTrafficPolicy = loadbalancer.SVCTrafficPolicyCluster
 	}
 
@@ -660,9 +657,9 @@ func (s *Service) EqualsClusterService(svc *serviceStore.ClusterService) bool {
 		len(s.K8sExternalIPs) == 0 &&
 		len(s.LoadBalancerIPs) == 0 &&
 		len(s.LoadBalancerSourceRanges) == 0 &&
-		comparator.MapStringEquals(s.Labels, svc.Labels) &&
-		comparator.MapStringEquals(s.Selector, svc.Selector) &&
-		s.SessionAffinity == false &&
+		maps.Equal(s.Labels, svc.Labels) &&
+		maps.Equal(s.Selector, svc.Selector) &&
+		!s.SessionAffinity &&
 		s.SessionAffinityTimeoutSec == 0 &&
 		s.Type == loadbalancer.SVCTypeClusterIP {
 
@@ -689,9 +686,10 @@ type ServiceIPGetter interface {
 }
 
 // CreateCustomDialer returns a custom dialer that picks the service IP,
-// from the given ServiceIPGetter, if the address the used to dial is a k8s
-// service.
-func CreateCustomDialer(b ServiceIPGetter, log *logrus.Entry) func(ctx context.Context, addr string) (conn net.Conn, e error) {
+// from the given ServiceIPGetter, if the address used to dial is a k8s
+// service. If verboseLogs is set, a log message is output when the
+// address to service IP translation fails.
+func CreateCustomDialer(b ServiceIPGetter, log logrus.FieldLogger, verboseLogs bool) func(ctx context.Context, addr string) (conn net.Conn, e error) {
 	return func(ctx context.Context, s string) (conn net.Conn, e error) {
 		// If the service is available, do the service translation to
 		// the service IP. Otherwise dial with the original service
@@ -713,19 +711,20 @@ func CreateCustomDialer(b ServiceIPGetter, log *logrus.Entry) func(ctx context.C
 				svcIP := b.GetServiceIP(*svc)
 				if svcIP != nil {
 					s = svcIP.String()
-				} else {
+				} else if verboseLogs {
 					log.Debug("Service not found in the service IP getter")
 				}
-			} else {
+			} else if verboseLogs {
 				log.WithFields(logrus.Fields{
 					"url-host": u.Host,
 					"url":      s,
 				}).Debug("Unable to parse etcd service URL into a service ID")
 			}
-			log.Debugf("custom dialer based on k8s service backend is dialing to %q", s)
-		} else {
+		} else if verboseLogs {
 			log.WithError(err).Error("Unable to parse etcd service URL")
 		}
-		return net.Dial("tcp", s)
+
+		log.Debugf("Custom dialer based on k8s service backend is dialing to %q", s)
+		return (&net.Dialer{}).DialContext(ctx, "tcp", s)
 	}
 }

@@ -15,13 +15,17 @@ import (
 	"syscall"
 	"unsafe"
 
-	"github.com/miekg/dns"
+	"github.com/cilium/dns"
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
 	"golang.org/x/sys/unix"
 
+	"github.com/cilium/cilium/pkg/datapath/linux/linux_defaults"
+	"github.com/cilium/cilium/pkg/fqdn/proxy/ipfamily"
 	"github.com/cilium/cilium/pkg/option"
 )
+
+const pseudoHeaderLength = 40
 
 // This is the required size of the OOB buffer to pass to ReadMsgUDP.
 var udpOOBSize = func() int {
@@ -30,14 +34,32 @@ var udpOOBSize = func() int {
 	return int(unsafe.Sizeof(hdr) + unsafe.Sizeof(addr))
 }()
 
+// Set up new SessionUDPFactory with dedicated raw socket for sending responses.
+//   - Must use a raw UDP socket for sending responses so that we can send
+//     from a specific port without binding to it.
+//   - The raw UDP socket must be bound to a specific IP address to prevent
+//     it receiving ALL UDP packets on the host.
+//   - We use oob data to override the source IP address when sending
+//   - Must use separate sockets for IPv4/IPv6, as sending to a v6-mapped
+//     v4 address from a socket bound to "::1" does not work due to kernel
+//     checking that a route exists from the source address before
+//     the source address is replaced with the (transparently) changed one
+func NewSessionUDPFactory(ipFamily ipfamily.IPFamily) (dns.SessionUDPFactory, error) {
+	rawResponseConn, err := bindResponseUDPConnection(ipFamily)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open raw UDP %s socket for DNS Proxy: %w", ipFamily.Name, err)
+	}
+
+	return &sessionUDPFactory{rawResponseConn: rawResponseConn}, nil
+}
+
 type sessionUDPFactory struct {
 	// A pool for UDP message buffers.
 	udpPool sync.Pool
 
-	// ipv4Enabled and ipv6Enabled are used when setting up the proxy sockets
-	// later, and determine if we bind to 127.0.0.1 and ::1, respectively.
-	// See sessionUDPFactory.SetSocketOptions
-	ipv4Enabled, ipv6Enabled bool
+	// rawResponseConn is used to send the response
+	// See sessionUDP.WriteResponse
+	rawResponseConn *net.IPConn
 }
 
 // sessionUDP implements the dns.SessionUDP, holding the remote address and the associated
@@ -51,41 +73,29 @@ type sessionUDP struct {
 	oob   []byte
 }
 
-var rawconn4 *net.IPConn // raw socket for sending IPv4
-var rawconn6 *net.IPConn // raw socket for sending IPv6
-
 // Set the socket options needed for tranparent proxying for the listening socket
 // IP(V6)_TRANSPARENT allows socket to receive packets with any destination address/port
 // IP(V6)_RECVORIGDSTADDR tells the kernel to pass the original destination address/port on recvmsg
-// The socket may be receiving both IPv4 and IPv6 data, so set both options, if enabled.
-func transparentSetsockopt(fd int, ipv4, ipv6 bool) error {
-	if ipv6 {
-		if err := unix.SetsockoptInt(fd, unix.SOL_IPV6, unix.IPV6_TRANSPARENT, 1); err != nil {
-			return fmt.Errorf("setsockopt(IPV6_TRANSPARENT) failed: %w", err)
-		}
-		if err := unix.SetsockoptInt(fd, unix.SOL_IPV6, unix.IPV6_RECVORIGDSTADDR, 1); err != nil {
-			return fmt.Errorf("setsockopt(IPV6_RECVORIGDSTADDR) failed: %w", err)
-		}
+// By design, a socket of a DNS Server can only receive IPv4 or IPv6 traffic.
+func transparentSetsockopt(fd int, ipFamily ipfamily.IPFamily) error {
+	if err := unix.SetsockoptInt(fd, ipFamily.SocketOptsFamily, ipFamily.SocketOptsTransparent, 1); err != nil {
+		return fmt.Errorf("setsockopt(IP_TRANSPARENT) for %s failed: %w", ipFamily.Name, err)
 	}
-	if ipv4 {
-		if err := unix.SetsockoptInt(fd, unix.SOL_IP, unix.IP_TRANSPARENT, 1); err != nil {
-			return fmt.Errorf("setsockopt(IP_TRANSPARENT) failed: %w", err)
-		}
-		if err := unix.SetsockoptInt(fd, unix.SOL_IP, unix.IP_RECVORIGDSTADDR, 1); err != nil {
-			return fmt.Errorf("setsockopt(IP_RECVORIGDSTADDR) failed: %w", err)
-		}
+	if err := unix.SetsockoptInt(fd, ipFamily.SocketOptsFamily, ipFamily.SocketOptsRecvOrigDstAddr, 1); err != nil {
+		return fmt.Errorf("setsockopt(IP_RECVORIGDSTADDR) for %s failed: %w", ipFamily.Name, err)
 	}
+
 	return nil
 }
 
 // listenConfig sets the socket options for the fqdn proxy transparent socket.
 // Note that it is also used for TCP sockets.
-func listenConfig(mark int, ipv4, ipv6 bool) *net.ListenConfig {
+func listenConfig(mark int, ipFamily ipfamily.IPFamily) *net.ListenConfig {
 	return &net.ListenConfig{
-		Control: func(network, address string, c syscall.RawConn) error {
+		Control: func(_, _ string, c syscall.RawConn) error {
 			var opErr error
 			err := c.Control(func(fd uintptr) {
-				if err := transparentSetsockopt(int(fd), ipv4, ipv6); err != nil {
+				if err := transparentSetsockopt(int(fd), ipFamily); err != nil {
 					opErr = err
 					return
 				}
@@ -111,47 +121,23 @@ func listenConfig(mark int, ipv4, ipv6 bool) *net.ListenConfig {
 			}
 
 			return opErr
-		}}
-}
-
-func bindUDP(addr string, ipv4, ipv6 bool) *net.IPConn {
-	// Mark outgoing packets as proxy egress return traffic (0x0b00)
-	conn, err := listenConfig(0xb00, ipv4, ipv6).ListenPacket(context.Background(), "ip:udp", addr)
-	if err != nil {
-		log.WithError(err).Errorf("bindUDP failed for address %s", addr)
-		return nil
+		},
 	}
-	return conn.(*net.IPConn)
 }
 
-// NOTE: udpOnce is used in SetSocketOptions below, but assumes we have a
-// global singleton sessionUDPFactory. This is created in StartDNSProxy in
-// order to have option.Config.EnableIPv{4,6} parsed correctly.
-var udpOnce sync.Once
+func bindResponseUDPConnection(ipFamily ipfamily.IPFamily) (*net.IPConn, error) {
+	// Mark outgoing packets as proxy egress return traffic (0x0b00)
+	conn, err := listenConfig(linux_defaults.MagicMarkEgress, ipFamily).ListenPacket(context.Background(), "ip:udp", ipFamily.Localhost)
+	if err != nil {
+		return nil, fmt.Errorf("failed to bind UDP for address %s: %w", ipFamily.Localhost, err)
+	}
+	return conn.(*net.IPConn), nil
+}
 
 // SetSocketOptions set's up 'conn' to be used with a SessionUDP.
-func (f *sessionUDPFactory) SetSocketOptions(conn *net.UDPConn) error {
-	// Set up the raw socket for sending responses.
-	// - Must use a raw UDP socket for sending responses so that we can send
-	//   from a specific port without binding to it.
-	// - The raw UDP socket must be bound to a specific IP address to prevent
-	//   it receiving ALL UDP packets on the host.
-	// - We use oob data to override the source IP address when sending
-	// - Must use separate sockets for IPv4/IPv6, as sending to a v6-mapped
-	//   v4 address from a socket bound to "::1" does not work due to kernel
-	//   checking that a route exists from the source address before
-	//   the source address is replaced with the (transparently) changed one
-	udpOnce.Do(func() {
-		if f.ipv4Enabled {
-			rawconn4 = bindUDP("127.0.0.1", f.ipv4Enabled, false) // raw socket for sending IPv4
-		}
-		if f.ipv6Enabled {
-			rawconn6 = bindUDP("::1", false, f.ipv6Enabled) // raw socket for sending IPv6
-		}
-	})
-	if (f.ipv4Enabled && rawconn4 == nil) || (f.ipv6Enabled && rawconn6 == nil) {
-		return fmt.Errorf("Unable to open raw UDP sockets for DNS Proxy")
-	}
+func (f *sessionUDPFactory) SetSocketOptions(_ *net.UDPConn) error {
+	// Response connections (IPv4 & IPv6) will be used to response.
+	// They are already properly setup in NewSessionUDPFactory.
 	return nil
 }
 
@@ -207,7 +193,8 @@ func (s *sessionUDP) RemoteAddr() net.Addr { return s.raddr }
 // LocalAddr returns the local network address for the current request.
 func (s *sessionUDP) LocalAddr() net.Addr { return s.laddr }
 
-// WriteResponse writes a response to a request received earlier
+// WriteResponse writes a response to a request received earlier.
+// It uses the raw udp connections (IPv4 or IPv6) from its sessionUDPFactory.
 func (s *sessionUDP) WriteResponse(b []byte) (int, error) {
 	// Must give the UDP header to get the source port right.
 	// Reuse the msg buffer, figure out if golang can do gatter-scather IO
@@ -221,16 +208,19 @@ func (s *sessionUDP) WriteResponse(b []byte) (int, error) {
 	bb.Write(b)
 	buf := bb.Bytes()
 
+	// A UDP checksum is required for IPv6
+	if s.raddr.IP.To4() == nil {
+		// Compute the UDP the checksum
+		binary.BigEndian.PutUint16(buf[6:8], computeIPv6Checksum(s.laddr.IP, s.raddr.IP, buf))
+	}
+
 	var n int
 	var err error
 	dst := net.IPAddr{
 		IP: s.raddr.IP,
 	}
-	if s.raddr.IP.To4() == nil {
-		n, _, err = rawconn6.WriteMsgIP(buf, s.controlMessage(s.laddr), &dst)
-	} else {
-		n, _, err = rawconn4.WriteMsgIP(buf, s.controlMessage(s.laddr), &dst)
-	}
+
+	n, _, err = s.f.rawResponseConn.WriteMsgIP(buf, s.controlMessage(s.laddr), &dst)
 	if err != nil {
 		log.WithError(err).Warning("WriteMsgIP failed")
 	} else {
@@ -252,7 +242,7 @@ func parseDstFromOOB(oob []byte) (*net.UDPAddr, error) {
 			// Address family is in native byte order
 			family := *(*uint16)(unsafe.Pointer(&msg.Data[unsafe.Offsetof(pp.Family)]))
 			if family != unix.AF_INET {
-				return nil, fmt.Errorf("original destination is not IPv4.")
+				return nil, fmt.Errorf("original destination is not IPv4")
 			}
 			// Port is in big-endian byte order
 			if err = binary.Read(bytes.NewReader(msg.Data), binary.BigEndian, pp); err != nil {
@@ -269,7 +259,7 @@ func parseDstFromOOB(oob []byte) (*net.UDPAddr, error) {
 			// Address family is in native byte order
 			family := *(*uint16)(unsafe.Pointer(&msg.Data[unsafe.Offsetof(pp.Family)]))
 			if family != unix.AF_INET6 {
-				return nil, fmt.Errorf("original destination is not IPv6.")
+				return nil, fmt.Errorf("original destination is not IPv6")
 			}
 			// Scope ID is in native byte order
 			scopeId := *(*uint32)(unsafe.Pointer(&msg.Data[unsafe.Offsetof(pp.Scope_id)]))
@@ -285,10 +275,10 @@ func parseDstFromOOB(oob []byte) (*net.UDPAddr, error) {
 			return laddr, nil
 		}
 	}
-	return nil, fmt.Errorf("No original destination found!")
+	return nil, fmt.Errorf("no original destination found")
 }
 
-// correctSource returns the oob data with the given source address
+// controlMessage returns the oob data with the given source address
 func (s *sessionUDP) controlMessage(src *net.UDPAddr) []byte {
 	// If the src is definitely an IPv6, then use ipv6's ControlMessage to
 	// respond otherwise use ipv4's because ipv6's marshal ignores ipv4
@@ -301,4 +291,58 @@ func (s *sessionUDP) controlMessage(src *net.UDPAddr) []byte {
 	cm := new(ipv4.ControlMessage)
 	cm.Src = src.IP
 	return cm.Marshal()
+}
+
+// computeIPv6Checksum computes and returns a checksum from the given src/dest IPs
+// and UDP header with a payload.
+func computeIPv6Checksum(srcIP, dstIP net.IP, udpHeaderWithPayload []byte) uint16 {
+	pseudoHeader := genIPv6PseudoHeader(srcIP, dstIP, len(udpHeaderWithPayload))
+	packet := append(pseudoHeader, udpHeaderWithPayload...)
+	checksum := computeChecksum(packet)
+	return checksum
+}
+
+// genIPv6PseudoHeader generates and returns an IPv6 pseudo-header used for calculating
+// the checksum of a UDP packet.
+func genIPv6PseudoHeader(srcIP, dstIP net.IP, headerAndPayloadSize int) []byte {
+	header := make([]byte, pseudoHeaderLength)
+	// Source address
+	copy(header[0:], srcIP)
+	// Destination address
+	copy(header[16:], dstIP)
+	// Payload length (16-bit field)
+	binary.BigEndian.PutUint16(header[32:34], uint16(headerAndPayloadSize))
+	if headerAndPayloadSize != 0 {
+		// Next header (UDP)
+		header[39] = 0x11
+	}
+	return header
+}
+
+// computeChecksum computes and returns a checksum for the given packet represented as
+// a byte slice.
+func computeChecksum(packet []byte) uint16 {
+	sum := uint32(0)
+
+	for ; len(packet) >= 2; packet = packet[2:] {
+		sum += uint32(packet[0])<<8 | uint32(packet[1])
+	}
+	if len(packet) > 0 {
+		sum += uint32(packet[0]) << 8
+	}
+	for sum > 0xffff {
+		sum = (sum >> 16) + (sum & 0xffff)
+	}
+	csum := ^uint16(sum)
+	/*
+	 * From RFC 768:
+	 * If the computed checksum is zero, it is transmitted as all ones (the
+	 * equivalent in one's complement arithmetic). An all zero transmitted
+	 * checksum value means that the transmitter generated no checksum (for
+	 * debugging or for higher level protocols that don't care).
+	 */
+	if csum == 0 {
+		csum = 0xffff
+	}
+	return csum
 }

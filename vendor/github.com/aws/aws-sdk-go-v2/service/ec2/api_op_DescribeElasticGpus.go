@@ -4,6 +4,7 @@ package ec2
 
 import (
 	"context"
+	"fmt"
 	awsmiddleware "github.com/aws/aws-sdk-go-v2/aws/middleware"
 	"github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
@@ -11,9 +12,12 @@ import (
 	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
-// Describes the Elastic Graphics accelerator associated with your instances. For
-// more information about Elastic Graphics, see Amazon Elastic Graphics
-// (https://docs.aws.amazon.com/AWSEC2/latest/WindowsGuide/elastic-graphics.html).
+// Amazon Elastic Graphics reached end of life on January 8, 2024. For workloads
+// that require graphics acceleration, we recommend that you use Amazon EC2 G4ad,
+// G4dn, or G5 instances. Describes the Elastic Graphics accelerator associated
+// with your instances. For more information about Elastic Graphics, see Amazon
+// Elastic Graphics (https://docs.aws.amazon.com/AWSEC2/latest/WindowsGuide/elastic-graphics.html)
+// .
 func (c *Client) DescribeElasticGpus(ctx context.Context, params *DescribeElasticGpusInput, optFns ...func(*Options)) (*DescribeElasticGpusOutput, error) {
 	if params == nil {
 		params = &DescribeElasticGpusInput{}
@@ -33,29 +37,24 @@ type DescribeElasticGpusInput struct {
 
 	// Checks whether you have the required permissions for the action, without
 	// actually making the request, and provides an error response. If you have the
-	// required permissions, the error response is DryRunOperation. Otherwise, it is
-	// UnauthorizedOperation.
+	// required permissions, the error response is DryRunOperation . Otherwise, it is
+	// UnauthorizedOperation .
 	DryRun *bool
 
 	// The Elastic Graphics accelerator IDs.
 	ElasticGpuIds []string
 
 	// The filters.
-	//
-	// * availability-zone - The Availability Zone in which the Elastic
-	// Graphics accelerator resides.
-	//
-	// * elastic-gpu-health - The status of the Elastic
-	// Graphics accelerator (OK | IMPAIRED).
-	//
-	// * elastic-gpu-state - The state of the
-	// Elastic Graphics accelerator (ATTACHED).
-	//
-	// * elastic-gpu-type - The type of
-	// Elastic Graphics accelerator; for example, eg1.medium.
-	//
-	// * instance-id - The ID
-	// of the instance to which the Elastic Graphics accelerator is associated.
+	//   - availability-zone - The Availability Zone in which the Elastic Graphics
+	//   accelerator resides.
+	//   - elastic-gpu-health - The status of the Elastic Graphics accelerator ( OK |
+	//   IMPAIRED ).
+	//   - elastic-gpu-state - The state of the Elastic Graphics accelerator ( ATTACHED
+	//   ).
+	//   - elastic-gpu-type - The type of Elastic Graphics accelerator; for example,
+	//   eg1.medium .
+	//   - instance-id - The ID of the instance to which the Elastic Graphics
+	//   accelerator is associated.
 	Filters []types.Filter
 
 	// The maximum number of results to return in a single call. To retrieve the
@@ -90,12 +89,22 @@ type DescribeElasticGpusOutput struct {
 }
 
 func (c *Client) addOperationDescribeElasticGpusMiddlewares(stack *middleware.Stack, options Options) (err error) {
+	if err := stack.Serialize.Add(&setOperationInputMiddleware{}, middleware.After); err != nil {
+		return err
+	}
 	err = stack.Serialize.Add(&awsEc2query_serializeOpDescribeElasticGpus{}, middleware.After)
 	if err != nil {
 		return err
 	}
 	err = stack.Deserialize.Add(&awsEc2query_deserializeOpDescribeElasticGpus{}, middleware.After)
 	if err != nil {
+		return err
+	}
+	if err := addProtocolFinalizerMiddlewares(stack, options, "DescribeElasticGpus"); err != nil {
+		return fmt.Errorf("add protocol finalizers: %v", err)
+	}
+
+	if err = addlegacyEndpointContextSetter(stack, options); err != nil {
 		return err
 	}
 	if err = addSetLoggerMiddleware(stack, options); err != nil {
@@ -116,16 +125,13 @@ func (c *Client) addOperationDescribeElasticGpusMiddlewares(stack *middleware.St
 	if err = addRetryMiddlewares(stack, options); err != nil {
 		return err
 	}
-	if err = addHTTPSignerV4Middleware(stack, options); err != nil {
-		return err
-	}
 	if err = awsmiddleware.AddRawResponseToMetadata(stack); err != nil {
 		return err
 	}
 	if err = awsmiddleware.AddRecordResponseTiming(stack); err != nil {
 		return err
 	}
-	if err = addClientUserAgent(stack); err != nil {
+	if err = addClientUserAgent(stack, options); err != nil {
 		return err
 	}
 	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
@@ -134,7 +140,13 @@ func (c *Client) addOperationDescribeElasticGpusMiddlewares(stack *middleware.St
 	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
 		return err
 	}
+	if err = addSetLegacyContextSigningOptionsMiddleware(stack); err != nil {
+		return err
+	}
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opDescribeElasticGpus(options.Region), middleware.Before); err != nil {
+		return err
+	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
@@ -146,6 +158,9 @@ func (c *Client) addOperationDescribeElasticGpusMiddlewares(stack *middleware.St
 	if err = addRequestResponseLogging(stack, options); err != nil {
 		return err
 	}
+	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -153,7 +168,6 @@ func newServiceMetadataMiddleware_opDescribeElasticGpus(region string) *awsmiddl
 	return &awsmiddleware.RegisterServiceMetadata{
 		Region:        region,
 		ServiceID:     ServiceID,
-		SigningName:   "ec2",
 		OperationName: "DescribeElasticGpus",
 	}
 }

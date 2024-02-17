@@ -5,15 +5,16 @@ package cmd
 
 import (
 	"context"
-	"net"
+	"net/netip"
 	"runtime"
 	"time"
 
-	. "gopkg.in/check.v1"
+	. "github.com/cilium/checkmate"
 
 	"github.com/cilium/cilium/api/v1/models"
 	apiEndpoint "github.com/cilium/cilium/api/v1/server/restapi/endpoint"
 	"github.com/cilium/cilium/pkg/checker"
+	"github.com/cilium/cilium/pkg/endpoint"
 	endpointid "github.com/cilium/cilium/pkg/endpoint/id"
 	"github.com/cilium/cilium/pkg/identity"
 	"github.com/cilium/cilium/pkg/ipam"
@@ -23,7 +24,7 @@ import (
 )
 
 func getEPTemplate(c *C, d *Daemon) *models.EndpointChangeRequest {
-	ip4, ip6, err := d.ipam.AllocateNext("", "test", ipam.PoolDefault)
+	ip4, ip6, err := d.ipam.AllocateNext("", "test", ipam.PoolDefault())
 	c.Assert(err, Equals, nil)
 	c.Assert(ip4, Not(IsNil))
 	c.Assert(ip6, Not(IsNil))
@@ -34,6 +35,10 @@ func getEPTemplate(c *C, d *Daemon) *models.EndpointChangeRequest {
 		Addressing: &models.AddressPair{
 			IPV6: ip6.IP.String(),
 			IPV4: ip4.IP.String(),
+		},
+		Properties: map[string]interface{}{
+			endpoint.PropertySkipBPFRegeneration: true,
+			endpoint.PropertyFakeEndpoint:        true,
 		},
 	}
 }
@@ -96,7 +101,9 @@ func (ds *DaemonSuite) TestEndpointAddNoLabels(c *C) {
 		labels.IDNameInit: labels.NewLabel(labels.IDNameInit, "", labels.LabelSourceReserved),
 	}
 	// Check that the endpoint has the reserved:init label.
-	ep, err := ds.d.endpointManager.Lookup(endpointid.NewIPPrefixID(net.ParseIP(epTemplate.Addressing.IPV4)))
+	v4ip, err := netip.ParseAddr(epTemplate.Addressing.IPV4)
+	c.Assert(err, IsNil)
+	ep, err := ds.d.endpointManager.Lookup(endpointid.NewIPPrefixID(v4ip))
 	c.Assert(err, IsNil)
 	c.Assert(ep.OpLabels.IdentityLabels(), checker.DeepEquals, expectedLabels)
 

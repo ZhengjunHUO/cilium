@@ -9,10 +9,12 @@ import (
 	"fmt"
 	"net"
 	"sort"
-	"time"
 
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
+
+	"github.com/cilium/cilium/pkg/datapath/linux/linux_defaults"
+	"github.com/cilium/cilium/pkg/time"
 )
 
 const (
@@ -174,6 +176,7 @@ func createNexthopRoute(route Route, link netlink.Link, routerNet *net.IPNet) *n
 		LinkIndex: link.Attrs().Index,
 		Dst:       routerNet,
 		Table:     route.Table,
+		Protocol:  linux_defaults.RTProto,
 	}
 
 	// Known issue: scope for IPv6 routes is not propagated correctly. If
@@ -236,13 +239,20 @@ func Upsert(route Route) error {
 
 	link, err := netlink.LinkByName(route.Device)
 	if err != nil {
-		return fmt.Errorf("unable to lookup interface %s: %s", route.Device, err)
+		return fmt.Errorf("unable to lookup interface %s: %w", route.Device, err)
+	}
+
+	// Can't add local routes to an interface that's down ('lo' in new netns).
+	if link.Attrs().OperState == netlink.OperDown {
+		if err := netlink.LinkSetUp(link); err != nil {
+			return fmt.Errorf("unable to set interface up: %w", err)
+		}
 	}
 
 	routerNet := route.getNexthopAsIPNet()
 	if routerNet != nil {
 		if _, err := replaceNexthopRoute(route, link, routerNet); err != nil {
-			return fmt.Errorf("unable to add nexthop route: %s", err)
+			return fmt.Errorf("unable to add nexthop route: %w", err)
 		}
 
 		nexthopRouteCreated = true
@@ -264,7 +274,11 @@ func Upsert(route Route) error {
 
 	if err != nil {
 		if nexthopRouteCreated {
-			deleteNexthopRoute(route, link, routerNet)
+			if err2 := deleteNexthopRoute(route, link, routerNet); err2 != nil {
+				// TODO: If this fails, we may want to add some retry logic.
+				log.WithError(err2).
+					Errorf("unable to clean up nexthop route following failure to replace route")
+			}
 		}
 		return err
 	}
@@ -320,6 +334,9 @@ type Rule struct {
 
 	// Table is the routing table to look up if the rule matches
 	Table int
+
+	// Protocol is the routing rule protocol (e.g. proto unspec/kernel)
+	Protocol uint8
 }
 
 // String returns the string representation of a Rule (adhering to the Stringer
@@ -355,6 +372,8 @@ func (r Rule) String() string {
 		str += fmt.Sprintf(" mark 0x%x mask 0x%x", r.Mark, r.Mask)
 	}
 
+	str += fmt.Sprintf(" proto %s", netlink.RouteProtocol(r.Protocol))
+
 	return str
 }
 
@@ -377,6 +396,10 @@ func lookupRule(spec Rule, family int) (bool, error) {
 		}
 
 		if spec.Mark != 0 && r.Mark != spec.Mark {
+			continue
+		}
+
+		if spec.Protocol != 0 && r.Protocol != spec.Protocol {
 			continue
 		}
 
@@ -458,20 +481,12 @@ func replaceRule(spec Rule, family int) error {
 	rule.Priority = spec.Priority
 	rule.Src = spec.From
 	rule.Dst = spec.To
+	rule.Protocol = spec.Protocol
 	return netlink.RuleAdd(rule)
 }
 
 // DeleteRule delete a mark based rule from the routing table.
-func DeleteRule(spec Rule) error {
-	return deleteRule(spec, netlink.FAMILY_V4)
-}
-
-// DeleteRuleIPv6 delete a mark based IPv6 rule from the routing table.
-func DeleteRuleIPv6(spec Rule) error {
-	return deleteRule(spec, netlink.FAMILY_V6)
-}
-
-func deleteRule(spec Rule, family int) error {
+func DeleteRule(family int, spec Rule) error {
 	rule := netlink.NewRule()
 	rule.Mark = spec.Mark
 	rule.Mask = spec.Mask
@@ -480,6 +495,7 @@ func deleteRule(spec Rule, family int) error {
 	rule.Src = spec.From
 	rule.Dst = spec.To
 	rule.Family = family
+	rule.Protocol = spec.Protocol
 	return netlink.RuleDel(rule)
 }
 

@@ -8,11 +8,11 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/cilium/cilium/pkg/container"
 	"github.com/cilium/cilium/pkg/controller"
 	"github.com/cilium/cilium/pkg/lock"
+	"github.com/cilium/cilium/pkg/time"
 )
 
 // Action describes an action for map buffer events.
@@ -27,6 +27,8 @@ const (
 	// to minimize memory and subscription buffer usage.
 	MapDeleteAll
 )
+
+var bpfEventBufferGCControllerGroup = controller.NewGroup("bpf-event-buffer-gc")
 
 // String returns a string representation of an Action.
 func (e Action) String() string {
@@ -92,6 +94,7 @@ func (m *Map) initEventsBuffer(maxSize int, eventsTTL time.Duration) {
 		mapControllers.UpdateController(
 			fmt.Sprintf("bpf-event-buffer-gc-%s", m.name),
 			controller.ControllerParams{
+				Group: bpfEventBufferGCControllerGroup,
 				DoFunc: func(_ context.Context) error {
 					m.scopedLogger().Debugf("clearing bpf map events older than %s", b.eventTTL)
 					b.buffer.Compact(func(e interface{}) bool {
@@ -126,7 +129,7 @@ type eventsBuffer struct {
 // off the buffer (or is not reading off it fast enough).
 type Handle struct {
 	c      chan *Event
-	closed *atomic.Value
+	closed atomic.Bool
 	closer *sync.Once
 	err    error
 }
@@ -151,8 +154,7 @@ func (h *Handle) close(err error) {
 }
 
 func (h *Handle) isClosed() bool {
-	v := h.closed.Load()
-	return v.(bool)
+	return h.closed.Load()
 }
 
 func (h *Handle) isFull() bool {
@@ -196,12 +198,9 @@ func (eb *eventsBuffer) dumpAndSubscribe(callback EventCallbackFunc, follow bool
 		return nil, nil
 	}
 
-	closed := &atomic.Value{}
-	closed.Store(false)
 	h := &Handle{
 		c:      make(chan *Event, eventSubChanBufferSize),
 		closer: &sync.Once{},
-		closed: closed,
 	}
 
 	eb.subsLock.Lock()

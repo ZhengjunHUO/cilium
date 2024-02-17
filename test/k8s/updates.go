@@ -17,6 +17,19 @@ import (
 	"github.com/cilium/cilium/test/helpers"
 )
 
+const (
+	// cluster name and ID are set to provide coverage for changes to
+	// ClusterMesh, including updates to BPF map updates
+	clusterName = "test-upgrade-downgrade"
+	// clusterID of 170(10101010) was chosen to utilize all 8 bits of the
+	// default ClusterID size.
+	// note: It's possible to extend the size of ClusterID by setting
+	// MaxConnectedClusters, however this feature is only available to new
+	// clusters - thus upgrade and downgrade are not possible. Test coverage
+	// for this feature should be added after it is released.
+	clusterID = "170"
+)
+
 var (
 	// These are set in BeforeAll
 	demoPath         string
@@ -102,6 +115,7 @@ var _ = Describe("K8sUpdates", func() {
 	})
 
 	AfterFailed(func() {
+		// TODO(joe): Switch to cilium-dbg after v1.16-dev.
 		kubectl.CiliumReport("cilium endpoint list")
 	})
 
@@ -170,6 +184,8 @@ func InstallAndValidateCiliumUpgrades(kubectl *helpers.Kubectl, oldHelmChartVers
 			"sleepAfterInit":     "true",
 			"operator.enabled":   "false ",
 			"hubble.tls.enabled": "false",
+			"cluster.name":       clusterName,
+			"cluster.id":         clusterID,
 		}
 		if imageName != "" {
 			opts["image.repository"] = imageName
@@ -242,6 +258,8 @@ func InstallAndValidateCiliumUpgrades(kubectl *helpers.Kubectl, oldHelmChartVers
 			"operator.image.repository":              "quay.io/cilium/operator",
 			"hubble.relay.image.repository":          "quay.io/cilium/hubble-relay-ci",
 			"clustermesh.apiserver.image.repository": "quay.io/cilium/clustermesh-apiserver-ci",
+			"cluster.name":                           clusterName,
+			"cluster.id":                             clusterID,
 		}
 
 		hasNewHelmValues := versioncheck.MustCompile(">=1.12.90")
@@ -433,6 +451,8 @@ func InstallAndValidateCiliumUpgrades(kubectl *helpers.Kubectl, oldHelmChartVers
 			"image.tag":              newImageVersion,
 			"operator.image.tag":     newImageVersion,
 			"hubble.relay.image.tag": newImageVersion,
+			"cluster.name":           clusterName,
+			"cluster.id":             clusterID,
 		}
 
 		upgradeCompatibilityVer := strings.TrimSuffix(oldHelmChartVersion, "-dev")

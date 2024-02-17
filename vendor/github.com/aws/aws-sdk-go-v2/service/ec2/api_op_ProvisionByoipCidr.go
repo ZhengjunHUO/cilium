@@ -4,6 +4,7 @@ package ec2
 
 import (
 	"context"
+	"fmt"
 	awsmiddleware "github.com/aws/aws-sdk-go-v2/aws/middleware"
 	"github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
@@ -14,17 +15,16 @@ import (
 // Provisions an IPv4 or IPv6 address range for use with your Amazon Web Services
 // resources through bring your own IP addresses (BYOIP) and creates a
 // corresponding address pool. After the address range is provisioned, it is ready
-// to be advertised using AdvertiseByoipCidr. Amazon Web Services verifies that you
-// own the address range and are authorized to advertise it. You must ensure that
-// the address range is registered to you and that you created an RPKI ROA to
+// to be advertised using AdvertiseByoipCidr . Amazon Web Services verifies that
+// you own the address range and are authorized to advertise it. You must ensure
+// that the address range is registered to you and that you created an RPKI ROA to
 // authorize Amazon ASNs 16509 and 14618 to advertise the address range. For more
-// information, see Bring your own IP addresses (BYOIP)
-// (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-byoip.html) in the
-// Amazon Elastic Compute Cloud User Guide. Provisioning an address range is an
-// asynchronous operation, so the call returns immediately, but the address range
-// is not ready to use until its status changes from pending-provision to
-// provisioned. To monitor the status of an address range, use DescribeByoipCidrs.
-// To allocate an Elastic IP address from your IPv4 address pool, use
+// information, see Bring your own IP addresses (BYOIP) (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-byoip.html)
+// in the Amazon Elastic Compute Cloud User Guide. Provisioning an address range is
+// an asynchronous operation, so the call returns immediately, but the address
+// range is not ready to use until its status changes from pending-provision to
+// provisioned . To monitor the status of an address range, use DescribeByoipCidrs
+// . To allocate an Elastic IP address from your IPv4 address pool, use
 // AllocateAddress with either the specific address from the address pool or the ID
 // of the address pool.
 func (c *Client) ProvisionByoipCidr(ctx context.Context, params *ProvisionByoipCidrInput, optFns ...func(*Options)) (*ProvisionByoipCidrOutput, error) {
@@ -61,12 +61,25 @@ type ProvisionByoipCidrInput struct {
 
 	// Checks whether you have the required permissions for the action, without
 	// actually making the request, and provides an error response. If you have the
-	// required permissions, the error response is DryRunOperation. Otherwise, it is
-	// UnauthorizedOperation.
+	// required permissions, the error response is DryRunOperation . Otherwise, it is
+	// UnauthorizedOperation .
 	DryRun *bool
 
 	// Reserved.
 	MultiRegion *bool
+
+	// If you have Local Zones (https://docs.aws.amazon.com/local-zones/latest/ug/how-local-zones-work.html)
+	// enabled, you can choose a network border group for Local Zones when you
+	// provision and advertise a BYOIPv4 CIDR. Choose the network border group
+	// carefully as the EIP and the Amazon Web Services resource it is associated with
+	// must reside in the same network border group. You can provision BYOIP address
+	// ranges to and advertise them in the following Local Zone network border groups:
+	//   - us-east-1-dfw-2
+	//   - us-west-2-lax-1
+	//   - us-west-2-phx-2
+	// You cannot provision or advertise BYOIPv6 address ranges in Local Zones at this
+	// time.
+	NetworkBorderGroup *string
 
 	// The tags to apply to the address pool.
 	PoolTagSpecifications []types.TagSpecification
@@ -90,12 +103,22 @@ type ProvisionByoipCidrOutput struct {
 }
 
 func (c *Client) addOperationProvisionByoipCidrMiddlewares(stack *middleware.Stack, options Options) (err error) {
+	if err := stack.Serialize.Add(&setOperationInputMiddleware{}, middleware.After); err != nil {
+		return err
+	}
 	err = stack.Serialize.Add(&awsEc2query_serializeOpProvisionByoipCidr{}, middleware.After)
 	if err != nil {
 		return err
 	}
 	err = stack.Deserialize.Add(&awsEc2query_deserializeOpProvisionByoipCidr{}, middleware.After)
 	if err != nil {
+		return err
+	}
+	if err := addProtocolFinalizerMiddlewares(stack, options, "ProvisionByoipCidr"); err != nil {
+		return fmt.Errorf("add protocol finalizers: %v", err)
+	}
+
+	if err = addlegacyEndpointContextSetter(stack, options); err != nil {
 		return err
 	}
 	if err = addSetLoggerMiddleware(stack, options); err != nil {
@@ -116,16 +139,13 @@ func (c *Client) addOperationProvisionByoipCidrMiddlewares(stack *middleware.Sta
 	if err = addRetryMiddlewares(stack, options); err != nil {
 		return err
 	}
-	if err = addHTTPSignerV4Middleware(stack, options); err != nil {
-		return err
-	}
 	if err = awsmiddleware.AddRawResponseToMetadata(stack); err != nil {
 		return err
 	}
 	if err = awsmiddleware.AddRecordResponseTiming(stack); err != nil {
 		return err
 	}
-	if err = addClientUserAgent(stack); err != nil {
+	if err = addClientUserAgent(stack, options); err != nil {
 		return err
 	}
 	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
@@ -134,10 +154,16 @@ func (c *Client) addOperationProvisionByoipCidrMiddlewares(stack *middleware.Sta
 	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
 		return err
 	}
+	if err = addSetLegacyContextSigningOptionsMiddleware(stack); err != nil {
+		return err
+	}
 	if err = addOpProvisionByoipCidrValidationMiddleware(stack); err != nil {
 		return err
 	}
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opProvisionByoipCidr(options.Region), middleware.Before); err != nil {
+		return err
+	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
@@ -149,6 +175,9 @@ func (c *Client) addOperationProvisionByoipCidrMiddlewares(stack *middleware.Sta
 	if err = addRequestResponseLogging(stack, options); err != nil {
 		return err
 	}
+	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -156,7 +185,6 @@ func newServiceMetadataMiddleware_opProvisionByoipCidr(region string) *awsmiddle
 	return &awsmiddleware.RegisterServiceMetadata{
 		Region:        region,
 		ServiceID:     ServiceID,
-		SigningName:   "ec2",
 		OperationName: "ProvisionByoipCidr",
 	}
 }

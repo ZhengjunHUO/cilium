@@ -4,7 +4,6 @@
 #include "common.h"
 #include <bpf/ctx/unspec.h>
 #include <bpf/api.h>
-#include "lib/common.h"
 #include "pktgen.h"
 
 #define ENABLE_IPV4 1
@@ -24,6 +23,9 @@
 #define HOST_NETNS_COOKIE 0
 
 #include "bpf_sock.c"
+#include "lib/common.h"
+
+#include "lib/ipcache.h"
 
 enum {
 	NODEPORT_LOOKUP = 0,
@@ -78,8 +80,6 @@ enum {
 
 static inline void __setup_v4(void)
 {
-	struct remote_endpoint_info cache_value = {};
-	struct ipcache_key cache_key = {};
 	struct { struct lb4_key key; struct lb4_service value; } services[] = {
 		/* Nodeport on HOST_IP */
 		SVC_KEY_VALUE(0, NODEPORT_EXISTS, SVC_FLAG_NODEPORT, 0),
@@ -94,11 +94,7 @@ static inline void __setup_v4(void)
 	};
 	unsigned long i;
 
-	cache_key.lpm_key.prefixlen = IPCACHE_PREFIX_LEN(32);
-	cache_key.family = ENDPOINT_KEY_IPV4;
-	cache_key.ip4 = bpf_htonl(HOST_IP);
-	cache_value.sec_identity = HOST_ID;
-	map_update_elem(&IPCACHE_MAP, &cache_key, &cache_value, BPF_ANY);
+	ipcache_v4_add_entry(bpf_htonl(HOST_IP), 0, HOST_ID, 0, 0);
 
 	for (i = 0; i < ARRAY_SIZE(services); i++)
 		map_update_elem(&LB4_SERVICES_MAP_V2, &services[i].key, &services[i].value,
@@ -123,7 +119,7 @@ int test_v4_check(__maybe_unused struct xdp_md *ctx)
 	test_init();
 
 	TEST("setup", {
-		info = ipcache_lookup4(&IPCACHE_MAP, bpf_htonl(HOST_IP), V4_CACHE_KEY_LEN, 0);
+		info = lookup_ip4_remote_endpoint(bpf_htonl(HOST_IP), 0);
 		assert(info);
 	});
 
@@ -276,14 +272,7 @@ int test_v4_check(__maybe_unused struct xdp_md *ctx)
 
 static inline void __setup_v6_ipcache(const union v6addr *HOST_IP6)
 {
-	struct remote_endpoint_info cache_value = {};
-	struct ipcache_key cache_key = {};
-
-	cache_key.lpm_key.prefixlen = IPCACHE_PREFIX_LEN(128);
-	cache_key.family = ENDPOINT_KEY_IPV6;
-	cache_key.ip6 = *HOST_IP6;
-	cache_value.sec_identity = HOST_ID;
-	map_update_elem(&IPCACHE_MAP, &cache_key, &cache_value, BPF_ANY);
+	ipcache_v6_add_entry(HOST_IP6, 0, HOST_ID, 0, 0);
 }
 
 static inline void __setup_v6_nodeport(const union v6addr *HOST_IP6)
@@ -348,7 +337,7 @@ int test_v6_check(__maybe_unused struct xdp_md *ctx)
 	test_init();
 
 	TEST("setup", {
-		info = ipcache_lookup6(&IPCACHE_MAP, &HOST_IP6, V6_CACHE_KEY_LEN, 0);
+		info = lookup_ip6_remote_endpoint(&HOST_IP6, 0);
 		assert(info);
 	});
 

@@ -29,6 +29,8 @@ import (
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"golang.org/x/sys/unix"
+
+	"github.com/cilium/cilium/pkg/bpf"
 )
 
 var attachTypes = map[string]ebpf.AttachType{
@@ -59,7 +61,7 @@ func attachCgroup(spec *ebpf.Collection, name, cgroupRoot, pinPath string) error
 
 	// Attempt to open and update an existing link.
 	pin := filepath.Join(pinPath, name)
-	err := updateLink(pin, prog)
+	err := bpf.UpdateLink(pin, prog)
 	switch {
 	// Update successful, nothing left to do.
 	case err == nil:
@@ -152,37 +154,19 @@ func attachCgroup(spec *ebpf.Collection, name, cgroupRoot, pinPath string) error
 
 }
 
-// updateLink opens a link at the given pin path and updates its program.
-func updateLink(pin string, prog *ebpf.Program) error {
-	l, err := link.LoadPinnedLink(pin, &ebpf.LoadPinOptions{})
-	if err != nil {
-		return fmt.Errorf("opening pinned link %s: %w", pin, err)
-	}
-	defer l.Close()
-
-	// Attempt to update the link. This can fail if the link is defunct (the
-	// cgroup it points to no longer exists).
-	if err = l.Update(prog); err != nil {
-		return fmt.Errorf("update link %s: %w", pin, err)
-	}
-
-	return nil
-}
-
 // detachCgroup detaches a program with the given name from cgroupRoot. Attempts
 // to open a pinned link with the given name from directory pinPath first,
 // falling back to PROG_DETACH if no pin is present.
 func detachCgroup(name, cgroupRoot, pinPath string) error {
 	pin := filepath.Join(pinPath, name)
-	l, err := link.LoadPinnedLink(pin, &ebpf.LoadPinOptions{})
+	err := bpf.UnpinLink(pin)
 	if err == nil {
-		if err := l.Unpin(); err != nil {
-			return fmt.Errorf("unpin link %s: %w", pin, err)
-		}
-		if err := l.Close(); err != nil {
-			return fmt.Errorf("close link %s: %w", name, err)
-		}
 		return nil
+	}
+
+	if !errors.Is(err, os.ErrNotExist) {
+		// The pinned link exists, something went wrong unpinning it.
+		return fmt.Errorf("unpinning cgroup program using bpf_link: %w", err)
 	}
 
 	// No bpf_link pin found, detach all prog_attach progs.
@@ -197,10 +181,16 @@ func detachCgroup(name, cgroupRoot, pinPath string) error {
 
 // detachAll detaches all programs attached to cgroupRoot with the corresponding attach type.
 func detachAll(attach ebpf.AttachType, cgroupRoot string) error {
+	cg, err := os.Open(cgroupRoot)
+	if err != nil {
+		return fmt.Errorf("open cgroup %s: %w", cg.Name(), err)
+	}
+	defer cg.Close()
+
 	// Query the program ids of all programs currently attached to the given cgroup
 	// with the given attach type. In ciliums case this should always return only one id.
 	ids, err := link.QueryPrograms(link.QueryOptions{
-		Path:   cgroupRoot,
+		Target: int(cg.Fd()),
 		Attach: attach,
 	})
 	// We know the cgroup root exists, so EINVAL will likely mean querying
@@ -211,22 +201,15 @@ func detachAll(attach ebpf.AttachType, cgroupRoot string) error {
 	if err != nil {
 		return fmt.Errorf("query cgroup %s for type %s: %w", cgroupRoot, attach, err)
 	}
-
-	if len(ids) == 0 {
+	if ids == nil || len(ids.Programs) == 0 {
 		log.Debugf("No programs in cgroup %s with attach type %s", cgroupRoot, attach)
 		return nil
 	}
 
-	cg, err := os.Open(cgroupRoot)
-	if err != nil {
-		return fmt.Errorf("open cgroup %s: %w", cg.Name(), err)
-	}
-	defer cg.Close()
-
 	// cilium owns the cgroup and assumes only one program is attached.
 	// This allows to remove all ids returned in the query phase.
-	for _, id := range ids {
-		prog, err := ebpf.NewProgramFromID(id)
+	for _, id := range ids.Programs {
+		prog, err := ebpf.NewProgramFromID(id.ID)
 		if err != nil {
 			return fmt.Errorf("could not open program id %d: %w", id, err)
 		}

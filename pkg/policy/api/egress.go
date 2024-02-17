@@ -100,6 +100,12 @@ type EgressCommonRule struct {
 	// +kubebuilder:validation:Optional
 	ToGroups []ToGroups `json:"toGroups,omitempty"`
 
+	// ToNodes is a list of nodes identified by an
+	// EndpointSelector to which endpoints subject to the rule is allowed to communicate.
+	//
+	// +kubebuilder:validation:Optional
+	ToNodes []EndpointSelector `json:"toNodes,omitempty"`
+
 	// TODO: Move this to the policy package
 	// (https://github.com/cilium/cilium/issues/8353)
 	aggregatedSelectors EndpointSelectorSlice `json:"-"`
@@ -148,15 +154,6 @@ type EgressRule struct {
 	// ToFQDN rule will not apply to that IP.
 	// Note: ToFQDN cannot occur in the same policy as other To* rules.
 	//
-	// The current implementation has a number of limitations:
-	// - The DNS resolution originates from cilium-agent, and not from the pods.
-	// Differences between the responses seen by cilium agent and a particular
-	// pod will whitelist the incorrect IP.
-	// - DNS TTLs are ignored, and cilium-agent will repoll on a short interval
-	// (5 seconds). Each change to the DNS data will trigger a policy
-	// regeneration. This may result in delayed updates to the policy for an
-	// endpoint when the data changes often or the system is under load.
-	//
 	// +kubebuilder:validation:Optional
 	ToFQDNs FQDNSelectorSlice `json:"toFQDNs,omitempty"`
 
@@ -170,10 +167,10 @@ type EgressRule struct {
 	// +kubebuilder:validation:Optional
 	ICMPs ICMPRules `json:"icmps,omitempty"`
 
-	// Auth is the required authentication type for the allowed traffic, if any.
+	// Authentication is the required authentication type for the allowed traffic, if any.
 	//
 	// +kubebuilder:validation:Optional
-	Auth *Auth `json:"auth,omitempty"`
+	Authentication *Authentication `json:"authentication,omitempty"`
 }
 
 // EgressDenyRule contains all rule types which can be applied at egress, i.e.
@@ -228,6 +225,13 @@ type EgressDenyRule struct {
 // ToEndpoints is not aggregated due to requirement folding in
 // GetDestinationEndpointSelectorsWithRequirements()
 func (e *EgressCommonRule) getAggregatedSelectors() EndpointSelectorSlice {
+	// explicitly check for empty non-nil slices, it should not result in any identity being selected.
+	if (e.ToEntities != nil && len(e.ToEntities) == 0) ||
+		(e.ToCIDR != nil && len(e.ToCIDR) == 0) ||
+		(e.ToCIDRSet != nil && len(e.ToCIDRSet) == 0) {
+		return nil
+	}
+
 	res := make(EndpointSelectorSlice, 0, len(e.ToEntities)+len(e.ToCIDR)+len(e.ToCIDRSet))
 	res = append(res, e.ToEntities.GetAsEndpointSelectors()...)
 	res = append(res, e.ToCIDR.GetAsEndpointSelectors()...)
@@ -291,7 +295,13 @@ func (e *EgressCommonRule) getDestinationEndpointSelectorsWithRequirements(
 	requirements []slim_metav1.LabelSelectorRequirement,
 ) EndpointSelectorSlice {
 
-	res := make(EndpointSelectorSlice, 0, len(e.ToEndpoints)+len(e.aggregatedSelectors))
+	// explicitly check for empty non-nil slices, it should not result in any identity being selected.
+	if e.aggregatedSelectors == nil || (e.ToEndpoints != nil && len(e.ToEndpoints) == 0) ||
+		(e.ToNodes != nil && len(e.ToNodes) == 0) {
+		return nil
+	}
+
+	res := make(EndpointSelectorSlice, 0, len(e.ToEndpoints)+len(e.aggregatedSelectors)+len(e.ToNodes))
 
 	if len(requirements) > 0 && len(e.ToEndpoints) > 0 {
 		for idx := range e.ToEndpoints {
@@ -305,6 +315,7 @@ func (e *EgressCommonRule) getDestinationEndpointSelectorsWithRequirements(
 		}
 	} else {
 		res = append(res, e.ToEndpoints...)
+		res = append(res, e.ToNodes...)
 	}
 	return append(res, e.aggregatedSelectors...)
 }

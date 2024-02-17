@@ -4,7 +4,7 @@
 package labels
 
 import (
-	. "gopkg.in/check.v1"
+	. "github.com/cilium/checkmate"
 
 	"github.com/cilium/cilium/pkg/checker"
 )
@@ -250,5 +250,12 @@ func (s *LabelsSuite) TestLabelArrayListMergeSorted(c *C) {
 		a.Merge(b...)
 		c.Assert(a, checker.DeepEquals, tc.expected, Commentf(tc.name))
 		c.Assert(a, checker.DeepEquals, a.Sort(), Commentf(tc.name+" returned unsorted result"))
+
+		a = tc.a.DeepCopy().Sort()
+		b = tc.b.DeepCopy().Sort()
+		a.MergeSorted(b)
+		c.Assert(a, checker.DeepEquals, tc.expected, Commentf(tc.name+" MergeSorted"))
+		c.Assert(a, checker.DeepEquals, a.Sort(), Commentf(tc.name+" MergeSorted returned unsorted result"))
+
 	}
 }

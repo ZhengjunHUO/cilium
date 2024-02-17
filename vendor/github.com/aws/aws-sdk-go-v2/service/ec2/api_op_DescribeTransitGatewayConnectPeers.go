@@ -32,20 +32,15 @@ type DescribeTransitGatewayConnectPeersInput struct {
 
 	// Checks whether you have the required permissions for the action, without
 	// actually making the request, and provides an error response. If you have the
-	// required permissions, the error response is DryRunOperation. Otherwise, it is
-	// UnauthorizedOperation.
+	// required permissions, the error response is DryRunOperation . Otherwise, it is
+	// UnauthorizedOperation .
 	DryRun *bool
 
 	// One or more filters. The possible values are:
-	//
-	// * state - The state of the
-	// Connect peer (pending | available | deleting | deleted).
-	//
-	// *
-	// transit-gateway-attachment-id - The ID of the attachment.
-	//
-	// *
-	// transit-gateway-connect-peer-id - The ID of the Connect peer.
+	//   - state - The state of the Connect peer ( pending | available | deleting |
+	//   deleted ).
+	//   - transit-gateway-attachment-id - The ID of the attachment.
+	//   - transit-gateway-connect-peer-id - The ID of the Connect peer.
 	Filters []types.Filter
 
 	// The maximum number of results to return with a single call. To retrieve the
@@ -77,12 +72,22 @@ type DescribeTransitGatewayConnectPeersOutput struct {
 }
 
 func (c *Client) addOperationDescribeTransitGatewayConnectPeersMiddlewares(stack *middleware.Stack, options Options) (err error) {
+	if err := stack.Serialize.Add(&setOperationInputMiddleware{}, middleware.After); err != nil {
+		return err
+	}
 	err = stack.Serialize.Add(&awsEc2query_serializeOpDescribeTransitGatewayConnectPeers{}, middleware.After)
 	if err != nil {
 		return err
 	}
 	err = stack.Deserialize.Add(&awsEc2query_deserializeOpDescribeTransitGatewayConnectPeers{}, middleware.After)
 	if err != nil {
+		return err
+	}
+	if err := addProtocolFinalizerMiddlewares(stack, options, "DescribeTransitGatewayConnectPeers"); err != nil {
+		return fmt.Errorf("add protocol finalizers: %v", err)
+	}
+
+	if err = addlegacyEndpointContextSetter(stack, options); err != nil {
 		return err
 	}
 	if err = addSetLoggerMiddleware(stack, options); err != nil {
@@ -103,16 +108,13 @@ func (c *Client) addOperationDescribeTransitGatewayConnectPeersMiddlewares(stack
 	if err = addRetryMiddlewares(stack, options); err != nil {
 		return err
 	}
-	if err = addHTTPSignerV4Middleware(stack, options); err != nil {
-		return err
-	}
 	if err = awsmiddleware.AddRawResponseToMetadata(stack); err != nil {
 		return err
 	}
 	if err = awsmiddleware.AddRecordResponseTiming(stack); err != nil {
 		return err
 	}
-	if err = addClientUserAgent(stack); err != nil {
+	if err = addClientUserAgent(stack, options); err != nil {
 		return err
 	}
 	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
@@ -121,7 +123,13 @@ func (c *Client) addOperationDescribeTransitGatewayConnectPeersMiddlewares(stack
 	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
 		return err
 	}
+	if err = addSetLegacyContextSigningOptionsMiddleware(stack); err != nil {
+		return err
+	}
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opDescribeTransitGatewayConnectPeers(options.Region), middleware.Before); err != nil {
+		return err
+	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
@@ -131,6 +139,9 @@ func (c *Client) addOperationDescribeTransitGatewayConnectPeersMiddlewares(stack
 		return err
 	}
 	if err = addRequestResponseLogging(stack, options); err != nil {
+		return err
+	}
+	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
 		return err
 	}
 	return nil
@@ -234,7 +245,6 @@ func newServiceMetadataMiddleware_opDescribeTransitGatewayConnectPeers(region st
 	return &awsmiddleware.RegisterServiceMetadata{
 		Region:        region,
 		ServiceID:     ServiceID,
-		SigningName:   "ec2",
 		OperationName: "DescribeTransitGatewayConnectPeers",
 	}
 }

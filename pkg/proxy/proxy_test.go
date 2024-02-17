@@ -5,11 +5,17 @@ package proxy
 
 import (
 	"context"
+	"os"
 	"testing"
 
-	testipcache "github.com/cilium/cilium/pkg/testutils/ipcache"
+	. "github.com/cilium/checkmate"
 
-	. "gopkg.in/check.v1"
+	"github.com/cilium/cilium/pkg/completion"
+	"github.com/cilium/cilium/pkg/envoy"
+	"github.com/cilium/cilium/pkg/identity"
+	"github.com/cilium/cilium/pkg/policy"
+	endpointtest "github.com/cilium/cilium/pkg/proxy/endpoint/test"
+	"github.com/cilium/cilium/pkg/proxy/types"
 )
 
 func Test(t *testing.T) { TestingT(t) }
@@ -31,15 +37,18 @@ func (m *MockDatapathUpdater) SupportsOriginalSourceAddr() bool {
 func (s *ProxySuite) TestPortAllocator(c *C) {
 	mockDatapathUpdater := &MockDatapathUpdater{}
 
-	stateDir := c.MkDir()
-	p := StartProxySupport(10000, 20000, stateDir, nil, nil, mockDatapathUpdater, nil,
-		testipcache.NewMockIPCache())
+	testRunDir := c.MkDir()
+	socketDir := envoy.GetSocketDir(testRunDir)
+	err := os.MkdirAll(socketDir, 0700)
+	c.Assert(err, IsNil)
+
+	p := createProxy(10000, 20000, 0, mockDatapathUpdater, nil, nil)
 
 	port, err := p.AllocateProxyPort("listener1", false, true)
 	c.Assert(err, IsNil)
 	c.Assert(port, Not(Equals), 0)
 
-	port1, err := GetProxyPort("listener1")
+	port1, err := p.GetProxyPort("listener1")
 	c.Assert(err, IsNil)
 	c.Assert(port1, Equals, port)
 
@@ -48,9 +57,9 @@ func (s *ProxySuite) TestPortAllocator(c *C) {
 	c.Assert(err, IsNil)
 	c.Assert(port1a, Equals, port1)
 
-	name, pp := findProxyPortByType(ProxyTypeCRD, "listener1", false)
+	name, pp := p.findProxyPortByType(types.ProxyTypeCRD, "listener1", false)
 	c.Assert(name, Equals, "listener1")
-	c.Assert(pp.proxyType, Equals, ProxyTypeCRD)
+	c.Assert(pp.proxyType, Equals, types.ProxyTypeCRD)
 	c.Assert(pp.proxyPort, Equals, port)
 	c.Assert(pp.ingress, Equals, false)
 	c.Assert(pp.localOnly, Equals, true)
@@ -63,7 +72,7 @@ func (s *ProxySuite) TestPortAllocator(c *C) {
 	c.Assert(err, IsNil)
 
 	// ProxyPort lingers and can still be found, but it's port is zeroed
-	port1b, err := GetProxyPort("listener1")
+	port1b, err := p.GetProxyPort("listener1")
 	c.Assert(err, IsNil)
 	c.Assert(port1b, Equals, uint16(0))
 	c.Assert(pp.proxyPort, Equals, uint16(0))
@@ -77,7 +86,7 @@ func (s *ProxySuite) TestPortAllocator(c *C) {
 	port2, err := p.AllocateProxyPort("listener1", true, false)
 	c.Assert(err, IsNil)
 	c.Assert(port2, Not(Equals), port)
-	c.Assert(pp.proxyType, Equals, ProxyTypeCRD)
+	c.Assert(pp.proxyType, Equals, types.ProxyTypeCRD)
 	c.Assert(pp.ingress, Equals, false)
 	c.Assert(pp.localOnly, Equals, true)
 	c.Assert(pp.proxyPort, Equals, port2)
@@ -122,7 +131,7 @@ func (s *ProxySuite) TestPortAllocator(c *C) {
 	c.Assert(pp.rulesPort, Equals, port2)
 
 	// mimic some other process taking the port
-	allocatedPorts[port2] = true
+	p.allocatedPorts[port2] = true
 
 	// Allocate again, this time a different port is allocated
 	port3, err := p.AllocateProxyPort("listener1", true, true)
@@ -130,7 +139,7 @@ func (s *ProxySuite) TestPortAllocator(c *C) {
 	c.Assert(port3, Not(Equals), uint16(0))
 	c.Assert(port3, Not(Equals), port2)
 	c.Assert(port3, Not(Equals), port1)
-	c.Assert(pp.proxyType, Equals, ProxyTypeCRD)
+	c.Assert(pp.proxyType, Equals, types.ProxyTypeCRD)
 	c.Assert(pp.ingress, Equals, false)
 	c.Assert(pp.localOnly, Equals, true)
 	c.Assert(pp.proxyPort, Equals, port3)
@@ -153,7 +162,7 @@ func (s *ProxySuite) TestPortAllocator(c *C) {
 	c.Assert(pp.proxyPort, Equals, uint16(0))
 	c.Assert(pp.rulesPort, Equals, port3)
 
-	inuse, exists := allocatedPorts[port3]
+	inuse, exists := p.allocatedPorts[port3]
 	c.Assert(exists, Equals, true)
 	c.Assert(inuse, Equals, false)
 
@@ -161,7 +170,7 @@ func (s *ProxySuite) TestPortAllocator(c *C) {
 	port4, err := p.AllocateProxyPort("listener1", true, true)
 	c.Assert(err, IsNil)
 	c.Assert(port4, Equals, port3)
-	c.Assert(pp.proxyType, Equals, ProxyTypeCRD)
+	c.Assert(pp.proxyType, Equals, types.ProxyTypeCRD)
 	c.Assert(pp.ingress, Equals, false)
 	c.Assert(pp.localOnly, Equals, true)
 	c.Assert(pp.proxyPort, Equals, port4)
@@ -169,4 +178,56 @@ func (s *ProxySuite) TestPortAllocator(c *C) {
 	c.Assert(pp.isStatic, Equals, false)
 	c.Assert(pp.nRedirects, Equals, 0)
 	c.Assert(pp.rulesPort, Equals, port3)
+}
+
+type fakeProxyPolicy struct{}
+
+func (p *fakeProxyPolicy) CopyL7RulesPerEndpoint() policy.L7DataMap {
+	return policy.L7DataMap{}
+}
+
+func (p *fakeProxyPolicy) GetL7Parser() policy.L7ParserType {
+	return policy.ParserTypeCRD
+}
+
+func (p *fakeProxyPolicy) GetIngress() bool {
+	return false
+}
+
+func (p *fakeProxyPolicy) GetPort() uint16 {
+	return uint16(80)
+}
+
+func (p *fakeProxyPolicy) GetListener() string {
+	return "nonexisting-listener"
+}
+
+func (s *ProxySuite) TestCreateOrUpdateRedirectMissingListener(c *C) {
+	mockDatapathUpdater := &MockDatapathUpdater{}
+
+	testRunDir := c.MkDir()
+	socketDir := envoy.GetSocketDir(testRunDir)
+	err := os.MkdirAll(socketDir, 0700)
+	c.Assert(err, IsNil)
+
+	p := createProxy(10000, 20000, 0, mockDatapathUpdater, nil, nil)
+
+	ep := &endpointtest.ProxyUpdaterMock{
+		Id:       1000,
+		Ipv4:     "10.0.0.1",
+		Ipv6:     "f00d::1",
+		Labels:   []string{"id.foo", "id.bar"},
+		Identity: identity.NumericIdentity(123),
+	}
+
+	l4 := &fakeProxyPolicy{}
+
+	ctx := context.TODO()
+	wg := completion.NewWaitGroup(ctx)
+
+	proxyPort, err, finalizeFunc, revertFunc := p.CreateOrUpdateRedirect(ctx, l4, "dummy-proxy-id", ep, wg)
+	c.Assert(proxyPort, Equals, uint16(0))
+	c.Assert(err, NotNil)
+	c.Assert(finalizeFunc, IsNil)
+	c.Assert(revertFunc, IsNil)
 }

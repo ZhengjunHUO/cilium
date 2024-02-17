@@ -4,6 +4,7 @@ package ec2
 
 import (
 	"context"
+	"fmt"
 	awsmiddleware "github.com/aws/aws-sdk-go-v2/aws/middleware"
 	"github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
@@ -12,15 +13,12 @@ import (
 )
 
 // Starts a task that restores an AMI from an Amazon S3 object that was previously
-// created by using CreateStoreImageTask
-// (https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_CreateStoreImageTask.html).
-// To use this API, you must have the required permissions. For more information,
-// see Permissions for storing and restoring AMIs using Amazon S3
-// (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ami-store-restore.html#ami-s3-permissions)
-// in the Amazon Elastic Compute Cloud User Guide. For more information, see Store
-// and restore an AMI using Amazon S3
-// (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ami-store-restore.html) in
-// the Amazon Elastic Compute Cloud User Guide.
+// created by using CreateStoreImageTask (https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_CreateStoreImageTask.html)
+// . To use this API, you must have the required permissions. For more information,
+// see Permissions for storing and restoring AMIs using Amazon S3 (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ami-store-restore.html#ami-s3-permissions)
+// in the Amazon EC2 User Guide. For more information, see Store and restore an
+// AMI using Amazon S3 (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ami-store-restore.html)
+// in the Amazon EC2 User Guide.
 func (c *Client) CreateRestoreImageTask(ctx context.Context, params *CreateRestoreImageTaskInput, optFns ...func(*Options)) (*CreateRestoreImageTaskOutput, error) {
 	if params == nil {
 		params = &CreateRestoreImageTaskInput{}
@@ -50,8 +48,8 @@ type CreateRestoreImageTaskInput struct {
 
 	// Checks whether you have the required permissions for the action, without
 	// actually making the request, and provides an error response. If you have the
-	// required permissions, the error response is DryRunOperation. Otherwise, it is
-	// UnauthorizedOperation.
+	// required permissions, the error response is DryRunOperation . Otherwise, it is
+	// UnauthorizedOperation .
 	DryRun *bool
 
 	// The name for the restored AMI. The name must be unique for AMIs in the Region
@@ -61,12 +59,9 @@ type CreateRestoreImageTaskInput struct {
 
 	// The tags to apply to the AMI and snapshots on restoration. You can tag the AMI,
 	// the snapshots, or both.
-	//
-	// * To tag the AMI, the value for ResourceType must be
-	// image.
-	//
-	// * To tag the snapshots, the value for ResourceType must be snapshot. The
-	// same tag is applied to all of the snapshots that are created.
+	//   - To tag the AMI, the value for ResourceType must be image .
+	//   - To tag the snapshots, the value for ResourceType must be snapshot . The same
+	//   tag is applied to all of the snapshots that are created.
 	TagSpecifications []types.TagSpecification
 
 	noSmithyDocumentSerde
@@ -84,12 +79,22 @@ type CreateRestoreImageTaskOutput struct {
 }
 
 func (c *Client) addOperationCreateRestoreImageTaskMiddlewares(stack *middleware.Stack, options Options) (err error) {
+	if err := stack.Serialize.Add(&setOperationInputMiddleware{}, middleware.After); err != nil {
+		return err
+	}
 	err = stack.Serialize.Add(&awsEc2query_serializeOpCreateRestoreImageTask{}, middleware.After)
 	if err != nil {
 		return err
 	}
 	err = stack.Deserialize.Add(&awsEc2query_deserializeOpCreateRestoreImageTask{}, middleware.After)
 	if err != nil {
+		return err
+	}
+	if err := addProtocolFinalizerMiddlewares(stack, options, "CreateRestoreImageTask"); err != nil {
+		return fmt.Errorf("add protocol finalizers: %v", err)
+	}
+
+	if err = addlegacyEndpointContextSetter(stack, options); err != nil {
 		return err
 	}
 	if err = addSetLoggerMiddleware(stack, options); err != nil {
@@ -110,16 +115,13 @@ func (c *Client) addOperationCreateRestoreImageTaskMiddlewares(stack *middleware
 	if err = addRetryMiddlewares(stack, options); err != nil {
 		return err
 	}
-	if err = addHTTPSignerV4Middleware(stack, options); err != nil {
-		return err
-	}
 	if err = awsmiddleware.AddRawResponseToMetadata(stack); err != nil {
 		return err
 	}
 	if err = awsmiddleware.AddRecordResponseTiming(stack); err != nil {
 		return err
 	}
-	if err = addClientUserAgent(stack); err != nil {
+	if err = addClientUserAgent(stack, options); err != nil {
 		return err
 	}
 	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
@@ -128,10 +130,16 @@ func (c *Client) addOperationCreateRestoreImageTaskMiddlewares(stack *middleware
 	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
 		return err
 	}
+	if err = addSetLegacyContextSigningOptionsMiddleware(stack); err != nil {
+		return err
+	}
 	if err = addOpCreateRestoreImageTaskValidationMiddleware(stack); err != nil {
 		return err
 	}
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opCreateRestoreImageTask(options.Region), middleware.Before); err != nil {
+		return err
+	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
@@ -143,6 +151,9 @@ func (c *Client) addOperationCreateRestoreImageTaskMiddlewares(stack *middleware
 	if err = addRequestResponseLogging(stack, options); err != nil {
 		return err
 	}
+	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -150,7 +161,6 @@ func newServiceMetadataMiddleware_opCreateRestoreImageTask(region string) *awsmi
 	return &awsmiddleware.RegisterServiceMetadata{
 		Region:        region,
 		ServiceID:     ServiceID,
-		SigningName:   "ec2",
 		OperationName: "CreateRestoreImageTask",
 	}
 }

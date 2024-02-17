@@ -65,8 +65,8 @@ type CreateTrafficMirrorFilterRuleInput struct {
 	TrafficMirrorFilterId *string
 
 	// Unique, case-sensitive identifier that you provide to ensure the idempotency of
-	// the request. For more information, see How to ensure idempotency
-	// (https://docs.aws.amazon.com/AWSEC2/latest/APIReference/Run_Instance_Idempotency.html).
+	// the request. For more information, see How to ensure idempotency (https://docs.aws.amazon.com/AWSEC2/latest/APIReference/Run_Instance_Idempotency.html)
+	// .
 	ClientToken *string
 
 	// The description of the Traffic Mirror rule.
@@ -77,14 +77,13 @@ type CreateTrafficMirrorFilterRuleInput struct {
 
 	// Checks whether you have the required permissions for the action, without
 	// actually making the request, and provides an error response. If you have the
-	// required permissions, the error response is DryRunOperation. Otherwise, it is
-	// UnauthorizedOperation.
+	// required permissions, the error response is DryRunOperation . Otherwise, it is
+	// UnauthorizedOperation .
 	DryRun *bool
 
 	// The protocol, for example UDP, to assign to the Traffic Mirror rule. For
-	// information about the protocol value, see Protocol Numbers
-	// (https://www.iana.org/assignments/protocol-numbers/protocol-numbers.xhtml) on
-	// the Internet Assigned Numbers Authority (IANA) website.
+	// information about the protocol value, see Protocol Numbers (https://www.iana.org/assignments/protocol-numbers/protocol-numbers.xhtml)
+	// on the Internet Assigned Numbers Authority (IANA) website.
 	Protocol *int32
 
 	// The source port range.
@@ -96,8 +95,8 @@ type CreateTrafficMirrorFilterRuleInput struct {
 type CreateTrafficMirrorFilterRuleOutput struct {
 
 	// Unique, case-sensitive identifier that you provide to ensure the idempotency of
-	// the request. For more information, see How to ensure idempotency
-	// (https://docs.aws.amazon.com/AWSEC2/latest/APIReference/Run_Instance_Idempotency.html).
+	// the request. For more information, see How to ensure idempotency (https://docs.aws.amazon.com/AWSEC2/latest/APIReference/Run_Instance_Idempotency.html)
+	// .
 	ClientToken *string
 
 	// The Traffic Mirror rule.
@@ -110,12 +109,22 @@ type CreateTrafficMirrorFilterRuleOutput struct {
 }
 
 func (c *Client) addOperationCreateTrafficMirrorFilterRuleMiddlewares(stack *middleware.Stack, options Options) (err error) {
+	if err := stack.Serialize.Add(&setOperationInputMiddleware{}, middleware.After); err != nil {
+		return err
+	}
 	err = stack.Serialize.Add(&awsEc2query_serializeOpCreateTrafficMirrorFilterRule{}, middleware.After)
 	if err != nil {
 		return err
 	}
 	err = stack.Deserialize.Add(&awsEc2query_deserializeOpCreateTrafficMirrorFilterRule{}, middleware.After)
 	if err != nil {
+		return err
+	}
+	if err := addProtocolFinalizerMiddlewares(stack, options, "CreateTrafficMirrorFilterRule"); err != nil {
+		return fmt.Errorf("add protocol finalizers: %v", err)
+	}
+
+	if err = addlegacyEndpointContextSetter(stack, options); err != nil {
 		return err
 	}
 	if err = addSetLoggerMiddleware(stack, options); err != nil {
@@ -136,22 +145,22 @@ func (c *Client) addOperationCreateTrafficMirrorFilterRuleMiddlewares(stack *mid
 	if err = addRetryMiddlewares(stack, options); err != nil {
 		return err
 	}
-	if err = addHTTPSignerV4Middleware(stack, options); err != nil {
-		return err
-	}
 	if err = awsmiddleware.AddRawResponseToMetadata(stack); err != nil {
 		return err
 	}
 	if err = awsmiddleware.AddRecordResponseTiming(stack); err != nil {
 		return err
 	}
-	if err = addClientUserAgent(stack); err != nil {
+	if err = addClientUserAgent(stack, options); err != nil {
 		return err
 	}
 	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
 		return err
 	}
 	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
+		return err
+	}
+	if err = addSetLegacyContextSigningOptionsMiddleware(stack); err != nil {
 		return err
 	}
 	if err = addIdempotencyToken_opCreateTrafficMirrorFilterRuleMiddleware(stack, options); err != nil {
@@ -163,6 +172,9 @@ func (c *Client) addOperationCreateTrafficMirrorFilterRuleMiddlewares(stack *mid
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opCreateTrafficMirrorFilterRule(options.Region), middleware.Before); err != nil {
 		return err
 	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
+		return err
+	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
 		return err
 	}
@@ -170,6 +182,9 @@ func (c *Client) addOperationCreateTrafficMirrorFilterRuleMiddlewares(stack *mid
 		return err
 	}
 	if err = addRequestResponseLogging(stack, options); err != nil {
+		return err
+	}
+	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
 		return err
 	}
 	return nil
@@ -212,7 +227,6 @@ func newServiceMetadataMiddleware_opCreateTrafficMirrorFilterRule(region string)
 	return &awsmiddleware.RegisterServiceMetadata{
 		Region:        region,
 		ServiceID:     ServiceID,
-		SigningName:   "ec2",
 		OperationName: "CreateTrafficMirrorFilterRule",
 	}
 }

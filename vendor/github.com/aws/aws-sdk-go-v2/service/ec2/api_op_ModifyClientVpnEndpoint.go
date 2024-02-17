@@ -4,6 +4,7 @@ package ec2
 
 import (
 	"context"
+	"fmt"
 	awsmiddleware "github.com/aws/aws-sdk-go-v2/aws/middleware"
 	"github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
@@ -38,37 +39,30 @@ type ModifyClientVpnEndpointInput struct {
 	// The options for managing connection authorization for new client connections.
 	ClientConnectOptions *types.ClientConnectOptions
 
-	// Options for enabling a customizable text banner that will be displayed on Amazon
-	// Web Services provided clients when a VPN session is established.
+	// Options for enabling a customizable text banner that will be displayed on
+	// Amazon Web Services provided clients when a VPN session is established.
 	ClientLoginBannerOptions *types.ClientLoginBannerOptions
 
 	// Information about the client connection logging options. If you enable client
 	// connection logging, data about client connections is sent to a Cloudwatch Logs
 	// log stream. The following information is logged:
-	//
-	// * Client connection
-	// requests
-	//
-	// * Client connection results (successful and unsuccessful)
-	//
-	// * Reasons
-	// for unsuccessful client connection requests
-	//
-	// * Client connection termination
-	// time
+	//   - Client connection requests
+	//   - Client connection results (successful and unsuccessful)
+	//   - Reasons for unsuccessful client connection requests
+	//   - Client connection termination time
 	ConnectionLogOptions *types.ConnectionLogOptions
 
 	// A brief description of the Client VPN endpoint.
 	Description *string
 
-	// Information about the DNS servers to be used by Client VPN connections. A Client
-	// VPN endpoint can have up to two DNS servers.
+	// Information about the DNS servers to be used by Client VPN connections. A
+	// Client VPN endpoint can have up to two DNS servers.
 	DnsServers *types.DnsServersOptionsModifyStructure
 
 	// Checks whether you have the required permissions for the action, without
 	// actually making the request, and provides an error response. If you have the
-	// required permissions, the error response is DryRunOperation. Otherwise, it is
-	// UnauthorizedOperation.
+	// required permissions, the error response is DryRunOperation . Otherwise, it is
+	// UnauthorizedOperation .
 	DryRun *bool
 
 	// The IDs of one or more security groups to apply to the target network.
@@ -86,8 +80,7 @@ type ModifyClientVpnEndpointInput struct {
 	SessionTimeoutHours *int32
 
 	// Indicates whether the VPN is split-tunnel. For information about split-tunnel
-	// VPN endpoints, see Split-tunnel Client VPN endpoint
-	// (https://docs.aws.amazon.com/vpn/latest/clientvpn-admin/split-tunnel-vpn.html)
+	// VPN endpoints, see Split-tunnel Client VPN endpoint (https://docs.aws.amazon.com/vpn/latest/clientvpn-admin/split-tunnel-vpn.html)
 	// in the Client VPN Administrator Guide.
 	SplitTunnel *bool
 
@@ -113,12 +106,22 @@ type ModifyClientVpnEndpointOutput struct {
 }
 
 func (c *Client) addOperationModifyClientVpnEndpointMiddlewares(stack *middleware.Stack, options Options) (err error) {
+	if err := stack.Serialize.Add(&setOperationInputMiddleware{}, middleware.After); err != nil {
+		return err
+	}
 	err = stack.Serialize.Add(&awsEc2query_serializeOpModifyClientVpnEndpoint{}, middleware.After)
 	if err != nil {
 		return err
 	}
 	err = stack.Deserialize.Add(&awsEc2query_deserializeOpModifyClientVpnEndpoint{}, middleware.After)
 	if err != nil {
+		return err
+	}
+	if err := addProtocolFinalizerMiddlewares(stack, options, "ModifyClientVpnEndpoint"); err != nil {
+		return fmt.Errorf("add protocol finalizers: %v", err)
+	}
+
+	if err = addlegacyEndpointContextSetter(stack, options); err != nil {
 		return err
 	}
 	if err = addSetLoggerMiddleware(stack, options); err != nil {
@@ -139,16 +142,13 @@ func (c *Client) addOperationModifyClientVpnEndpointMiddlewares(stack *middlewar
 	if err = addRetryMiddlewares(stack, options); err != nil {
 		return err
 	}
-	if err = addHTTPSignerV4Middleware(stack, options); err != nil {
-		return err
-	}
 	if err = awsmiddleware.AddRawResponseToMetadata(stack); err != nil {
 		return err
 	}
 	if err = awsmiddleware.AddRecordResponseTiming(stack); err != nil {
 		return err
 	}
-	if err = addClientUserAgent(stack); err != nil {
+	if err = addClientUserAgent(stack, options); err != nil {
 		return err
 	}
 	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
@@ -157,10 +157,16 @@ func (c *Client) addOperationModifyClientVpnEndpointMiddlewares(stack *middlewar
 	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
 		return err
 	}
+	if err = addSetLegacyContextSigningOptionsMiddleware(stack); err != nil {
+		return err
+	}
 	if err = addOpModifyClientVpnEndpointValidationMiddleware(stack); err != nil {
 		return err
 	}
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opModifyClientVpnEndpoint(options.Region), middleware.Before); err != nil {
+		return err
+	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
@@ -172,6 +178,9 @@ func (c *Client) addOperationModifyClientVpnEndpointMiddlewares(stack *middlewar
 	if err = addRequestResponseLogging(stack, options); err != nil {
 		return err
 	}
+	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -179,7 +188,6 @@ func newServiceMetadataMiddleware_opModifyClientVpnEndpoint(region string) *awsm
 	return &awsmiddleware.RegisterServiceMetadata{
 		Region:        region,
 		ServiceID:     ServiceID,
-		SigningName:   "ec2",
 		OperationName: "ModifyClientVpnEndpoint",
 	}
 }

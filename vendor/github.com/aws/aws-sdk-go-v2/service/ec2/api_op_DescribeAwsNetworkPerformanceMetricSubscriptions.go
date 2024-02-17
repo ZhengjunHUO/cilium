@@ -12,7 +12,7 @@ import (
 	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
-// Describes the curent Infrastructure Performance metric subscriptions.
+// Describes the current Infrastructure Performance metric subscriptions.
 func (c *Client) DescribeAwsNetworkPerformanceMetricSubscriptions(ctx context.Context, params *DescribeAwsNetworkPerformanceMetricSubscriptionsInput, optFns ...func(*Options)) (*DescribeAwsNetworkPerformanceMetricSubscriptionsOutput, error) {
 	if params == nil {
 		params = &DescribeAwsNetworkPerformanceMetricSubscriptionsInput{}
@@ -32,8 +32,8 @@ type DescribeAwsNetworkPerformanceMetricSubscriptionsInput struct {
 
 	// Checks whether you have the required permissions for the action, without
 	// actually making the request, and provides an error response. If you have the
-	// required permissions, the error response is DryRunOperation. Otherwise, it is
-	// UnauthorizedOperation.
+	// required permissions, the error response is DryRunOperation . Otherwise, it is
+	// UnauthorizedOperation .
 	DryRun *bool
 
 	// One or more filters.
@@ -65,12 +65,22 @@ type DescribeAwsNetworkPerformanceMetricSubscriptionsOutput struct {
 }
 
 func (c *Client) addOperationDescribeAwsNetworkPerformanceMetricSubscriptionsMiddlewares(stack *middleware.Stack, options Options) (err error) {
+	if err := stack.Serialize.Add(&setOperationInputMiddleware{}, middleware.After); err != nil {
+		return err
+	}
 	err = stack.Serialize.Add(&awsEc2query_serializeOpDescribeAwsNetworkPerformanceMetricSubscriptions{}, middleware.After)
 	if err != nil {
 		return err
 	}
 	err = stack.Deserialize.Add(&awsEc2query_deserializeOpDescribeAwsNetworkPerformanceMetricSubscriptions{}, middleware.After)
 	if err != nil {
+		return err
+	}
+	if err := addProtocolFinalizerMiddlewares(stack, options, "DescribeAwsNetworkPerformanceMetricSubscriptions"); err != nil {
+		return fmt.Errorf("add protocol finalizers: %v", err)
+	}
+
+	if err = addlegacyEndpointContextSetter(stack, options); err != nil {
 		return err
 	}
 	if err = addSetLoggerMiddleware(stack, options); err != nil {
@@ -91,16 +101,13 @@ func (c *Client) addOperationDescribeAwsNetworkPerformanceMetricSubscriptionsMid
 	if err = addRetryMiddlewares(stack, options); err != nil {
 		return err
 	}
-	if err = addHTTPSignerV4Middleware(stack, options); err != nil {
-		return err
-	}
 	if err = awsmiddleware.AddRawResponseToMetadata(stack); err != nil {
 		return err
 	}
 	if err = awsmiddleware.AddRecordResponseTiming(stack); err != nil {
 		return err
 	}
-	if err = addClientUserAgent(stack); err != nil {
+	if err = addClientUserAgent(stack, options); err != nil {
 		return err
 	}
 	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
@@ -109,7 +116,13 @@ func (c *Client) addOperationDescribeAwsNetworkPerformanceMetricSubscriptionsMid
 	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
 		return err
 	}
+	if err = addSetLegacyContextSigningOptionsMiddleware(stack); err != nil {
+		return err
+	}
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opDescribeAwsNetworkPerformanceMetricSubscriptions(options.Region), middleware.Before); err != nil {
+		return err
+	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
@@ -119,6 +132,9 @@ func (c *Client) addOperationDescribeAwsNetworkPerformanceMetricSubscriptionsMid
 		return err
 	}
 	if err = addRequestResponseLogging(stack, options); err != nil {
+		return err
+	}
+	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
 		return err
 	}
 	return nil
@@ -223,7 +239,6 @@ func newServiceMetadataMiddleware_opDescribeAwsNetworkPerformanceMetricSubscript
 	return &awsmiddleware.RegisterServiceMetadata{
 		Region:        region,
 		ServiceID:     ServiceID,
-		SigningName:   "ec2",
 		OperationName: "DescribeAwsNetworkPerformanceMetricSubscriptions",
 	}
 }

@@ -10,10 +10,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	operatorOption "github.com/cilium/cilium/operator/option"
 	"github.com/cilium/cilium/pkg/cidr"
-	fakeDatapath "github.com/cilium/cilium/pkg/datapath/fake"
-	agentOption "github.com/cilium/cilium/pkg/option"
+	fakeTypes "github.com/cilium/cilium/pkg/datapath/fake/types"
+	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/test/controlplane"
 	"github.com/cilium/cilium/test/controlplane/suite"
 )
@@ -38,7 +37,7 @@ var (
 	}
 )
 
-func validateNodes(dp *fakeDatapath.FakeDatapath) error {
+func validateNodes(dp *fakeTypes.FakeDatapath) error {
 	nodes := dp.FakeNode().Nodes
 
 	if len(nodes) != 1 {
@@ -69,9 +68,10 @@ func init() {
 
 		test.
 			UpdateObjects(minimalNode).
-			SetupEnvironment(func(*agentOption.DaemonConfig, *operatorOption.OperatorConfig) {}).
-			StartAgent().
+			SetupEnvironment().
+			StartAgent(func(*option.DaemonConfig) {}).
 			Eventually(func() error { return validateNodes(test.Datapath) }).
-			StopAgent()
+			StopAgent().
+			ClearEnvironment()
 	})
 }

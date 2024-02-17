@@ -14,12 +14,10 @@ import (
 
 // Creates a network interface in the specified subnet. The number of IP addresses
 // you can assign to a network interface varies by instance type. For more
-// information, see IP Addresses Per ENI Per Instance Type
-// (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/using-eni.html#AvailableIpPerENI)
+// information, see IP Addresses Per ENI Per Instance Type (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/using-eni.html#AvailableIpPerENI)
 // in the Amazon Virtual Private Cloud User Guide. For more information about
-// network interfaces, see Elastic network interfaces
-// (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/using-eni.html) in the
-// Amazon Elastic Compute Cloud User Guide.
+// network interfaces, see Elastic network interfaces (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/using-eni.html)
+// in the Amazon Elastic Compute Cloud User Guide.
 func (c *Client) CreateNetworkInterface(ctx context.Context, params *CreateNetworkInterfaceInput, optFns ...func(*Options)) (*CreateNetworkInterfaceOutput, error) {
 	if params == nil {
 		params = &CreateNetworkInterfaceInput{}
@@ -43,24 +41,42 @@ type CreateNetworkInterfaceInput struct {
 	SubnetId *string
 
 	// Unique, case-sensitive identifier that you provide to ensure the idempotency of
-	// the request. For more information, see Ensuring Idempotency
-	// (https://docs.aws.amazon.com/AWSEC2/latest/APIReference/Run_Instance_Idempotency.html).
+	// the request. For more information, see Ensuring Idempotency (https://docs.aws.amazon.com/AWSEC2/latest/APIReference/Run_Instance_Idempotency.html)
+	// .
 	ClientToken *string
+
+	// A connection tracking specification for the network interface.
+	ConnectionTrackingSpecification *types.ConnectionTrackingSpecificationRequest
 
 	// A description for the network interface.
 	Description *string
 
 	// Checks whether you have the required permissions for the action, without
 	// actually making the request, and provides an error response. If you have the
-	// required permissions, the error response is DryRunOperation. Otherwise, it is
-	// UnauthorizedOperation.
+	// required permissions, the error response is DryRunOperation . Otherwise, it is
+	// UnauthorizedOperation .
 	DryRun *bool
+
+	// If you’re creating a network interface in a dual-stack or IPv6-only subnet, you
+	// have the option to assign a primary IPv6 IP address. A primary IPv6 address is
+	// an IPv6 GUA address associated with an ENI that you have enabled to use a
+	// primary IPv6 address. Use this option if the instance that this ENI will be
+	// attached to relies on its IPv6 address not changing. Amazon Web Services will
+	// automatically assign an IPv6 address associated with the ENI attached to your
+	// instance to be the primary IPv6 address. Once you enable an IPv6 GUA address to
+	// be a primary IPv6, you cannot disable it. When you enable an IPv6 GUA address to
+	// be a primary IPv6, the first IPv6 GUA will be made the primary IPv6 address
+	// until the instance is terminated or the network interface is detached. If you
+	// have multiple IPv6 addresses associated with an ENI attached to your instance
+	// and you enable a primary IPv6 address, the first IPv6 GUA address associated
+	// with the ENI becomes the primary IPv6 address.
+	EnablePrimaryIpv6 *bool
 
 	// The IDs of one or more security groups.
 	Groups []string
 
-	// The type of network interface. The default is interface. The only supported
-	// values are efa and trunk.
+	// The type of network interface. The default is interface . The only supported
+	// values are interface , efa , and trunk .
 	InterfaceType types.NetworkInterfaceCreationType
 
 	// The number of IPv4 prefixes that Amazon Web Services automatically assigns to
@@ -78,8 +94,8 @@ type CreateNetworkInterfaceInput struct {
 	// automatically selects the IPv6 addresses from the subnet range. You can't
 	// specify a count of IPv6 addresses using this parameter if you've specified one
 	// of the following: specific IPv6 addresses, specific IPv6 prefixes, or a count of
-	// IPv6 prefixes. If your subnet has the AssignIpv6AddressOnCreation attribute set,
-	// you can override that setting by specifying 0 as the IPv6 address count.
+	// IPv6 prefixes. If your subnet has the AssignIpv6AddressOnCreation attribute
+	// set, you can override that setting by specifying 0 as the IPv6 address count.
 	Ipv6AddressCount *int32
 
 	// The IPv6 addresses from the IPv6 CIDR block range of your subnet. You can't
@@ -111,13 +127,13 @@ type CreateNetworkInterfaceInput struct {
 	// prefixes, or a count of IPv4 prefixes.
 	PrivateIpAddresses []types.PrivateIpAddressSpecification
 
-	// The number of secondary private IPv4 addresses to assign to a network interface.
-	// When you specify a number of secondary IPv4 addresses, Amazon EC2 selects these
-	// IP addresses within the subnet's IPv4 CIDR range. You can't specify this option
-	// and specify more than one private IP address using privateIpAddresses. You can't
-	// specify a count of private IPv4 addresses if you've specified one of the
-	// following: specific private IPv4 addresses, specific IPv4 prefixes, or a count
-	// of IPv4 prefixes.
+	// The number of secondary private IPv4 addresses to assign to a network
+	// interface. When you specify a number of secondary IPv4 addresses, Amazon EC2
+	// selects these IP addresses within the subnet's IPv4 CIDR range. You can't
+	// specify this option and specify more than one private IP address using
+	// privateIpAddresses . You can't specify a count of private IPv4 addresses if
+	// you've specified one of the following: specific private IPv4 addresses, specific
+	// IPv4 prefixes, or a count of IPv4 prefixes.
 	SecondaryPrivateIpAddressCount *int32
 
 	// The tags to apply to the new network interface.
@@ -142,12 +158,22 @@ type CreateNetworkInterfaceOutput struct {
 }
 
 func (c *Client) addOperationCreateNetworkInterfaceMiddlewares(stack *middleware.Stack, options Options) (err error) {
+	if err := stack.Serialize.Add(&setOperationInputMiddleware{}, middleware.After); err != nil {
+		return err
+	}
 	err = stack.Serialize.Add(&awsEc2query_serializeOpCreateNetworkInterface{}, middleware.After)
 	if err != nil {
 		return err
 	}
 	err = stack.Deserialize.Add(&awsEc2query_deserializeOpCreateNetworkInterface{}, middleware.After)
 	if err != nil {
+		return err
+	}
+	if err := addProtocolFinalizerMiddlewares(stack, options, "CreateNetworkInterface"); err != nil {
+		return fmt.Errorf("add protocol finalizers: %v", err)
+	}
+
+	if err = addlegacyEndpointContextSetter(stack, options); err != nil {
 		return err
 	}
 	if err = addSetLoggerMiddleware(stack, options); err != nil {
@@ -168,22 +194,22 @@ func (c *Client) addOperationCreateNetworkInterfaceMiddlewares(stack *middleware
 	if err = addRetryMiddlewares(stack, options); err != nil {
 		return err
 	}
-	if err = addHTTPSignerV4Middleware(stack, options); err != nil {
-		return err
-	}
 	if err = awsmiddleware.AddRawResponseToMetadata(stack); err != nil {
 		return err
 	}
 	if err = awsmiddleware.AddRecordResponseTiming(stack); err != nil {
 		return err
 	}
-	if err = addClientUserAgent(stack); err != nil {
+	if err = addClientUserAgent(stack, options); err != nil {
 		return err
 	}
 	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
 		return err
 	}
 	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
+		return err
+	}
+	if err = addSetLegacyContextSigningOptionsMiddleware(stack); err != nil {
 		return err
 	}
 	if err = addIdempotencyToken_opCreateNetworkInterfaceMiddleware(stack, options); err != nil {
@@ -195,6 +221,9 @@ func (c *Client) addOperationCreateNetworkInterfaceMiddlewares(stack *middleware
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opCreateNetworkInterface(options.Region), middleware.Before); err != nil {
 		return err
 	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
+		return err
+	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
 		return err
 	}
@@ -202,6 +231,9 @@ func (c *Client) addOperationCreateNetworkInterfaceMiddlewares(stack *middleware
 		return err
 	}
 	if err = addRequestResponseLogging(stack, options); err != nil {
+		return err
+	}
+	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
 		return err
 	}
 	return nil
@@ -244,7 +276,6 @@ func newServiceMetadataMiddleware_opCreateNetworkInterface(region string) *awsmi
 	return &awsmiddleware.RegisterServiceMetadata{
 		Region:        region,
 		ServiceID:     ServiceID,
-		SigningName:   "ec2",
 		OperationName: "CreateNetworkInterface",
 	}
 }

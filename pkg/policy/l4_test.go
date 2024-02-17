@@ -7,10 +7,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"sort"
+	"strconv"
+	"testing"
 
+	. "github.com/cilium/checkmate"
 	"github.com/kr/pretty"
-	. "gopkg.in/check.v1"
 
 	"github.com/cilium/cilium/api/v1/models"
 	"github.com/cilium/cilium/pkg/checker"
@@ -149,7 +152,9 @@ func (s *PolicyTestSuite) TestCreateL4Filter(c *C) {
 		c.Assert(err, IsNil)
 		c.Assert(len(filter.PerSelectorPolicies), Equals, 1)
 		for _, r := range filter.PerSelectorPolicies {
-			c.Assert(r.GetAuthType(), Equals, AuthTypeNone)
+			hasAuth, authType := r.GetAuthType()
+			c.Assert(hasAuth, Equals, DefaultAuthType)
+			c.Assert(authType, Equals, AuthTypeDisabled)
 		}
 		c.Assert(filter.redirectType(), Equals, redirectTypeEnvoy)
 
@@ -157,7 +162,9 @@ func (s *PolicyTestSuite) TestCreateL4Filter(c *C) {
 		c.Assert(err, IsNil)
 		c.Assert(len(filter.PerSelectorPolicies), Equals, 1)
 		for _, r := range filter.PerSelectorPolicies {
-			c.Assert(r.GetAuthType(), Equals, AuthTypeNone)
+			hasAuth, authType := r.GetAuthType()
+			c.Assert(hasAuth, Equals, DefaultAuthType)
+			c.Assert(authType, Equals, AuthTypeDisabled)
 		}
 		c.Assert(filter.redirectType(), Equals, redirectTypeEnvoy)
 	}
@@ -178,7 +185,7 @@ func (s *PolicyTestSuite) TestCreateL4FilterAuthRequired(c *C) {
 		api.NewESFromLabels(labels.ParseSelectLabel("bar")),
 	}
 
-	auth := &api.Auth{Type: api.AuthTypeNull}
+	auth := &api.Authentication{Mode: api.AuthenticationModeDisabled}
 	for _, selector := range selectors {
 		eps := []api.EndpointSelector{selector}
 		// Regardless of ingress/egress, we should end up with
@@ -188,7 +195,9 @@ func (s *PolicyTestSuite) TestCreateL4FilterAuthRequired(c *C) {
 		c.Assert(err, IsNil)
 		c.Assert(len(filter.PerSelectorPolicies), Equals, 1)
 		for _, r := range filter.PerSelectorPolicies {
-			c.Assert(r.GetAuthType(), Equals, AuthTypeNull)
+			hasAuth, authType := r.GetAuthType()
+			c.Assert(hasAuth, Equals, ExplicitAuthType)
+			c.Assert(authType, Equals, AuthTypeDisabled)
 		}
 		c.Assert(filter.redirectType(), Equals, redirectTypeEnvoy)
 
@@ -196,7 +205,9 @@ func (s *PolicyTestSuite) TestCreateL4FilterAuthRequired(c *C) {
 		c.Assert(err, IsNil)
 		c.Assert(len(filter.PerSelectorPolicies), Equals, 1)
 		for _, r := range filter.PerSelectorPolicies {
-			c.Assert(r.GetAuthType(), Equals, AuthTypeNull)
+			hasAuth, authType := r.GetAuthType()
+			c.Assert(hasAuth, Equals, ExplicitAuthType)
+			c.Assert(authType, Equals, AuthTypeDisabled)
 		}
 		c.Assert(filter.redirectType(), Equals, redirectTypeEnvoy)
 	}
@@ -247,14 +258,14 @@ func (s *PolicyTestSuite) TestJSONMarshal(c *C) {
 	c.Assert(pretty.Sprintf("%+ v", model.Ingress), checker.DeepEquals, "[]")
 
 	policy := L4Policy{
-		Egress: L4PolicyMap{
+		Egress: L4DirectionPolicy{PortRules: L4PolicyMap{
 			"8080/TCP": {
 				Port:     8080,
 				Protocol: api.ProtoTCP,
 				Ingress:  false,
 			},
-		},
-		Ingress: L4PolicyMap{
+		}},
+		Ingress: L4DirectionPolicy{PortRules: L4PolicyMap{
 			"80/TCP": {
 				Port: 80, Protocol: api.ProtoTCP,
 				L7Parser: "http",
@@ -307,7 +318,7 @@ func (s *PolicyTestSuite) TestJSONMarshal(c *C) {
 				},
 				Ingress: true,
 			},
-		},
+		}},
 	}
 
 	policy.Attach(testPolicyContext)
@@ -407,4 +418,24 @@ func (s *PolicyTestSuite) TestJSONMarshal(c *C) {
 
 	c.Assert(policy.HasEnvoyRedirect(), Equals, true)
 	c.Assert(policy.HasProxylibRedirect(), Equals, true)
+}
+
+func BenchmarkContainsAllL3L4(b *testing.B) {
+	r := rand.New(rand.NewSource(42))
+	id := uint16(r.Intn(65535))
+	port := uint16(r.Intn(65535))
+
+	b.ReportAllocs()
+	for i := 0; i < 1000; i++ {
+		b.StartTimer()
+		proxyID := ProxyID(id, true, "TCP", port, "")
+		if proxyID != strconv.FormatInt(int64(id), 10)+"ingress:TCP:8080:" {
+			b.Failed()
+		}
+		_, _, _, _, _, err := ParseProxyID(proxyID)
+		if err != nil {
+			b.Failed()
+		}
+		b.StopTimer()
+	}
 }

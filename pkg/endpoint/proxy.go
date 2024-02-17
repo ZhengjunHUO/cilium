@@ -9,17 +9,16 @@ import (
 
 	"github.com/cilium/cilium/pkg/completion"
 	"github.com/cilium/cilium/pkg/policy"
-	"github.com/cilium/cilium/pkg/proxy/logger"
+	"github.com/cilium/cilium/pkg/proxy/endpoint"
 	"github.com/cilium/cilium/pkg/revert"
 )
 
 // EndpointProxy defines any L7 proxy with which an Endpoint must interact.
 type EndpointProxy interface {
-	CreateOrUpdateRedirect(ctx context.Context, l4 policy.ProxyPolicy, id string, localEndpoint logger.EndpointUpdater, wg *completion.WaitGroup) (proxyPort uint16, err error, finalizeFunc revert.FinalizeFunc, revertFunc revert.RevertFunc)
+	CreateOrUpdateRedirect(ctx context.Context, l4 policy.ProxyPolicy, id string, localEndpoint endpoint.EndpointUpdater, wg *completion.WaitGroup) (proxyPort uint16, err error, finalizeFunc revert.FinalizeFunc, revertFunc revert.RevertFunc)
 	RemoveRedirect(id string, wg *completion.WaitGroup) (error, revert.FinalizeFunc, revert.RevertFunc)
-	UpdateNetworkPolicy(ep logger.EndpointUpdater, vis *policy.VisibilityPolicy, policy *policy.L4Policy, ingressPolicyEnforced, egressPolicyEnforced bool, wg *completion.WaitGroup) (error, func() error)
-	UseCurrentNetworkPolicy(ep logger.EndpointUpdater, policy *policy.L4Policy, wg *completion.WaitGroup)
-	RemoveNetworkPolicy(ep logger.EndpointInfoSource)
+	UpdateNetworkPolicy(ep endpoint.EndpointUpdater, vis *policy.VisibilityPolicy, policy *policy.L4Policy, ingressPolicyEnforced, egressPolicyEnforced bool, wg *completion.WaitGroup) (error, func() error)
+	RemoveNetworkPolicy(ep endpoint.EndpointInfoSource)
 }
 
 // SetProxy sets the proxy for this endpoint.
@@ -30,13 +29,13 @@ func (e *Endpoint) SetProxy(p EndpointProxy) {
 }
 
 func (e *Endpoint) removeNetworkPolicy() {
-	if e.isProxyDisabled() {
+	if e.IsProxyDisabled() {
 		return
 	}
 	e.proxy.RemoveNetworkPolicy(e)
 }
 
-func (e *Endpoint) isProxyDisabled() bool {
+func (e *Endpoint) IsProxyDisabled() bool {
 	return e.proxy == nil || reflect.ValueOf(e.proxy).IsNil()
 }
 
@@ -44,7 +43,7 @@ func (e *Endpoint) isProxyDisabled() bool {
 type FakeEndpointProxy struct{}
 
 // CreateOrUpdateRedirect does nothing.
-func (f *FakeEndpointProxy) CreateOrUpdateRedirect(ctx context.Context, l4 policy.ProxyPolicy, id string, localEndpoint logger.EndpointUpdater, wg *completion.WaitGroup) (proxyPort uint16, err error, finalizeFunc revert.FinalizeFunc, revertFunc revert.RevertFunc) {
+func (f *FakeEndpointProxy) CreateOrUpdateRedirect(ctx context.Context, l4 policy.ProxyPolicy, id string, localEndpoint endpoint.EndpointUpdater, wg *completion.WaitGroup) (proxyPort uint16, err error, finalizeFunc revert.FinalizeFunc, revertFunc revert.RevertFunc) {
 	return
 }
 
@@ -54,13 +53,9 @@ func (f *FakeEndpointProxy) RemoveRedirect(id string, wg *completion.WaitGroup) 
 }
 
 // UpdateNetworkPolicy does nothing.
-func (f *FakeEndpointProxy) UpdateNetworkPolicy(ep logger.EndpointUpdater, vis *policy.VisibilityPolicy, policy *policy.L4Policy, ingressPolicyEnforced, egressPolicyEnforced bool, wg *completion.WaitGroup) (error, func() error) {
+func (f *FakeEndpointProxy) UpdateNetworkPolicy(ep endpoint.EndpointUpdater, vis *policy.VisibilityPolicy, policy *policy.L4Policy, ingressPolicyEnforced, egressPolicyEnforced bool, wg *completion.WaitGroup) (error, func() error) {
 	return nil, nil
 }
 
-// UseCurrentNetworkPolicy does nothing.
-func (f *FakeEndpointProxy) UseCurrentNetworkPolicy(ep logger.EndpointUpdater, policy *policy.L4Policy, wg *completion.WaitGroup) {
-}
-
 // RemoveNetworkPolicy does nothing.
-func (f *FakeEndpointProxy) RemoveNetworkPolicy(ep logger.EndpointInfoSource) {}
+func (f *FakeEndpointProxy) RemoveNetworkPolicy(ep endpoint.EndpointInfoSource) {}

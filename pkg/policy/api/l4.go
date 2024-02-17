@@ -4,7 +4,7 @@
 package api
 
 import (
-	"github.com/cilium/cilium/pkg/policy/api/kafka"
+	"github.com/cilium/proxy/pkg/policy/api/kafka"
 )
 
 // L4Proto is a layer 4 protocol name
@@ -22,6 +22,11 @@ const (
 
 	PortProtocolAny = "0/ANY"
 )
+
+// IsAny returns true if an L4Proto represents ANY protocol
+func (l4 L4Proto) IsAny() bool {
+	return l4 == ProtoAny || string(l4) == ""
+}
 
 // PortProtocol specifies an L4 port with an optional transport protocol
 type PortProtocol struct {
@@ -56,7 +61,7 @@ func (p PortProtocol) Covers(other PortProtocol) bool {
 		return false
 	}
 	if p.Protocol != other.Protocol {
-		return p.Protocol == "" || p.Protocol == ProtoAny
+		return p.Protocol.IsAny()
 	}
 	return true
 }
@@ -134,7 +139,7 @@ type EnvoyConfig struct {
 
 // Listener defines a reference to an Envoy listener specified in a CEC or CCEC resource.
 type Listener struct {
-	// EnvoyConfig is a reference to the CEC or CCNP resource in which
+	// EnvoyConfig is a reference to the CEC or CCEC resource in which
 	// the listener is defined.
 	//
 	// +kubebuilder:validation:Required
@@ -145,6 +150,14 @@ type Listener struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:Required
 	Name string `json:"name"`
+
+	// Priority for this Listener that is used when multiple rules would apply different
+	// listeners to a policy map entry. Behavior of this is implementation dependent.
+	//
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=100
+	// +kubebuilder:validation:Optional
+	Priority uint16 `json:"priority"`
 }
 
 // PortRule is a list of ports/protocol combinations with optional Layer 7

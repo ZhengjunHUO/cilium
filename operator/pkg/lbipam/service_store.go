@@ -5,9 +5,10 @@ package lbipam
 
 import (
 	"net"
+	"net/netip"
+	"slices"
 
 	"golang.org/x/exp/maps"
-	"golang.org/x/exp/slices"
 
 	"github.com/cilium/cilium/pkg/k8s/resource"
 	slim_core_v1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/core/v1"
@@ -65,8 +66,16 @@ type ServiceView struct {
 	Generation int64
 	Status     *slim_core_v1.ServiceStatus
 
+	SharingKey            string
+	SharingCrossNamespace []string
+	// These required to determine if a service conflicts with another for sharing an ip
+	ExternalTrafficPolicy slim_core_v1.ServiceExternalTrafficPolicy
+	Ports                 []slim_core_v1.ServicePort
+	Namespace             string
+	Selector              map[string]string
+
 	// The specific IPs requested by the service
-	RequestedIPs []net.IP
+	RequestedIPs []netip.Addr
 	// The IP families requested by the service
 	RequestedFamilies struct {
 		IPv4 bool
@@ -76,13 +85,71 @@ type ServiceView struct {
 	AllocatedIPs []ServiceViewIP
 }
 
+// isCompatible checks if two services are compatible for sharing an IP.
+func (sv *ServiceView) isCompatible(osv *ServiceView) bool {
+	// They have the same sharing key.
+	if sv.SharingKey != osv.SharingKey {
+		return false
+	}
+
+	// Services are namespaced, so services are only compatible if they are in the same namespace.
+	// This is for security reasons, otherwise a bad tennant could use a service in another namespace.
+	// We still allow cross-namespace sharing if specifically allowed on both services.
+	if sv.Namespace != osv.Namespace {
+		if !slices.Contains(sv.SharingCrossNamespace, osv.Namespace) && !slices.Contains(sv.SharingCrossNamespace, ciliumSvcLBISKCNWildward) || !slices.Contains(osv.SharingCrossNamespace, sv.Namespace) && !slices.Contains(osv.SharingCrossNamespace, ciliumSvcLBISKCNWildward) {
+			return false
+		}
+	}
+
+	// Compatible services don't have any overlapping ports.
+	// NOTE: Normally we would also consider the protocol, but the Cilium datapath can't differentiate between
+	// 	     protocols, so we don't either for this purpose. https://github.com/cilium/cilium/issues/9207
+	for _, port1 := range sv.Ports {
+		for _, port2 := range osv.Ports {
+			if port1.Port == port2.Port {
+				return false
+			}
+		}
+	}
+
+	// Compatible services have the same external traffic policy.
+	// If this were not the case, then we could end up in a situation directing traffic to a node which doesn't
+	// have the pod running on it for one of the services with an `local` external traffic policy.
+	if sv.ExternalTrafficPolicy != osv.ExternalTrafficPolicy {
+		return false
+	}
+
+	// If both services have a 'local' external traffic policy, then they must select the same set of pods.
+	// If this were not the case, then we could end up in a situation directing traffic to a node which doesn't
+	// have the pod running on it for one of the services.
+	if sv.ExternalTrafficPolicy == slim_core_v1.ServiceExternalTrafficPolicyLocal {
+		// If any of the two service doesn't select any pods with the selector, it likely uses an endpoints object to
+		// link the service to pods. LB-IPAM isn't smart enough to handle this case (yet), so we don't allow it.
+		if len(sv.Selector) == 0 || len(osv.Selector) == 0 {
+			return false
+		}
+
+		// If both use selectors, and they are not the same, then the services are not compatible.
+		if !maps.Equal(sv.Selector, osv.Selector) {
+			return false
+		}
+	}
+
+	// If we can't find any reason to disqualify the services, then they are compatible.
+	return true
+}
+
 func (sv *ServiceView) isSatisfied() bool {
 	// If the service requests specific IPs
 	if len(sv.RequestedIPs) > 0 {
 		for _, reqIP := range sv.RequestedIPs {
 			// If reqIP doesn't exist in the list of assigned IPs
 			if slices.IndexFunc(sv.Status.LoadBalancer.Ingress, func(in slim_core_v1.LoadBalancerIngress) bool {
-				return net.ParseIP(in.IP).Equal(reqIP)
+				addr, err := netip.ParseAddr(in.IP)
+				if err != nil {
+					return false
+				}
+				return addr.Compare(reqIP) == 0
 			}) == -1 {
 				return false
 			}
@@ -109,7 +176,7 @@ func (sv *ServiceView) isSatisfied() bool {
 
 // ServiceViewIP is the IP and from which range it was allocated
 type ServiceViewIP struct {
-	IP     net.IP
+	IP     netip.Addr
 	Origin *LBRange
 }
 

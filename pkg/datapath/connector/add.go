@@ -9,10 +9,9 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/cilium/cilium/pkg/datapath/linux/sysctl"
 	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/cilium/pkg/logging/logfields"
-	"github.com/cilium/cilium/pkg/rand"
-	"github.com/cilium/cilium/pkg/sysctl"
 )
 
 var log = logging.DefaultLogger.WithField(logfields.LogSubsys, "endpoint-connector")
@@ -38,13 +37,6 @@ func Endpoint2TempIfName(endpointID string) string {
 	return temporaryInterfacePrefix + truncateString(endpointID, 5)
 }
 
-// Endpoint2TempRandIfName returns a random, temporary interface name for the
-// given endpointID. This is similar to Endpoint2TempIfName() but uses a
-// random string instead of endpoint ID.
-func Endpoint2TempRandIfName() string {
-	return temporaryInterfacePrefix + "_" + rand.RandomLowercaseStringWithLen(5)
-}
-
 func truncateString(epID string, maxLen uint) string {
 	if maxLen <= uint(len(epID)) {
 		return epID[:maxLen]
@@ -53,6 +45,6 @@ func truncateString(epID string, maxLen uint) string {
 }
 
 // DisableRpFilter tries to disable rpfilter on specified interface
-func DisableRpFilter(ifName string) error {
+func DisableRpFilter(sysctl sysctl.Sysctl, ifName string) error {
 	return sysctl.Disable(fmt.Sprintf("net.ipv4.conf.%s.rp_filter", ifName))
 }

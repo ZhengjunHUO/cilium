@@ -12,6 +12,8 @@ import (
 	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
+// Modifies the configuration of the specified Amazon Web Services Verified Access
+// instance.
 func (c *Client) ModifyVerifiedAccessInstance(ctx context.Context, params *ModifyVerifiedAccessInstanceInput, optFns ...func(*Options)) (*ModifyVerifiedAccessInstanceOutput, error) {
 	if params == nil {
 		params = &ModifyVerifiedAccessInstanceInput{}
@@ -29,19 +31,31 @@ func (c *Client) ModifyVerifiedAccessInstance(ctx context.Context, params *Modif
 
 type ModifyVerifiedAccessInstanceInput struct {
 
+	// The ID of the Verified Access instance.
+	//
 	// This member is required.
 	VerifiedAccessInstanceId *string
 
+	// A unique, case-sensitive token that you provide to ensure idempotency of your
+	// modification request. For more information, see Ensuring Idempotency (https://docs.aws.amazon.com/AWSEC2/latest/APIReference/Run_Instance_Idempotency.html)
+	// .
 	ClientToken *string
 
+	// A description for the Verified Access instance.
 	Description *string
 
+	// Checks whether you have the required permissions for the action, without
+	// actually making the request, and provides an error response. If you have the
+	// required permissions, the error response is DryRunOperation . Otherwise, it is
+	// UnauthorizedOperation .
 	DryRun *bool
 
 	noSmithyDocumentSerde
 }
 
 type ModifyVerifiedAccessInstanceOutput struct {
+
+	// Details about the Verified Access instance.
 	VerifiedAccessInstance *types.VerifiedAccessInstance
 
 	// Metadata pertaining to the operation's result.
@@ -51,12 +65,22 @@ type ModifyVerifiedAccessInstanceOutput struct {
 }
 
 func (c *Client) addOperationModifyVerifiedAccessInstanceMiddlewares(stack *middleware.Stack, options Options) (err error) {
+	if err := stack.Serialize.Add(&setOperationInputMiddleware{}, middleware.After); err != nil {
+		return err
+	}
 	err = stack.Serialize.Add(&awsEc2query_serializeOpModifyVerifiedAccessInstance{}, middleware.After)
 	if err != nil {
 		return err
 	}
 	err = stack.Deserialize.Add(&awsEc2query_deserializeOpModifyVerifiedAccessInstance{}, middleware.After)
 	if err != nil {
+		return err
+	}
+	if err := addProtocolFinalizerMiddlewares(stack, options, "ModifyVerifiedAccessInstance"); err != nil {
+		return fmt.Errorf("add protocol finalizers: %v", err)
+	}
+
+	if err = addlegacyEndpointContextSetter(stack, options); err != nil {
 		return err
 	}
 	if err = addSetLoggerMiddleware(stack, options); err != nil {
@@ -77,22 +101,22 @@ func (c *Client) addOperationModifyVerifiedAccessInstanceMiddlewares(stack *midd
 	if err = addRetryMiddlewares(stack, options); err != nil {
 		return err
 	}
-	if err = addHTTPSignerV4Middleware(stack, options); err != nil {
-		return err
-	}
 	if err = awsmiddleware.AddRawResponseToMetadata(stack); err != nil {
 		return err
 	}
 	if err = awsmiddleware.AddRecordResponseTiming(stack); err != nil {
 		return err
 	}
-	if err = addClientUserAgent(stack); err != nil {
+	if err = addClientUserAgent(stack, options); err != nil {
 		return err
 	}
 	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
 		return err
 	}
 	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
+		return err
+	}
+	if err = addSetLegacyContextSigningOptionsMiddleware(stack); err != nil {
 		return err
 	}
 	if err = addIdempotencyToken_opModifyVerifiedAccessInstanceMiddleware(stack, options); err != nil {
@@ -104,6 +128,9 @@ func (c *Client) addOperationModifyVerifiedAccessInstanceMiddlewares(stack *midd
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opModifyVerifiedAccessInstance(options.Region), middleware.Before); err != nil {
 		return err
 	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
+		return err
+	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
 		return err
 	}
@@ -111,6 +138,9 @@ func (c *Client) addOperationModifyVerifiedAccessInstanceMiddlewares(stack *midd
 		return err
 	}
 	if err = addRequestResponseLogging(stack, options); err != nil {
+		return err
+	}
+	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
 		return err
 	}
 	return nil
@@ -153,7 +183,6 @@ func newServiceMetadataMiddleware_opModifyVerifiedAccessInstance(region string) 
 	return &awsmiddleware.RegisterServiceMetadata{
 		Region:        region,
 		ServiceID:     ServiceID,
-		SigningName:   "ec2",
 		OperationName: "ModifyVerifiedAccessInstance",
 	}
 }

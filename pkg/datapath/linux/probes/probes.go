@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,6 +19,8 @@ import (
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/asm"
 	"github.com/cilium/ebpf/features"
+	"github.com/google/gopacket"
+	"github.com/google/gopacket/layers"
 	"golang.org/x/sys/unix"
 
 	"github.com/cilium/cilium/pkg/command/exec"
@@ -59,6 +62,9 @@ func init() {
 	}
 }
 
+// ErrNotSupported indicates that a feature is not supported by the current kernel.
+var ErrNotSupported = errors.New("not supported")
+
 // KernelParam is a type based on string which represents CONFIG_* kernel
 // parameters which usually have values "y", "n" or "m".
 type KernelParam string
@@ -87,6 +93,7 @@ type ProgramHelper struct {
 
 type miscFeatures struct {
 	HaveLargeInsnLimit bool
+	HaveFibIfindex     bool
 }
 
 type FeatureProbes struct {
@@ -335,34 +342,6 @@ func (p *ProbeManager) KernelConfigAvailable() bool {
 	return true
 }
 
-// HaveMapType is a wrapper around features.HaveMapType() to check if a certain
-// BPF map type is supported by the kernel.
-// On unexpected probe results this function will terminate with log.Fatal().
-func HaveMapType(mt ebpf.MapType) error {
-	err := features.HaveMapType(mt)
-	if errors.Is(err, ebpf.ErrNotSupported) {
-		return err
-	}
-	if err != nil {
-		log.WithError(err).WithField("maptype", mt).Fatal("failed to probe MapType")
-	}
-	return nil
-}
-
-// HaveProgramType is a wrapper around features.HaveProgramType() to check
-// if a certain BPF program type is supported by the kernel.
-// On unexpected probe results this function will terminate with log.Fatal().
-func HaveProgramType(pt ebpf.ProgramType) error {
-	err := features.HaveProgramType(pt)
-	if errors.Is(err, ebpf.ErrNotSupported) {
-		return err
-	}
-	if err != nil {
-		log.WithError(err).WithField("programtype", pt).Fatal("failed to probe ProgramType")
-	}
-	return nil
-}
-
 // HaveProgramHelper is a wrapper around features.HaveProgramHelper() to
 // check if a certain BPF program/helper copmbination is supported by the kernel.
 // On unexpected probe results this function will terminate with log.Fatal().
@@ -405,6 +384,13 @@ func HaveBoundedLoops() error {
 	return nil
 }
 
+// HaveFibIfindex checks if kernel has d1c362e1dd68 ("bpf: Always return target
+// ifindex in bpf_fib_lookup") which is 5.10+. This got merged in the same kernel
+// as the new redirect helpers.
+func HaveFibIfindex() error {
+	return features.HaveProgramHelper(ebpf.SchedCLS, asm.FnRedirectPeer)
+}
+
 // HaveV2ISA is a wrapper around features.HaveV2ISA() to check if the kernel
 // supports the V2 ISA.
 // On unexpected probe results this function will terminate with log.Fatal().
@@ -430,6 +416,149 @@ func HaveV3ISA() error {
 	if err != nil {
 		log.WithError(err).Fatal("failed to probe V3 ISA")
 	}
+	return nil
+}
+
+// HaveOuterSourceIPSupport tests whether the kernel support setting the outer
+// source IP address via the bpf_skb_set_tunnel_key BPF helper. We can't rely
+// on the verifier to reject a program using the new support because the
+// verifier just accepts any argument size for that helper; non-supported
+// fields will simply not be used. Instead, we set the outer source IP and
+// retrieve it with bpf_skb_get_tunnel_key right after. If the retrieved value
+// equals the value set, we have a confirmation the kernel supports it.
+func HaveOuterSourceIPSupport() (err error) {
+	defer func() {
+		if err != nil && !errors.Is(err, ebpf.ErrNotSupported) {
+			log.WithError(err).Fatal("failed to probe for outer source IP support")
+		}
+	}()
+
+	progSpec := &ebpf.ProgramSpec{
+		Name:    "set_tunnel_key_probe",
+		Type:    ebpf.SchedACT,
+		License: "GPL",
+	}
+	progSpec.Instructions = asm.Instructions{
+		asm.Mov.Reg(asm.R8, asm.R1),
+
+		asm.Mov.Imm(asm.R2, 0),
+		asm.StoreMem(asm.RFP, -8, asm.R2, asm.DWord),
+		asm.StoreMem(asm.RFP, -16, asm.R2, asm.DWord),
+		asm.StoreMem(asm.RFP, -24, asm.R2, asm.DWord),
+		asm.StoreMem(asm.RFP, -32, asm.R2, asm.DWord),
+		asm.StoreMem(asm.RFP, -40, asm.R2, asm.DWord),
+		asm.Mov.Imm(asm.R2, 42),
+		asm.StoreMem(asm.RFP, -44, asm.R2, asm.Word),
+		asm.Mov.Reg(asm.R2, asm.RFP),
+		asm.Add.Imm(asm.R2, -44),
+		asm.Mov.Imm(asm.R3, 44), // sizeof(struct bpf_tunnel_key) when setting the outer source IP is supported.
+		asm.Mov.Imm(asm.R4, 0),
+		asm.FnSkbSetTunnelKey.Call(),
+
+		asm.Mov.Reg(asm.R1, asm.R8),
+		asm.Mov.Reg(asm.R2, asm.RFP),
+		asm.Add.Imm(asm.R2, -44),
+		asm.Mov.Imm(asm.R3, 44),
+		asm.Mov.Imm(asm.R4, 0),
+		asm.FnSkbGetTunnelKey.Call(),
+
+		asm.LoadMem(asm.R0, asm.RFP, -44, asm.Word),
+		asm.Return(),
+	}
+	prog, err := ebpf.NewProgram(progSpec)
+	if err != nil {
+		return err
+	}
+	defer prog.Close()
+
+	pkt := []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	ret, _, err := prog.Test(pkt)
+	if err != nil {
+		return err
+	}
+	if ret != 42 {
+		return ebpf.ErrNotSupported
+	}
+	return nil
+}
+
+// HaveSKBAdjustRoomL2RoomMACSupport tests whether the kernel supports the `bpf_skb_adjust_room` helper
+// with the `BPF_ADJ_ROOM_MAC` mode. To do so, we create a program that requests the passed in SKB
+// to be expanded by 20 bytes. The helper checks the `mode` argument and will return -ENOSUPP if
+// the mode is unknown. Otherwise it should resize the SKB by 20 bytes and return 0.
+func HaveSKBAdjustRoomL2RoomMACSupport() (err error) {
+	defer func() {
+		if err != nil && !errors.Is(err, ebpf.ErrNotSupported) {
+			log.WithError(err).Fatal("failed to probe for bpf_skb_adjust_room L2 room MAC support")
+		}
+	}()
+
+	progSpec := &ebpf.ProgramSpec{
+		Name:    "adjust_mac_room",
+		Type:    ebpf.SchedCLS,
+		License: "GPL",
+	}
+	progSpec.Instructions = asm.Instructions{
+		asm.Mov.Imm(asm.R2, 20), // len_diff
+		asm.Mov.Imm(asm.R3, 1),  // mode: BPF_ADJ_ROOM_MAC
+		asm.Mov.Imm(asm.R4, 0),  // flags: 0
+		asm.FnSkbAdjustRoom.Call(),
+		asm.Return(),
+	}
+	prog, err := ebpf.NewProgram(progSpec)
+	if err != nil {
+		return err
+	}
+	defer prog.Close()
+
+	// This is a Eth + IPv4 + UDP + data packet. The helper relies on a valid packet being passed in
+	// since it wants to know offsets of the different layers.
+	buf := gopacket.NewSerializeBuffer()
+	err = gopacket.SerializeLayers(buf, gopacket.SerializeOptions{},
+		&layers.Ethernet{
+			DstMAC:       net.HardwareAddr{0xff, 0xff, 0xff, 0xff, 0xff, 0xff},
+			SrcMAC:       net.HardwareAddr{0x0e, 0xf5, 0x16, 0x3d, 0x6b, 0xab},
+			EthernetType: layers.EthernetTypeIPv4,
+		},
+		&layers.IPv4{
+			Version:  4,
+			IHL:      5,
+			Length:   49,
+			Id:       0xCECB,
+			TTL:      64,
+			Protocol: layers.IPProtocolUDP,
+			SrcIP:    net.IPv4(0xc0, 0xa8, 0xb2, 0x56),
+			DstIP:    net.IPv4(0xc0, 0xa8, 0xb2, 0xff),
+		},
+		&layers.UDP{
+			SrcPort: 23939,
+			DstPort: 32412,
+		},
+		gopacket.Payload("M-SEARCH * HTTP/1.1\x0d\x0a"),
+	)
+	if err != nil {
+		return fmt.Errorf("craft packet: %w", err)
+	}
+
+	ret, _, err := prog.Test(buf.Bytes())
+	if err != nil {
+		return err
+	}
+	if ret != 0 {
+		return ebpf.ErrNotSupported
+	}
+	return nil
+}
+
+// HaveIPv6Support tests whether kernel can open an IPv6 socket. This will
+// also implicitly auto-load IPv6 kernel module if available and not yet
+// loaded.
+func HaveIPv6Support() error {
+	fd, err := unix.Socket(unix.AF_INET6, unix.SOCK_STREAM, 0)
+	if errors.Is(err, unix.EAFNOSUPPORT) || errors.Is(err, unix.EPROTONOSUPPORT) {
+		return ErrNotSupported
+	}
+	unix.Close(fd)
 	return nil
 }
 
@@ -496,17 +625,19 @@ func ExecuteHeaderProbes() *FeatureProbes {
 
 		// skb related probes
 		{ebpf.SchedCLS, asm.FnSkbChangeTail},
-		{ebpf.SchedCLS, asm.FnFibLookup},
 		{ebpf.SchedCLS, asm.FnCsumLevel},
 
 		// xdp related probes
-		{ebpf.XDP, asm.FnFibLookup},
+		{ebpf.XDP, asm.FnXdpGetBuffLen},
+		{ebpf.XDP, asm.FnXdpLoadBytes},
+		{ebpf.XDP, asm.FnXdpStoreBytes},
 	}
 	for _, ph := range progHelpers {
 		probes.ProgramHelpers[ph] = (HaveProgramHelper(ph.Program, ph.Helper) == nil)
 	}
 
 	probes.Misc.HaveLargeInsnLimit = (HaveLargeInstructionLimit() == nil)
+	probes.Misc.HaveFibIfindex = (HaveFibIfindex() == nil)
 
 	return &probes
 }
@@ -527,10 +658,7 @@ func writeCommonHeader(writer io.Writer, probes *FeatureProbes) error {
 		"HAVE_LARGE_INSN_LIMIT": probes.Misc.HaveLargeInsnLimit,
 		"HAVE_SET_RETVAL":       probes.ProgramHelpers[ProgramHelper{ebpf.CGroupSock, asm.FnSetRetval}],
 		"HAVE_FIB_NEIGH":        probes.ProgramHelpers[ProgramHelper{ebpf.SchedCLS, asm.FnRedirectNeigh}],
-		// Check if kernel has d1c362e1dd68 ("bpf: Always return target ifindex
-		// in bpf_fib_lookup") which is 5.10+. This got merged in the same kernel
-		// as the new redirect helpers.
-		"HAVE_FIB_IFINDEX": probes.ProgramHelpers[ProgramHelper{ebpf.SchedCLS, asm.FnRedirectPeer}],
+		"HAVE_FIB_IFINDEX":      probes.Misc.HaveFibIfindex,
 	}
 
 	return writeFeatureHeader(writer, features, true)
@@ -540,7 +668,6 @@ func writeCommonHeader(writer io.Writer, probes *FeatureProbes) error {
 func writeSkbHeader(writer io.Writer, probes *FeatureProbes) error {
 	featuresSkb := map[string]bool{
 		"HAVE_CHANGE_TAIL": probes.ProgramHelpers[ProgramHelper{ebpf.SchedCLS, asm.FnSkbChangeTail}],
-		"HAVE_FIB_LOOKUP":  probes.ProgramHelpers[ProgramHelper{ebpf.SchedCLS, asm.FnFibLookup}],
 		"HAVE_CSUM_LEVEL":  probes.ProgramHelpers[ProgramHelper{ebpf.SchedCLS, asm.FnCsumLevel}],
 	}
 
@@ -550,7 +677,9 @@ func writeSkbHeader(writer io.Writer, probes *FeatureProbes) error {
 // writeXdpHeader defines macros for bpf/include/bpf/features_xdp.h
 func writeXdpHeader(writer io.Writer, probes *FeatureProbes) error {
 	featuresXdp := map[string]bool{
-		"HAVE_FIB_LOOKUP": probes.ProgramHelpers[ProgramHelper{ebpf.XDP, asm.FnFibLookup}],
+		"HAVE_XDP_GET_BUFF_LEN": probes.ProgramHelpers[ProgramHelper{ebpf.XDP, asm.FnXdpGetBuffLen}],
+		"HAVE_XDP_LOAD_BYTES":   probes.ProgramHelpers[ProgramHelper{ebpf.XDP, asm.FnXdpLoadBytes}],
+		"HAVE_XDP_STORE_BYTES":  probes.ProgramHelpers[ProgramHelper{ebpf.XDP, asm.FnXdpStoreBytes}],
 	}
 
 	return writeFeatureHeader(writer, featuresXdp, false)

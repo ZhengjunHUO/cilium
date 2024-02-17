@@ -34,41 +34,27 @@ type DescribeTransitGatewayAttachmentsInput struct {
 
 	// Checks whether you have the required permissions for the action, without
 	// actually making the request, and provides an error response. If you have the
-	// required permissions, the error response is DryRunOperation. Otherwise, it is
-	// UnauthorizedOperation.
+	// required permissions, the error response is DryRunOperation . Otherwise, it is
+	// UnauthorizedOperation .
 	DryRun *bool
 
 	// One or more filters. The possible values are:
-	//
-	// * association.state - The state
-	// of the association (associating | associated | disassociating).
-	//
-	// *
-	// association.transit-gateway-route-table-id - The ID of the route table for the
-	// transit gateway.
-	//
-	// * resource-id - The ID of the resource.
-	//
-	// * resource-owner-id -
-	// The ID of the Amazon Web Services account that owns the resource.
-	//
-	// *
-	// resource-type - The resource type. Valid values are vpc | vpn |
-	// direct-connect-gateway | peering | connect.
-	//
-	// * state - The state of the
-	// attachment. Valid values are available | deleted | deleting | failed | failing |
-	// initiatingRequest | modifying | pendingAcceptance | pending | rollingBack |
-	// rejected | rejecting.
-	//
-	// * transit-gateway-attachment-id - The ID of the
-	// attachment.
-	//
-	// * transit-gateway-id - The ID of the transit gateway.
-	//
-	// *
-	// transit-gateway-owner-id - The ID of the Amazon Web Services account that owns
-	// the transit gateway.
+	//   - association.state - The state of the association ( associating | associated
+	//   | disassociating ).
+	//   - association.transit-gateway-route-table-id - The ID of the route table for
+	//   the transit gateway.
+	//   - resource-id - The ID of the resource.
+	//   - resource-owner-id - The ID of the Amazon Web Services account that owns the
+	//   resource.
+	//   - resource-type - The resource type. Valid values are vpc | vpn |
+	//   direct-connect-gateway | peering | connect .
+	//   - state - The state of the attachment. Valid values are available | deleted |
+	//   deleting | failed | failing | initiatingRequest | modifying |
+	//   pendingAcceptance | pending | rollingBack | rejected | rejecting .
+	//   - transit-gateway-attachment-id - The ID of the attachment.
+	//   - transit-gateway-id - The ID of the transit gateway.
+	//   - transit-gateway-owner-id - The ID of the Amazon Web Services account that
+	//   owns the transit gateway.
 	Filters []types.Filter
 
 	// The maximum number of results to return with a single call. To retrieve the
@@ -100,12 +86,22 @@ type DescribeTransitGatewayAttachmentsOutput struct {
 }
 
 func (c *Client) addOperationDescribeTransitGatewayAttachmentsMiddlewares(stack *middleware.Stack, options Options) (err error) {
+	if err := stack.Serialize.Add(&setOperationInputMiddleware{}, middleware.After); err != nil {
+		return err
+	}
 	err = stack.Serialize.Add(&awsEc2query_serializeOpDescribeTransitGatewayAttachments{}, middleware.After)
 	if err != nil {
 		return err
 	}
 	err = stack.Deserialize.Add(&awsEc2query_deserializeOpDescribeTransitGatewayAttachments{}, middleware.After)
 	if err != nil {
+		return err
+	}
+	if err := addProtocolFinalizerMiddlewares(stack, options, "DescribeTransitGatewayAttachments"); err != nil {
+		return fmt.Errorf("add protocol finalizers: %v", err)
+	}
+
+	if err = addlegacyEndpointContextSetter(stack, options); err != nil {
 		return err
 	}
 	if err = addSetLoggerMiddleware(stack, options); err != nil {
@@ -126,16 +122,13 @@ func (c *Client) addOperationDescribeTransitGatewayAttachmentsMiddlewares(stack 
 	if err = addRetryMiddlewares(stack, options); err != nil {
 		return err
 	}
-	if err = addHTTPSignerV4Middleware(stack, options); err != nil {
-		return err
-	}
 	if err = awsmiddleware.AddRawResponseToMetadata(stack); err != nil {
 		return err
 	}
 	if err = awsmiddleware.AddRecordResponseTiming(stack); err != nil {
 		return err
 	}
-	if err = addClientUserAgent(stack); err != nil {
+	if err = addClientUserAgent(stack, options); err != nil {
 		return err
 	}
 	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
@@ -144,7 +137,13 @@ func (c *Client) addOperationDescribeTransitGatewayAttachmentsMiddlewares(stack 
 	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
 		return err
 	}
+	if err = addSetLegacyContextSigningOptionsMiddleware(stack); err != nil {
+		return err
+	}
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opDescribeTransitGatewayAttachments(options.Region), middleware.Before); err != nil {
+		return err
+	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
@@ -154,6 +153,9 @@ func (c *Client) addOperationDescribeTransitGatewayAttachmentsMiddlewares(stack 
 		return err
 	}
 	if err = addRequestResponseLogging(stack, options); err != nil {
+		return err
+	}
+	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
 		return err
 	}
 	return nil
@@ -257,7 +259,6 @@ func newServiceMetadataMiddleware_opDescribeTransitGatewayAttachments(region str
 	return &awsmiddleware.RegisterServiceMetadata{
 		Region:        region,
 		ServiceID:     ServiceID,
-		SigningName:   "ec2",
 		OperationName: "DescribeTransitGatewayAttachments",
 	}
 }

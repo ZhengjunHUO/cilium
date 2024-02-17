@@ -23,7 +23,15 @@ import (
 // pool of allowlisted IPv4 addresses, preserving private IPv4 addresses, and
 // communicating between overlapping networks. For more information, see NAT
 // gateways (https://docs.aws.amazon.com/vpc/latest/userguide/vpc-nat-gateway.html)
-// in the Amazon Virtual Private Cloud User Guide.
+// in the Amazon VPC User Guide. When you create a public NAT gateway and assign it
+// an EIP or secondary EIPs, the network border group of the EIPs must match the
+// network border group of the Availability Zone (AZ) that the public NAT gateway
+// is in. If it's not the same, the NAT gateway will fail to launch. You can see
+// the network border group for the subnet's AZ by viewing the details of the
+// subnet. Similarly, you can view the network border group of an EIP by viewing
+// the details of the EIP address. For more information about network border groups
+// and EIPs, see Allocate an Elastic IP address (https://docs.aws.amazon.com/vpc/latest/userguide/vpc-eips.html#allocate-eip)
+// in the Amazon VPC User Guide.
 func (c *Client) CreateNatGateway(ctx context.Context, params *CreateNatGatewayInput, optFns ...func(*Options)) (*CreateNatGatewayOutput, error) {
 	if params == nil {
 		params = &CreateNatGatewayInput{}
@@ -41,7 +49,7 @@ func (c *Client) CreateNatGateway(ctx context.Context, params *CreateNatGatewayI
 
 type CreateNatGatewayInput struct {
 
-	// The subnet in which to create the NAT gateway.
+	// The ID of the subnet in which to create the NAT gateway.
 	//
 	// This member is required.
 	SubnetId *string
@@ -53,9 +61,8 @@ type CreateNatGatewayInput struct {
 	AllocationId *string
 
 	// Unique, case-sensitive identifier that you provide to ensure the idempotency of
-	// the request. For more information, see How to ensure idempotency
-	// (https://docs.aws.amazon.com/AWSEC2/latest/APIReference/Run_Instance_Idempotency.html).
-	// Constraint: Maximum 64 ASCII characters.
+	// the request. For more information, see Ensuring idempotency (https://docs.aws.amazon.com/AWSEC2/latest/APIReference/Run_Instance_Idempotency.html)
+	// . Constraint: Maximum 64 ASCII characters.
 	ClientToken *string
 
 	// Indicates whether the NAT gateway supports public or private connectivity. The
@@ -64,13 +71,28 @@ type CreateNatGatewayInput struct {
 
 	// Checks whether you have the required permissions for the action, without
 	// actually making the request, and provides an error response. If you have the
-	// required permissions, the error response is DryRunOperation. Otherwise, it is
-	// UnauthorizedOperation.
+	// required permissions, the error response is DryRunOperation . Otherwise, it is
+	// UnauthorizedOperation .
 	DryRun *bool
 
 	// The private IPv4 address to assign to the NAT gateway. If you don't provide an
 	// address, a private IPv4 address will be automatically assigned.
 	PrivateIpAddress *string
+
+	// Secondary EIP allocation IDs. For more information, see Create a NAT gateway (https://docs.aws.amazon.com/vpc/latest/userguide/vpc-nat-gateway.html#nat-gateway-creating)
+	// in the Amazon VPC User Guide.
+	SecondaryAllocationIds []string
+
+	// [Private NAT gateway only] The number of secondary private IPv4 addresses you
+	// want to assign to the NAT gateway. For more information about secondary
+	// addresses, see Create a NAT gateway (https://docs.aws.amazon.com/vpc/latest/userguide/vpc-nat-gateway.html#nat-gateway-creating)
+	// in the Amazon VPC User Guide.
+	SecondaryPrivateIpAddressCount *int32
+
+	// Secondary private IPv4 addresses. For more information about secondary
+	// addresses, see Create a NAT gateway (https://docs.aws.amazon.com/vpc/latest/userguide/vpc-nat-gateway.html#nat-gateway-creating)
+	// in the Amazon VPC User Guide.
+	SecondaryPrivateIpAddresses []string
 
 	// The tags to assign to the NAT gateway.
 	TagSpecifications []types.TagSpecification
@@ -80,8 +102,8 @@ type CreateNatGatewayInput struct {
 
 type CreateNatGatewayOutput struct {
 
-	// Unique, case-sensitive identifier to ensure the idempotency of the request. Only
-	// returned if a client token was provided in the request.
+	// Unique, case-sensitive identifier to ensure the idempotency of the request.
+	// Only returned if a client token was provided in the request.
 	ClientToken *string
 
 	// Information about the NAT gateway.
@@ -94,12 +116,22 @@ type CreateNatGatewayOutput struct {
 }
 
 func (c *Client) addOperationCreateNatGatewayMiddlewares(stack *middleware.Stack, options Options) (err error) {
+	if err := stack.Serialize.Add(&setOperationInputMiddleware{}, middleware.After); err != nil {
+		return err
+	}
 	err = stack.Serialize.Add(&awsEc2query_serializeOpCreateNatGateway{}, middleware.After)
 	if err != nil {
 		return err
 	}
 	err = stack.Deserialize.Add(&awsEc2query_deserializeOpCreateNatGateway{}, middleware.After)
 	if err != nil {
+		return err
+	}
+	if err := addProtocolFinalizerMiddlewares(stack, options, "CreateNatGateway"); err != nil {
+		return fmt.Errorf("add protocol finalizers: %v", err)
+	}
+
+	if err = addlegacyEndpointContextSetter(stack, options); err != nil {
 		return err
 	}
 	if err = addSetLoggerMiddleware(stack, options); err != nil {
@@ -120,22 +152,22 @@ func (c *Client) addOperationCreateNatGatewayMiddlewares(stack *middleware.Stack
 	if err = addRetryMiddlewares(stack, options); err != nil {
 		return err
 	}
-	if err = addHTTPSignerV4Middleware(stack, options); err != nil {
-		return err
-	}
 	if err = awsmiddleware.AddRawResponseToMetadata(stack); err != nil {
 		return err
 	}
 	if err = awsmiddleware.AddRecordResponseTiming(stack); err != nil {
 		return err
 	}
-	if err = addClientUserAgent(stack); err != nil {
+	if err = addClientUserAgent(stack, options); err != nil {
 		return err
 	}
 	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
 		return err
 	}
 	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
+		return err
+	}
+	if err = addSetLegacyContextSigningOptionsMiddleware(stack); err != nil {
 		return err
 	}
 	if err = addIdempotencyToken_opCreateNatGatewayMiddleware(stack, options); err != nil {
@@ -147,6 +179,9 @@ func (c *Client) addOperationCreateNatGatewayMiddlewares(stack *middleware.Stack
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opCreateNatGateway(options.Region), middleware.Before); err != nil {
 		return err
 	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
+		return err
+	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
 		return err
 	}
@@ -154,6 +189,9 @@ func (c *Client) addOperationCreateNatGatewayMiddlewares(stack *middleware.Stack
 		return err
 	}
 	if err = addRequestResponseLogging(stack, options); err != nil {
+		return err
+	}
+	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
 		return err
 	}
 	return nil
@@ -196,7 +234,6 @@ func newServiceMetadataMiddleware_opCreateNatGateway(region string) *awsmiddlewa
 	return &awsmiddleware.RegisterServiceMetadata{
 		Region:        region,
 		ServiceID:     ServiceID,
-		SigningName:   "ec2",
 		OperationName: "CreateNatGateway",
 	}
 }

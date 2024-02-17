@@ -18,17 +18,18 @@ with this Cilium version. Older Kubernetes versions not listed here do not have
 Cilium support. Newer Kubernetes versions, while not listed, will depend on the
 backward compatibility offered by Kubernetes.
 
-* 1.16
-* 1.17
-* 1.18
-* 1.19
-* 1.20
-* 1.21
-* 1.22
-* 1.23
-* 1.24
-* 1.25
 * 1.26
+* 1.27
+* 1.28
+* 1.29
+
+Additionally, Cilium runs e2e tests against various cloud providers' managed
+Kubernetes offerings using multiple Kubernetes versions. See the following links
+for the current test matrix for each cloud provider:
+
+- :git-tree:`AKS <.github/actions/azure/k8s-versions.yaml>`
+- :git-tree:`EKS <.github/actions/aws/k8s-versions.yaml>`
+- :git-tree:`GKE <.github/actions/gke/k8s-versions.yaml>`
 
 System Requirements
 ===================
@@ -39,10 +40,10 @@ Enable CNI in Kubernetes
 ========================
 
 :term:`CNI` - Container Network Interface is the plugin layer used by Kubernetes to
-delegate networking configuration. CNI must be enabled in your Kubernetes
-cluster in order to install Cilium. This is done by passing
-``--network-plugin=cni`` to kubelet on all nodes. For more information, see
-the `Kubernetes CNI network-plugins documentation <https://kubernetes.io/docs/concepts/extend-kubernetes/compute-storage-net/network-plugins/>`_.
+delegate networking configuration and is enabled by default in Kubernetes 1.24 and
+later. Previously, CNI plugins were managed by the kubelet using the ``--network-plugin=cni``
+command-line parameter. For more information, see the
+`Kubernetes CNI network-plugins documentation <https://kubernetes.io/docs/concepts/extend-kubernetes/compute-storage-net/network-plugins/>`_.
 
 Enable automatic node CIDR allocation (Recommended)
 ===================================================

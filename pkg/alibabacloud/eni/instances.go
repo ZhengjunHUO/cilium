@@ -5,7 +5,6 @@ package eni
 
 import (
 	"context"
-	"time"
 
 	"github.com/sirupsen/logrus"
 
@@ -15,10 +14,12 @@ import (
 	ipamTypes "github.com/cilium/cilium/pkg/ipam/types"
 	v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 	"github.com/cilium/cilium/pkg/lock"
+	"github.com/cilium/cilium/pkg/time"
 )
 
 // AlibabaCloudAPI is the API surface used of the ECS API
 type AlibabaCloudAPI interface {
+	GetInstance(ctx context.Context, vpcs ipamTypes.VirtualNetworkMap, subnets ipamTypes.SubnetMap, instanceID string) (*ipamTypes.Instance, error)
 	GetInstances(ctx context.Context, vpcs ipamTypes.VirtualNetworkMap, subnets ipamTypes.SubnetMap) (*ipamTypes.InstanceMap, error)
 	GetVSwitches(ctx context.Context) (ipamTypes.SubnetMap, error)
 	GetVPC(ctx context.Context, vpcID string) (*ipamTypes.VirtualNetwork, error)
@@ -36,6 +37,7 @@ type AlibabaCloudAPI interface {
 // by calling resync() regularly.
 type InstancesManager struct {
 	mutex          lock.RWMutex
+	resyncLock     lock.RWMutex
 	instances      *ipamTypes.InstanceMap
 	vSwitches      ipamTypes.SubnetMap
 	vpcs           ipamTypes.VirtualNetworkMap
@@ -79,6 +81,25 @@ func (m *InstancesManager) GetPoolQuota() ipamTypes.PoolQuotaMap {
 // cache in the instanceManager. It returns the time when the resync has
 // started or time.Time{} if it did not complete.
 func (m *InstancesManager) Resync(ctx context.Context) time.Time {
+	// Full API resync should block the instance incremental resync from all nodes.
+	m.resyncLock.Lock()
+	defer m.resyncLock.Unlock()
+	// An empty instanceID indicates the full resync.
+	return m.resync(ctx, "")
+}
+
+// InstanceSync fetches the ECS instance by the given ID and vSwitches and updates the local
+// cache in the instanceManager. It returns the time when the resync has
+// started or time.Time{} if it did not complete.
+func (m *InstancesManager) InstanceSync(ctx context.Context, instanceID string) time.Time {
+	// Instance incremental resync from different nodes should be executed in parallel,
+	// but must block the full API resync.
+	m.resyncLock.RLock()
+	defer m.resyncLock.RUnlock()
+	return m.resync(ctx, instanceID)
+}
+
+func (m *InstancesManager) resync(ctx context.Context, instanceID string) time.Time {
 	resyncStart := time.Now()
 
 	vpcs, err := m.api.GetVPCs(ctx)
@@ -99,25 +120,48 @@ func (m *InstancesManager) Resync(ctx context.Context) time.Time {
 		return time.Time{}
 	}
 
-	instances, err := m.api.GetInstances(ctx, vpcs, vSwitches)
-	if err != nil {
-		log.WithError(err).Warning("Unable to synchronize ECS interface list")
-		return time.Time{}
+	// An empty instanceID indicates that this is full resync, ENIs from all instances
+	// will be refetched from ECS API and updated to the local cache. Otherwise only
+	// the given instance will be updated.
+	if instanceID == "" {
+		instances, err := m.api.GetInstances(ctx, vpcs, vSwitches)
+		if err != nil {
+			log.WithError(err).Warning("Unable to synchronize ECS interface list")
+			return time.Time{}
+		}
+
+		log.WithFields(logrus.Fields{
+			"numInstances":      instances.NumInstances(),
+			"numVPCs":           len(vpcs),
+			"numVSwitches":      len(vSwitches),
+			"numSecurityGroups": len(securityGroups),
+		}).Info("Synchronized ENI information")
+
+		m.mutex.Lock()
+		defer m.mutex.Unlock()
+		m.instances = instances
+	} else {
+		instance, err := m.api.GetInstance(ctx, vpcs, vSwitches, instanceID)
+		if err != nil {
+			log.WithError(err).Warning("Unable to synchronize ECS interface list")
+			return time.Time{}
+		}
+
+		log.WithFields(logrus.Fields{
+			"instance":          instanceID,
+			"numVPCs":           len(vpcs),
+			"numVSwitches":      len(vSwitches),
+			"numSecurityGroups": len(securityGroups),
+		}).Info("Synchronized ENI information for the corresponding instance")
+
+		m.mutex.Lock()
+		defer m.mutex.Unlock()
+		m.instances.UpdateInstance(instanceID, instance)
 	}
 
-	log.WithFields(logrus.Fields{
-		"numInstances":      instances.NumInstances(),
-		"numVPCs":           len(vpcs),
-		"numVSwitches":      len(vSwitches),
-		"numSecurityGroups": len(securityGroups),
-	}).Info("Synchronized ENI information")
-
-	m.mutex.Lock()
-	m.instances = instances
 	m.vSwitches = vSwitches
 	m.vpcs = vpcs
 	m.securityGroups = securityGroups
-	m.mutex.Unlock()
 
 	return resyncStart
 }
@@ -161,7 +205,7 @@ func (m *InstancesManager) UpdateENI(instanceID string, eni *eniTypes.ENI) {
 	m.instances.Update(instanceID, eniRevision)
 }
 
-// FindOneVSwitch returns the vSwitch with the fewest available addresses, matching vpc and az.
+// FindOneVSwitch returns the vSwitch with the most available addresses, matching vpc and az.
 // If we have explicit ID or tag constraints, chose a matching vSwitch. ID constraints take
 // precedence.
 func (m *InstancesManager) FindOneVSwitch(spec eniTypes.Spec, toAllocate int) *ipamTypes.Subnet {
@@ -182,14 +226,14 @@ func (m *InstancesManager) FindOneVSwitch(spec eniTypes.Spec, toAllocate int) *i
 		if !vSwitch.Tags.Match(spec.VSwitchTags) {
 			continue
 		}
-		if bestSubnet == nil || bestSubnet.AvailableAddresses > vSwitch.AvailableAddresses {
+		if bestSubnet == nil || bestSubnet.AvailableAddresses < vSwitch.AvailableAddresses {
 			bestSubnet = vSwitch
 		}
 	}
 	return bestSubnet
 }
 
-// FindVSwitchByIDs returns the vSwitch within a provided list of vSwitch IDs with the fewest available addresses,
+// FindVSwitchByIDs returns the vSwitch within a provided list of vSwitch IDs with the most available addresses,
 // matching vpc and az.
 func (m *InstancesManager) FindVSwitchByIDs(spec eniTypes.Spec, toAllocate int) *ipamTypes.Subnet {
 	m.mutex.RLock()
@@ -207,7 +251,7 @@ func (m *InstancesManager) FindVSwitchByIDs(spec eniTypes.Spec, toAllocate int) 
 			if vSwitch.ID != vSwitchID {
 				continue
 			}
-			if bestSubnet == nil || bestSubnet.AvailableAddresses > vSwitch.AvailableAddresses {
+			if bestSubnet == nil || bestSubnet.AvailableAddresses < vSwitch.AvailableAddresses {
 				bestSubnet = vSwitch
 			}
 		}

@@ -4,6 +4,7 @@ package ec2
 
 import (
 	"context"
+	"fmt"
 	awsmiddleware "github.com/aws/aws-sdk-go-v2/aws/middleware"
 	"github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
@@ -11,11 +12,10 @@ import (
 	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
-// Creates a data feed for Spot Instances, enabling you to view Spot Instance usage
-// logs. You can create one data feed per Amazon Web Services account. For more
-// information, see Spot Instance data feed
-// (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/spot-data-feeds.html) in
-// the Amazon EC2 User Guide for Linux Instances.
+// Creates a data feed for Spot Instances, enabling you to view Spot Instance
+// usage logs. You can create one data feed per Amazon Web Services account. For
+// more information, see Spot Instance data feed (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/spot-data-feeds.html)
+// in the Amazon EC2 User Guide for Linux Instances.
 func (c *Client) CreateSpotDatafeedSubscription(ctx context.Context, params *CreateSpotDatafeedSubscriptionInput, optFns ...func(*Options)) (*CreateSpotDatafeedSubscriptionOutput, error) {
 	if params == nil {
 		params = &CreateSpotDatafeedSubscriptionInput{}
@@ -35,8 +35,7 @@ func (c *Client) CreateSpotDatafeedSubscription(ctx context.Context, params *Cre
 type CreateSpotDatafeedSubscriptionInput struct {
 
 	// The name of the Amazon S3 bucket in which to store the Spot Instance data feed.
-	// For more information about bucket names, see Rules for bucket naming
-	// (https://docs.aws.amazon.com/AmazonS3/latest/dev/BucketRestrictions.html#bucketnamingrules)
+	// For more information about bucket names, see Rules for bucket naming (https://docs.aws.amazon.com/AmazonS3/latest/dev/BucketRestrictions.html#bucketnamingrules)
 	// in the Amazon S3 Developer Guide.
 	//
 	// This member is required.
@@ -44,8 +43,8 @@ type CreateSpotDatafeedSubscriptionInput struct {
 
 	// Checks whether you have the required permissions for the action, without
 	// actually making the request, and provides an error response. If you have the
-	// required permissions, the error response is DryRunOperation. Otherwise, it is
-	// UnauthorizedOperation.
+	// required permissions, the error response is DryRunOperation . Otherwise, it is
+	// UnauthorizedOperation .
 	DryRun *bool
 
 	// The prefix for the data feed file names.
@@ -67,12 +66,22 @@ type CreateSpotDatafeedSubscriptionOutput struct {
 }
 
 func (c *Client) addOperationCreateSpotDatafeedSubscriptionMiddlewares(stack *middleware.Stack, options Options) (err error) {
+	if err := stack.Serialize.Add(&setOperationInputMiddleware{}, middleware.After); err != nil {
+		return err
+	}
 	err = stack.Serialize.Add(&awsEc2query_serializeOpCreateSpotDatafeedSubscription{}, middleware.After)
 	if err != nil {
 		return err
 	}
 	err = stack.Deserialize.Add(&awsEc2query_deserializeOpCreateSpotDatafeedSubscription{}, middleware.After)
 	if err != nil {
+		return err
+	}
+	if err := addProtocolFinalizerMiddlewares(stack, options, "CreateSpotDatafeedSubscription"); err != nil {
+		return fmt.Errorf("add protocol finalizers: %v", err)
+	}
+
+	if err = addlegacyEndpointContextSetter(stack, options); err != nil {
 		return err
 	}
 	if err = addSetLoggerMiddleware(stack, options); err != nil {
@@ -93,16 +102,13 @@ func (c *Client) addOperationCreateSpotDatafeedSubscriptionMiddlewares(stack *mi
 	if err = addRetryMiddlewares(stack, options); err != nil {
 		return err
 	}
-	if err = addHTTPSignerV4Middleware(stack, options); err != nil {
-		return err
-	}
 	if err = awsmiddleware.AddRawResponseToMetadata(stack); err != nil {
 		return err
 	}
 	if err = awsmiddleware.AddRecordResponseTiming(stack); err != nil {
 		return err
 	}
-	if err = addClientUserAgent(stack); err != nil {
+	if err = addClientUserAgent(stack, options); err != nil {
 		return err
 	}
 	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
@@ -111,10 +117,16 @@ func (c *Client) addOperationCreateSpotDatafeedSubscriptionMiddlewares(stack *mi
 	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
 		return err
 	}
+	if err = addSetLegacyContextSigningOptionsMiddleware(stack); err != nil {
+		return err
+	}
 	if err = addOpCreateSpotDatafeedSubscriptionValidationMiddleware(stack); err != nil {
 		return err
 	}
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opCreateSpotDatafeedSubscription(options.Region), middleware.Before); err != nil {
+		return err
+	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
@@ -126,6 +138,9 @@ func (c *Client) addOperationCreateSpotDatafeedSubscriptionMiddlewares(stack *mi
 	if err = addRequestResponseLogging(stack, options); err != nil {
 		return err
 	}
+	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -133,7 +148,6 @@ func newServiceMetadataMiddleware_opCreateSpotDatafeedSubscription(region string
 	return &awsmiddleware.RegisterServiceMetadata{
 		Region:        region,
 		ServiceID:     ServiceID,
-		SigningName:   "ec2",
 		OperationName: "CreateSpotDatafeedSubscription",
 	}
 }

@@ -13,24 +13,19 @@
 #define __ctx_skb		1
 #define __ctx_xdp		2
 
-static __always_inline void *ctx_data(const struct __ctx_buff *ctx)
-{
-	return (void *)(unsigned long)ctx->data;
-}
-
-static __always_inline void *ctx_data_meta(const struct __ctx_buff *ctx)
-{
-	return (void *)(unsigned long)ctx->data_meta;
-}
-
-static __always_inline void *ctx_data_end(const struct __ctx_buff *ctx)
-{
-	return (void *)(unsigned long)ctx->data_end;
-}
-
 static __always_inline bool ctx_no_room(const void *needed, const void *limit)
 {
 	return unlikely(needed > limit);
+}
+
+static __always_inline bool ctx_is_skb(void)
+{
+	return __ctx_is == __ctx_skb;
+}
+
+static __always_inline bool ctx_is_xdp(void)
+{
+	return __ctx_is == __ctx_xdp;
 }
 
 #endif /* __BPF_CTX_COMMON_H_ */

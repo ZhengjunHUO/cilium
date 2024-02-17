@@ -18,6 +18,8 @@ plugin is called to attach eBPF programs to the network devices set up by the
 AWS VPC CNI plugin in order to enforce network policies, perform load-balancing
 and provide encryption.
 
+.. image:: aws-cilium-architecture.png
+
 .. include:: cni-chaining-limitations.rst
 
 .. admonition:: Video
@@ -68,7 +70,7 @@ Deploy Cilium via Helm:
      --set cni.chainingMode=aws-cni \\
      --set cni.exclusive=false \\
      --set enableIPv4Masquerade=false \\
-     --set routingMode=native
+     --set routingMode=native \\
      --set endpointRoutes.enabled=true
 
 This will enable chaining with the AWS VPC CNI plugin. It will also disable

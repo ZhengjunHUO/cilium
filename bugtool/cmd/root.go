@@ -93,7 +93,7 @@ func init() {
 		"pprof-port", option.PprofPortAgent,
 		fmt.Sprintf(
 			"Pprof port to connect to. Known Cilium component ports are agent:%d, operator:%d, apiserver:%d",
-			option.PprofPortAgent, operatorOption.PprofPortOperator, apiserverOption.PprofPortAPIServer,
+			option.PprofPortAgent, operatorOption.PprofPortOperator, apiserverOption.PprofPortClusterMesh,
 		),
 	)
 	BugtoolRootCmd.Flags().IntVar(&traceSeconds, "pprof-trace-seconds", 180, "Amount of seconds used for pprof CPU traces")
@@ -452,7 +452,7 @@ func writeCmdToFile(cmdDir, prompt string, k8sPods []string, enableMarkdown bool
 			fmt.Fprint(f, string(output))
 		} else if enableMarkdown && len(output) > 0 {
 			// Write prompt as header and the output as body, and/or error but delete empty output.
-			fmt.Fprint(f, fmt.Sprintf("# %s\n\n```\n%s\n```\n", prompt, output))
+			fmt.Fprintf(f, "# %s\n\n```\n%s\n```\n", prompt, output)
 		}
 	}
 
@@ -499,11 +499,11 @@ func getCiliumPods(namespace, label string) ([]string, error) {
 }
 
 func dumpEnvoy(rootDir string, resource string, fileName string) error {
-	// curl --unix-socket /var/run/cilium/envoy-admin.sock http:/admin/config_dump\?include_eds > dump.json
+	// curl --unix-socket /var/run/cilium/envoy/sockets/admin.sock http:/admin/config_dump\?include_eds > dump.json
 	c := &http.Client{
 		Transport: &http.Transport{
 			DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
-				return net.Dial("unix", "/var/run/cilium/envoy-admin.sock")
+				return net.Dial("unix", "/var/run/cilium/envoy/sockets/admin.sock")
 			},
 		},
 	}

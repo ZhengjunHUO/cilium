@@ -7,7 +7,6 @@ import (
 	"context"
 	"crypto/tls"
 	"io"
-	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -16,6 +15,7 @@ import (
 	peerpb "github.com/cilium/cilium/api/v1/peer"
 	"github.com/cilium/cilium/pkg/crypto/certloader"
 	hubbleopts "github.com/cilium/cilium/pkg/hubble/server/serveroption"
+	"github.com/cilium/cilium/pkg/time"
 )
 
 // Client defines an interface that Peer service client should implement.
@@ -52,8 +52,11 @@ type LocalClientBuilder struct {
 func (b LocalClientBuilder) Client(target string) (Client, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), b.DialTimeout)
 	defer cancel()
-	// the connection is local so we assume WithInsecure() is safe in this context
-	conn, err := grpc.DialContext(ctx, target, grpc.WithInsecure(), grpc.WithBlock())
+	// The connection is local, so we assume using insecure connection is safe in
+	// this context.
+	conn, err := grpc.DialContext(ctx, target,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithBlock())
 	if err != nil {
 		return nil, err
 	}

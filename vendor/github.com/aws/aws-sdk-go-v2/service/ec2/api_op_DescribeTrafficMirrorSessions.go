@@ -33,37 +33,21 @@ type DescribeTrafficMirrorSessionsInput struct {
 
 	// Checks whether you have the required permissions for the action, without
 	// actually making the request, and provides an error response. If you have the
-	// required permissions, the error response is DryRunOperation. Otherwise, it is
-	// UnauthorizedOperation.
+	// required permissions, the error response is DryRunOperation . Otherwise, it is
+	// UnauthorizedOperation .
 	DryRun *bool
 
 	// One or more filters. The possible values are:
-	//
-	// * description: The Traffic Mirror
-	// session description.
-	//
-	// * network-interface-id: The ID of the Traffic Mirror
-	// session network interface.
-	//
-	// * owner-id: The ID of the account that owns the
-	// Traffic Mirror session.
-	//
-	// * packet-length: The assigned number of packets to
-	// mirror.
-	//
-	// * session-number: The assigned session number.
-	//
-	// *
-	// traffic-mirror-filter-id: The ID of the Traffic Mirror filter.
-	//
-	// *
-	// traffic-mirror-session-id: The ID of the Traffic Mirror session.
-	//
-	// *
-	// traffic-mirror-target-id: The ID of the Traffic Mirror target.
-	//
-	// *
-	// virtual-network-id: The virtual network ID of the Traffic Mirror session.
+	//   - description : The Traffic Mirror session description.
+	//   - network-interface-id : The ID of the Traffic Mirror session network
+	//   interface.
+	//   - owner-id : The ID of the account that owns the Traffic Mirror session.
+	//   - packet-length : The assigned number of packets to mirror.
+	//   - session-number : The assigned session number.
+	//   - traffic-mirror-filter-id : The ID of the Traffic Mirror filter.
+	//   - traffic-mirror-session-id : The ID of the Traffic Mirror session.
+	//   - traffic-mirror-target-id : The ID of the Traffic Mirror target.
+	//   - virtual-network-id : The virtual network ID of the Traffic Mirror session.
 	Filters []types.Filter
 
 	// The maximum number of results to return with a single call. To retrieve the
@@ -96,12 +80,22 @@ type DescribeTrafficMirrorSessionsOutput struct {
 }
 
 func (c *Client) addOperationDescribeTrafficMirrorSessionsMiddlewares(stack *middleware.Stack, options Options) (err error) {
+	if err := stack.Serialize.Add(&setOperationInputMiddleware{}, middleware.After); err != nil {
+		return err
+	}
 	err = stack.Serialize.Add(&awsEc2query_serializeOpDescribeTrafficMirrorSessions{}, middleware.After)
 	if err != nil {
 		return err
 	}
 	err = stack.Deserialize.Add(&awsEc2query_deserializeOpDescribeTrafficMirrorSessions{}, middleware.After)
 	if err != nil {
+		return err
+	}
+	if err := addProtocolFinalizerMiddlewares(stack, options, "DescribeTrafficMirrorSessions"); err != nil {
+		return fmt.Errorf("add protocol finalizers: %v", err)
+	}
+
+	if err = addlegacyEndpointContextSetter(stack, options); err != nil {
 		return err
 	}
 	if err = addSetLoggerMiddleware(stack, options); err != nil {
@@ -122,16 +116,13 @@ func (c *Client) addOperationDescribeTrafficMirrorSessionsMiddlewares(stack *mid
 	if err = addRetryMiddlewares(stack, options); err != nil {
 		return err
 	}
-	if err = addHTTPSignerV4Middleware(stack, options); err != nil {
-		return err
-	}
 	if err = awsmiddleware.AddRawResponseToMetadata(stack); err != nil {
 		return err
 	}
 	if err = awsmiddleware.AddRecordResponseTiming(stack); err != nil {
 		return err
 	}
-	if err = addClientUserAgent(stack); err != nil {
+	if err = addClientUserAgent(stack, options); err != nil {
 		return err
 	}
 	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
@@ -140,7 +131,13 @@ func (c *Client) addOperationDescribeTrafficMirrorSessionsMiddlewares(stack *mid
 	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
 		return err
 	}
+	if err = addSetLegacyContextSigningOptionsMiddleware(stack); err != nil {
+		return err
+	}
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opDescribeTrafficMirrorSessions(options.Region), middleware.Before); err != nil {
+		return err
+	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
@@ -150,6 +147,9 @@ func (c *Client) addOperationDescribeTrafficMirrorSessionsMiddlewares(stack *mid
 		return err
 	}
 	if err = addRequestResponseLogging(stack, options); err != nil {
+		return err
+	}
+	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
 		return err
 	}
 	return nil
@@ -253,7 +253,6 @@ func newServiceMetadataMiddleware_opDescribeTrafficMirrorSessions(region string)
 	return &awsmiddleware.RegisterServiceMetadata{
 		Region:        region,
 		ServiceID:     ServiceID,
-		SigningName:   "ec2",
 		OperationName: "DescribeTrafficMirrorSessions",
 	}
 }

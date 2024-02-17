@@ -4,25 +4,49 @@
 package k8s
 
 import (
+	"context"
 	"net"
+	"slices"
+	"sync"
 
 	"github.com/davecgh/go-spew/spew"
 	"github.com/sirupsen/logrus"
-	"golang.org/x/exp/slices"
+	"github.com/spf13/pflag"
 	core_v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
 
 	cmtypes "github.com/cilium/cilium/pkg/clustermesh/types"
 	"github.com/cilium/cilium/pkg/datapath/types"
+	"github.com/cilium/cilium/pkg/hive/cell"
 	"github.com/cilium/cilium/pkg/ip"
 	slim_corev1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/core/v1"
-	slim_discovery_v1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/discovery/v1"
-	slim_discovery_v1beta1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/discovery/v1beta1"
 	"github.com/cilium/cilium/pkg/loadbalancer"
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/logging/logfields"
+	"github.com/cilium/cilium/pkg/node"
 	"github.com/cilium/cilium/pkg/option"
 	serviceStore "github.com/cilium/cilium/pkg/service/store"
 )
+
+// ServiceCacheCell initializes the service cache holds the list of known services
+// correlated with the matching endpoints
+var ServiceCacheCell = cell.Module(
+	"service-cache",
+	"Service Cache",
+
+	cell.Config(ServiceCacheConfig{}),
+	cell.Provide(newServiceCache),
+)
+
+// ServiceCacheConfig defines the configuration options for the service cache.
+type ServiceCacheConfig struct {
+	EnableServiceTopology bool
+}
+
+// Flags implements the cell.Flagger interface.
+func (def ServiceCacheConfig) Flags(flags *pflag.FlagSet) {
+	flags.Bool("enable-service-topology", def.EnableServiceTopology, "Enable support for service topology aware hints")
+}
 
 // CacheAction is the type of action that was performed on the cache
 type CacheAction int
@@ -59,11 +83,14 @@ type ServiceEvent struct {
 	// Service is the service structure
 	Service *Service
 
-	// OldService is the service structure
+	// OldService is the old service structure
 	OldService *Service
 
 	// Endpoints is the endpoints structured correlated with the service
 	Endpoints *Endpoints
+
+	// OldEndpoints is old endpoints structure.
+	OldEndpoints *Endpoints
 
 	// SWG provides a mechanism to detect if a service was synchronized with
 	// the datapath.
@@ -73,6 +100,8 @@ type ServiceEvent struct {
 // ServiceCache is a list of services correlated with the matching endpoints.
 // The Events member will receive events as services.
 type ServiceCache struct {
+	config ServiceCacheConfig
+
 	Events chan ServiceEvent
 
 	// mutex protects the maps below including the concurrent access of each
@@ -95,14 +124,48 @@ type ServiceCache struct {
 }
 
 // NewServiceCache returns a new ServiceCache
-func NewServiceCache(nodeAddressing types.NodeAddressing) ServiceCache {
-	return ServiceCache{
+func NewServiceCache(nodeAddressing types.NodeAddressing) *ServiceCache {
+	return &ServiceCache{
 		services:          map[ServiceID]*Service{},
 		endpoints:         map[ServiceID]*EndpointSlices{},
 		externalEndpoints: map[ServiceID]externalEndpoints{},
 		Events:            make(chan ServiceEvent, option.Config.K8sServiceCacheSize),
 		nodeAddressing:    nodeAddressing,
 	}
+}
+
+func newServiceCache(lc cell.Lifecycle, nodeAddressing types.NodeAddressing, cfg ServiceCacheConfig, lns *node.LocalNodeStore) *ServiceCache {
+	sc := NewServiceCache(nodeAddressing)
+	sc.config = cfg
+
+	var wg sync.WaitGroup
+	ctx, cancel := context.WithCancel(context.Background())
+	lc.Append(cell.Hook{
+		OnStart: func(hc cell.HookContext) error {
+			if !cfg.EnableServiceTopology {
+				return nil
+			}
+
+			// Explicitly get the labels in addition to registering the observer,
+			// as otherwise we wouldn't block until the first event is observed.
+			ln, err := lns.Get(hc)
+			sc.updateSelfNodeLabels(ln.Labels)
+
+			wg.Add(1)
+			lns.Observe(ctx, func(ln node.LocalNode) {
+				sc.updateSelfNodeLabels(ln.Labels)
+			}, func(error) { wg.Done() })
+
+			return err
+		},
+		OnStop: func(hc cell.HookContext) error {
+			cancel()
+			wg.Wait()
+			return nil
+		},
+	})
+
+	return sc
 }
 
 // GetServiceIP returns a random L3n4Addr that is backing the given Service ID.
@@ -215,12 +278,13 @@ func (s *ServiceCache) UpdateService(k8sSvc *slim_corev1.Service, swg *lock.Stop
 	if serviceReady {
 		swg.Add()
 		s.Events <- ServiceEvent{
-			Action:     UpdateService,
-			ID:         svcID,
-			Service:    newService,
-			OldService: oldService,
-			Endpoints:  endpoints,
-			SWG:        swg,
+			Action:       UpdateService,
+			ID:           svcID,
+			Service:      newService,
+			OldService:   oldService,
+			Endpoints:    endpoints,
+			OldEndpoints: endpoints,
+			SWG:          swg,
 		}
 	}
 
@@ -234,12 +298,13 @@ func (s *ServiceCache) EnsureService(svcID ServiceID, swg *lock.StoppableWaitGro
 		if endpoints, serviceReady := s.correlateEndpoints(svcID); serviceReady {
 			swg.Add()
 			s.Events <- ServiceEvent{
-				Action:     UpdateService,
-				ID:         svcID,
-				Service:    svc,
-				OldService: svc,
-				Endpoints:  endpoints,
-				SWG:        swg,
+				Action:       UpdateService,
+				ID:           svcID,
+				Service:      svc,
+				OldService:   svc,
+				Endpoints:    endpoints,
+				OldEndpoints: endpoints,
+				SWG:          swg,
 			}
 			return true
 		}
@@ -271,13 +336,38 @@ func (s *ServiceCache) DeleteService(k8sSvc *slim_corev1.Service, swg *lock.Stop
 	}
 }
 
-func (s *ServiceCache) updateEndpoints(esID EndpointSliceID, newEndpoints *Endpoints, swg *lock.StoppableWaitGroup) (ServiceID, *Endpoints) {
+// LocalServices returns the list of known services that are not marked as
+// global (i.e., whose backends are all in the local cluster only).
+func (s *ServiceCache) LocalServices() sets.Set[ServiceID] {
+	ids := sets.New[ServiceID]()
+
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+
+	for id, svc := range s.services {
+		if !svc.IncludeExternal {
+			ids.Insert(id)
+		}
+	}
+
+	return ids
+}
+
+// UpdateEndpoints parses a Kubernetes endpoints and adds or updates it in the
+// ServiceCache. Returns the ServiceID unless the Kubernetes endpoints could not
+// be parsed and a bool to indicate whether the endpoints was changed in the
+// cache or not.
+func (s *ServiceCache) UpdateEndpoints(newEndpoints *Endpoints, swg *lock.StoppableWaitGroup) (ServiceID, *Endpoints) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
+	esID := newEndpoints.EndpointSliceID
+
+	var oldEPs *Endpoints
 	eps, ok := s.endpoints[esID.ServiceID]
 	if ok {
-		if eps.epSlices[esID.EndpointSliceName].DeepEqual(newEndpoints) {
+		oldEPs = eps.epSlices[esID.EndpointSliceName]
+		if oldEPs.DeepEqual(newEndpoints) {
 			return esID.ServiceID, newEndpoints
 		}
 	} else {
@@ -293,84 +383,51 @@ func (s *ServiceCache) updateEndpoints(esID EndpointSliceID, newEndpoints *Endpo
 	if ok && serviceReady {
 		swg.Add()
 		s.Events <- ServiceEvent{
-			Action:    UpdateService,
-			ID:        esID.ServiceID,
-			Service:   svc,
-			Endpoints: endpoints,
-			SWG:       swg,
+			Action:       UpdateService,
+			ID:           esID.ServiceID,
+			Service:      svc,
+			Endpoints:    endpoints,
+			OldEndpoints: oldEPs,
+			SWG:          swg,
 		}
 	}
 
 	return esID.ServiceID, endpoints
 }
 
-// UpdateEndpoints parses a Kubernetes endpoints and adds or updates it in the
-// ServiceCache. Returns the ServiceID unless the Kubernetes endpoints could not
-// be parsed and a bool to indicate whether the endpoints was changed in the
-// cache or not.
-func (s *ServiceCache) UpdateEndpoints(k8sEndpoints *slim_corev1.Endpoints, swg *lock.StoppableWaitGroup) (ServiceID, *Endpoints) {
-	svcID, newEndpoints := ParseEndpoints(k8sEndpoints)
-	epSliceID := EndpointSliceID{
-		ServiceID:         svcID,
-		EndpointSliceName: k8sEndpoints.GetName(),
-	}
-	return s.updateEndpoints(epSliceID, newEndpoints, swg)
-}
-
-func (s *ServiceCache) UpdateEndpointSlicesV1(epSlice *slim_discovery_v1.EndpointSlice, swg *lock.StoppableWaitGroup) (ServiceID, *Endpoints) {
-	svcID, newEndpoints := ParseEndpointSliceV1(epSlice)
-
-	return s.updateEndpoints(svcID, newEndpoints, swg)
-}
-
-func (s *ServiceCache) UpdateEndpointSlicesV1Beta1(epSlice *slim_discovery_v1beta1.EndpointSlice, swg *lock.StoppableWaitGroup) (ServiceID, *Endpoints) {
-	svcID, newEndpoints := ParseEndpointSliceV1Beta1(epSlice)
-
-	return s.updateEndpoints(svcID, newEndpoints, swg)
-}
-
-func (s *ServiceCache) deleteEndpoints(svcID EndpointSliceID, swg *lock.StoppableWaitGroup) ServiceID {
+// DeleteEndpoints parses a Kubernetes endpoints and removes it from the
+// ServiceCache
+func (s *ServiceCache) DeleteEndpoints(svcID EndpointSliceID, swg *lock.StoppableWaitGroup) ServiceID {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
+	var oldEPs *Endpoints
 	svc, serviceOK := s.services[svcID.ServiceID]
-	isEmpty := s.endpoints[svcID.ServiceID].Delete(svcID.EndpointSliceName)
-	if isEmpty {
-		delete(s.endpoints, svcID.ServiceID)
+	eps, ok := s.endpoints[svcID.ServiceID]
+	if ok {
+		oldEPs = eps.epSlices[svcID.EndpointSliceName].DeepCopy() // copy for passing to ServiceEvent
+		isEmpty := eps.Delete(svcID.EndpointSliceName)
+		if isEmpty {
+			delete(s.endpoints, svcID.ServiceID)
+		}
 	}
 	endpoints, _ := s.correlateEndpoints(svcID.ServiceID)
 
 	if serviceOK {
 		swg.Add()
 		event := ServiceEvent{
-			Action:    UpdateService,
-			ID:        svcID.ServiceID,
-			Service:   svc,
-			Endpoints: endpoints,
-			SWG:       swg,
+			Action:       UpdateService,
+			ID:           svcID.ServiceID,
+			Service:      svc,
+			Endpoints:    endpoints,
+			OldEndpoints: oldEPs,
+			SWG:          swg,
 		}
 
 		s.Events <- event
 	}
 
 	return svcID.ServiceID
-}
-
-// DeleteEndpoints parses a Kubernetes endpoints and removes it from the
-// ServiceCache
-func (s *ServiceCache) DeleteEndpoints(k8sEndpoints *slim_corev1.Endpoints, swg *lock.StoppableWaitGroup) ServiceID {
-	svcID := ParseEndpointsID(k8sEndpoints)
-	epSliceID := EndpointSliceID{
-		ServiceID:         svcID,
-		EndpointSliceName: k8sEndpoints.GetName(),
-	}
-	return s.deleteEndpoints(epSliceID, swg)
-}
-
-func (s *ServiceCache) DeleteEndpointSlices(epSlice endpointSlice, swg *lock.StoppableWaitGroup) ServiceID {
-	svcID := ParseEndpointSliceID(epSlice)
-
-	return s.deleteEndpoints(svcID, swg)
 }
 
 // FrontendList is the list of all k8s service frontends
@@ -434,7 +491,7 @@ func (s *ServiceCache) UniqueServiceFrontends() FrontendList {
 // filterEndpoints filters local endpoints by using k8s service heuristics.
 // For now it only implements the topology aware hints.
 func (s *ServiceCache) filterEndpoints(localEndpoints *Endpoints, svc *Service) *Endpoints {
-	if !option.Config.EnableServiceTopology || svc == nil || !svc.TopologyAware {
+	if !s.config.EnableServiceTopology || svc == nil || !svc.TopologyAware {
 		return localEndpoints
 	}
 
@@ -499,7 +556,7 @@ func (s *ServiceCache) correlateEndpoints(id ServiceID) (*Endpoints, bool) {
 
 		for ip, e := range localEndpoints.Backends {
 			e.Preferred = svcFound && svc.IncludeExternal && svc.ServiceAffinity == serviceAffinityLocal
-			endpoints.Backends[ip] = e
+			endpoints.Backends[ip] = e.DeepCopy()
 		}
 	}
 
@@ -522,7 +579,7 @@ func (s *ServiceCache) correlateEndpoints(id ServiceID) (*Endpoints, bool) {
 						}).Warning("Conflicting service backend IP")
 					} else {
 						e.Preferred = svc.ServiceAffinity == serviceAffinityRemote
-						endpoints.Backends[ip] = e
+						endpoints.Backends[ip] = e.DeepCopy()
 					}
 				}
 			}
@@ -572,6 +629,8 @@ func (s *ServiceCache) mergeServiceUpdateLocked(service *serviceStore.ClusterSer
 		s.externalEndpoints[id] = externalEndpoints
 	}
 
+	oldEPs, _ := s.correlateEndpoints(id)
+
 	// The cluster the service belongs to will match the current one when dealing with external
 	// workloads (and in that case all endpoints shall be always present), and not match in the
 	// cluster-mesh case (where remote endpoints shall be used only if it is shared).
@@ -581,7 +640,14 @@ func (s *ServiceCache) mergeServiceUpdateLocked(service *serviceStore.ClusterSer
 		scopedLog.Debugf("Updating backends to %+v", service.Backends)
 		backends := map[cmtypes.AddrCluster]*Backend{}
 		for ipString, portConfig := range service.Backends {
-			backends[cmtypes.MustParseAddrCluster(ipString)] = &Backend{Ports: portConfig}
+			addr, err := cmtypes.ParseAddrCluster(ipString)
+			if err != nil {
+				scopedLog.WithField(logfields.IPAddr, ipString).
+					Error("Skipping service backend due to invalid IP address")
+				continue
+			}
+
+			backends[addr] = &Backend{Ports: portConfig}
 		}
 		externalEndpoints.endpoints[service.Cluster] = &Endpoints{
 			Backends: backends,
@@ -596,12 +662,13 @@ func (s *ServiceCache) mergeServiceUpdateLocked(service *serviceStore.ClusterSer
 	if ok && serviceReady {
 		swg.Add()
 		s.Events <- ServiceEvent{
-			Action:     UpdateService,
-			ID:         id,
-			Service:    svc,
-			OldService: oldService,
-			Endpoints:  endpoints,
-			SWG:        swg,
+			Action:       UpdateService,
+			ID:           id,
+			Service:      svc,
+			OldService:   oldService,
+			Endpoints:    endpoints,
+			OldEndpoints: oldEPs,
+			SWG:          swg,
 		}
 	}
 }
@@ -640,6 +707,8 @@ func (s *ServiceCache) mergeExternalServiceDeleteLocked(service *serviceStore.Cl
 	if ok {
 		scopedLog.Debug("Deleting external endpoints")
 
+		oldEPs, _ := s.correlateEndpoints(id)
+
 		delete(externalEndpoints.endpoints, service.Cluster)
 		if len(externalEndpoints.endpoints) == 0 {
 			delete(s.externalEndpoints, id)
@@ -653,11 +722,12 @@ func (s *ServiceCache) mergeExternalServiceDeleteLocked(service *serviceStore.Cl
 		if ok && svc.Shared {
 			swg.Add()
 			event := ServiceEvent{
-				Action:    UpdateService,
-				ID:        id,
-				Service:   svc,
-				Endpoints: endpoints,
-				SWG:       swg,
+				Action:       UpdateService,
+				ID:           id,
+				Service:      svc,
+				Endpoints:    endpoints,
+				OldEndpoints: oldEPs,
+				SWG:          swg,
 			}
 
 			if !serviceReady {
@@ -737,35 +807,7 @@ func (s *ServiceCache) DebugStatus() string {
 	return str
 }
 
-// Implementation of subscriber.Node
-
-func (s *ServiceCache) OnAddNode(node *core_v1.Node, swg *lock.StoppableWaitGroup) error {
-	s.updateSelfNodeLabels(node.GetLabels(), swg)
-
-	return nil
-}
-
-func (s *ServiceCache) OnUpdateNode(oldNode, newNode *core_v1.Node,
-	swg *lock.StoppableWaitGroup) error {
-
-	s.updateSelfNodeLabels(newNode.GetLabels(), swg)
-
-	return nil
-}
-
-func (s *ServiceCache) OnDeleteNode(node *core_v1.Node,
-	swg *lock.StoppableWaitGroup) error {
-
-	return nil
-}
-
-func (s *ServiceCache) updateSelfNodeLabels(labels map[string]string,
-	swg *lock.StoppableWaitGroup) {
-
-	if !option.Config.EnableServiceTopology {
-		return
-	}
-
+func (s *ServiceCache) updateSelfNodeLabels(labels map[string]string) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
@@ -783,14 +825,16 @@ func (s *ServiceCache) updateSelfNodeLabels(labels map[string]string,
 		}
 
 		if endpoints, ready := s.correlateEndpoints(id); ready {
+			swg := lock.NewStoppableWaitGroup()
 			swg.Add()
 			s.Events <- ServiceEvent{
-				Action:     UpdateService,
-				ID:         id,
-				Service:    svc,
-				OldService: svc,
-				Endpoints:  endpoints,
-				SWG:        swg,
+				Action:       UpdateService,
+				ID:           id,
+				Service:      svc,
+				OldService:   svc,
+				Endpoints:    endpoints,
+				OldEndpoints: endpoints,
+				SWG:          swg,
 			}
 		}
 	}

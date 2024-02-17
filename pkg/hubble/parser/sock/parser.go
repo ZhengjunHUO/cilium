@@ -4,8 +4,6 @@
 package sock
 
 import (
-	"bytes"
-	"encoding/binary"
 	"fmt"
 	"net"
 	"net/netip"
@@ -14,7 +12,6 @@ import (
 	"github.com/sirupsen/logrus"
 
 	flowpb "github.com/cilium/cilium/api/v1/flow"
-	"github.com/cilium/cilium/pkg/byteorder"
 	"github.com/cilium/cilium/pkg/hubble/parser/common"
 	"github.com/cilium/cilium/pkg/hubble/parser/errors"
 	"github.com/cilium/cilium/pkg/hubble/parser/getters"
@@ -74,7 +71,7 @@ func (p *Parser) Decode(data []byte, decoded *flowpb.Flow) error {
 	}
 
 	sock := &monitor.TraceSockNotify{}
-	if err := binary.Read(bytes.NewReader(data), byteorder.Native, sock); err != nil {
+	if err := monitor.DecodeTraceSockNotify(data, sock); err != nil {
 		return fmt.Errorf("failed to parse sock trace event: %w", err)
 	}
 
@@ -94,8 +91,14 @@ func (p *Parser) Decode(data []byte, decoded *flowpb.Flow) error {
 	srcIP, _ := ippkg.AddrFromIP(epIP)
 	srcPort := uint16(0) // source port is not known for TraceSock events
 
-	srcEndpoint := p.epResolver.ResolveEndpoint(srcIP, 0)
-	dstEndpoint := p.epResolver.ResolveEndpoint(dstIP, 0)
+	datapathContext := common.DatapathContext{
+		SrcIP:      srcIP,
+		SrcLabelID: 0,
+		DstIP:      dstIP,
+		DstLabelID: 0,
+	}
+	srcEndpoint := p.epResolver.ResolveEndpoint(srcIP, 0, datapathContext)
+	dstEndpoint := p.epResolver.ResolveEndpoint(dstIP, 0, datapathContext)
 
 	// On the reverse path, source and destination IP of the packet are reversed
 	isRevNat := decodeRevNat(sock.XlatePoint)

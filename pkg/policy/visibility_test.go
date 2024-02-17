@@ -4,7 +4,7 @@
 package policy
 
 import (
-	. "gopkg.in/check.v1"
+	. "github.com/cilium/checkmate"
 
 	"github.com/cilium/cilium/pkg/checker"
 	"github.com/cilium/cilium/pkg/policy/api"
@@ -40,7 +40,7 @@ func (ds *PolicyTestSuite) TestVisibilityPolicyCreation(c *C) {
 	c.Assert(err, IsNil)
 
 	c.Assert(len(vp.Ingress), Equals, 1)
-	c.Assert(vp.Ingress["80/TCP"], DeepEquals, &VisibilityMetadata{
+	c.Assert(vp.Ingress["80/TCP"], checker.DeepEquals, &VisibilityMetadata{
 		Proto:   u8proto.TCP,
 		Port:    uint16(80),
 		Parser:  ParserTypeHTTP,
@@ -53,13 +53,13 @@ func (ds *PolicyTestSuite) TestVisibilityPolicyCreation(c *C) {
 	c.Assert(err, IsNil)
 
 	c.Assert(len(vp.Ingress), Equals, 2)
-	c.Assert(vp.Ingress["80/TCP"], DeepEquals, &VisibilityMetadata{
+	c.Assert(vp.Ingress["80/TCP"], checker.DeepEquals, &VisibilityMetadata{
 		Proto:   u8proto.TCP,
 		Port:    uint16(80),
 		Parser:  ParserTypeHTTP,
 		Ingress: true,
 	})
-	c.Assert(vp.Ingress["8080/TCP"], DeepEquals, &VisibilityMetadata{
+	c.Assert(vp.Ingress["8080/TCP"], checker.DeepEquals, &VisibilityMetadata{
 		Proto:   u8proto.TCP,
 		Port:    uint16(8080),
 		Parser:  ParserTypeHTTP,
@@ -72,7 +72,7 @@ func (ds *PolicyTestSuite) TestVisibilityPolicyCreation(c *C) {
 	c.Assert(err, IsNil)
 
 	c.Assert(len(vp.Ingress), Equals, 1)
-	c.Assert(vp.Ingress["80/TCP"], DeepEquals, &VisibilityMetadata{
+	c.Assert(vp.Ingress["80/TCP"], checker.DeepEquals, &VisibilityMetadata{
 		Proto:   u8proto.TCP,
 		Port:    uint16(80),
 		Parser:  ParserTypeHTTP,

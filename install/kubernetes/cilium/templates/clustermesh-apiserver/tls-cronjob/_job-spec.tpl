@@ -1,6 +1,6 @@
 {{- define "clustermesh-apiserver-generate-certs.job.spec" }}
 {{- $certValiditySecondsStr := printf "%ds" (mul .Values.clustermesh.apiserver.tls.auto.certValidityDuration 24 60 60) -}}
-{{- $clustermeshServerSANs := concat (list "*.mesh.cilium.io")
+{{- $clustermeshServerSANs := concat (list "*.mesh.cilium.io" (printf "clustermesh-apiserver.%s.svc" .Release.Namespace))
   .Values.clustermesh.apiserver.tls.server.extraDnsNames
   .Values.clustermesh.apiserver.tls.server.extraIpAddresses
 -}}
@@ -26,12 +26,8 @@ spec:
             {{- end }}
             - "--ca-generate"
             - "--ca-reuse-secret"
-            {{- if .Values.clustermesh.apiserver.tls.ca.cert }}
-            - "--ca-secret-name=clustermesh-apiserver-ca-cert"
-            {{- else -}}
-              {{- if and .Values.tls.ca.cert .Values.tls.ca.key }}
+            {{- if and .Values.tls.ca.cert .Values.tls.ca.key }}
             - "--ca-secret-name=cilium-ca"
-              {{- end }}
             {{- end }}
             - "--clustermesh-apiserver-server-cert-generate"
             - "--clustermesh-apiserver-server-cert-validity-duration={{ $certValiditySecondsStr }}"
@@ -53,6 +49,10 @@ spec:
           {{- toYaml . | nindent 10 }}
           {{- end }}
       hostNetwork: true
+      {{- with .Values.certgen.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       serviceAccount: {{ .Values.serviceAccounts.clustermeshcertgen.name | quote }}
       serviceAccountName: {{ .Values.serviceAccounts.clustermeshcertgen.name | quote }}
       automountServiceAccountToken: {{ .Values.serviceAccounts.clustermeshcertgen.automount }}
@@ -64,6 +64,10 @@ spec:
       {{- with .Values.certgen.extraVolumes }}
       volumes:
       {{- toYaml . | nindent 6 }}
+      {{- end }}
+      affinity:
+      {{- with .Values.certgen.affinity }}
+      {{- toYaml . | nindent 8 }}
       {{- end }}
   ttlSecondsAfterFinished: {{ .Values.certgen.ttlSecondsAfterFinished }}
 {{- end }}

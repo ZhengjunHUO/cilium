@@ -5,13 +5,16 @@ package route
 
 import (
 	"net"
+	"runtime"
+	"testing"
 	"time"
 
+	. "github.com/cilium/checkmate"
 	"github.com/google/go-cmp/cmp"
+	"github.com/stretchr/testify/require"
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netns"
 	"golang.org/x/sys/unix"
-	. "gopkg.in/check.v1"
 
 	"github.com/cilium/cilium/pkg/testutils"
 )
@@ -21,7 +24,7 @@ type RouteSuitePrivileged struct{}
 var _ = Suite(&RouteSuitePrivileged{})
 
 func (s *RouteSuitePrivileged) SetUpSuite(c *C) {
-	testutils.PrivilegedCheck(c)
+	testutils.PrivilegedTest(c)
 }
 
 func testReplaceNexthopRoute(c *C, link netlink.Link, routerNet *net.IPNet) {
@@ -112,7 +115,7 @@ func testReplaceRule(c *C, mark int, from, to *net.IPNet, table int) {
 	rule := Rule{Mark: mark, From: from, To: to, Table: table}
 
 	// delete rule in case it exists from a previous failed run
-	DeleteRule(rule)
+	DeleteRule(netlink.FAMILY_V4, rule)
 
 	rule.Priority = 1
 	err := ReplaceRule(rule)
@@ -122,7 +125,7 @@ func testReplaceRule(c *C, mark int, from, to *net.IPNet, table int) {
 	c.Assert(err, IsNil)
 	c.Assert(exists, Equals, true)
 
-	err = DeleteRule(rule)
+	err = DeleteRule(netlink.FAMILY_V4, rule)
 	c.Assert(err, IsNil)
 
 	exists, err = lookupRule(rule, netlink.FAMILY_V4)
@@ -134,7 +137,7 @@ func testReplaceRuleIPv6(c *C, mark int, from, to *net.IPNet, table int) {
 	rule := Rule{Mark: mark, From: from, To: to, Table: table}
 
 	// delete rule in case it exists from a previous failed run
-	DeleteRuleIPv6(rule)
+	DeleteRule(netlink.FAMILY_V6, rule)
 
 	rule.Priority = 1
 	err := ReplaceRuleIPv6(rule)
@@ -144,7 +147,7 @@ func testReplaceRuleIPv6(c *C, mark int, from, to *net.IPNet, table int) {
 	c.Assert(err, IsNil)
 	c.Assert(exists, Equals, true)
 
-	err = DeleteRuleIPv6(rule)
+	err = DeleteRule(netlink.FAMILY_V6, rule)
 	c.Assert(err, IsNil)
 
 	exists, err = lookupRule(rule, netlink.FAMILY_V6)
@@ -185,21 +188,21 @@ func (p *RouteSuitePrivileged) TestRule_String(c *C) {
 				From: fakeIP,
 				To:   fakeIP2,
 			},
-			wantStr: "0: from 10.10.10.10/32 to 1.1.1.1/32 lookup 0",
+			wantStr: "0: from 10.10.10.10/32 to 1.1.1.1/32 lookup 0 proto unspec",
 		},
 		{
 			name: "contains priority",
 			rule: Rule{
 				Priority: 1,
 			},
-			wantStr: "1: from all to all lookup 0",
+			wantStr: "1: from all to all lookup 0 proto unspec",
 		},
 		{
 			name: "contains table",
 			rule: Rule{
 				Table: 1,
 			},
-			wantStr: "0: from all to all lookup 1",
+			wantStr: "0: from all to all lookup 1 proto unspec",
 		},
 		{
 			name: "contains mark and mask",
@@ -207,14 +210,14 @@ func (p *RouteSuitePrivileged) TestRule_String(c *C) {
 				Mark: 1,
 				Mask: 1,
 			},
-			wantStr: "0: from all to all lookup 0 mark 0x1 mask 0x1",
+			wantStr: "0: from all to all lookup 0 mark 0x1 mask 0x1 proto unspec",
 		},
 		{
 			name: "main table",
 			rule: Rule{
 				Table: unix.RT_TABLE_MAIN,
 			},
-			wantStr: "0: from all to all lookup main",
+			wantStr: "0: from all to all lookup main proto unspec",
 		},
 	}
 	for _, tt := range tests {
@@ -224,43 +227,28 @@ func (p *RouteSuitePrivileged) TestRule_String(c *C) {
 	}
 }
 
-func (p *RouteSuitePrivileged) TestListRules(c *C) {
-	testListRules4(c)
-	testListRules6(c)
+func TestListRules(t *testing.T) {
+	testutils.PrivilegedTest(t)
+
+	testListRules4(t)
+	testListRules6(t)
 }
 
-func testListRules4(c *C) {
+func testListRules4(t *testing.T) {
 	_, fakeIP, _ := net.ParseCIDR("192.0.2.40/32")
 	_, fakeIP2, _ := net.ParseCIDR("192.0.2.60/32")
 
-	runListRules(c, netlink.FAMILY_V4, fakeIP, fakeIP2)
+	runListRules(t, netlink.FAMILY_V4, fakeIP, fakeIP2)
 }
 
-func testListRules6(c *C) {
+func testListRules6(t *testing.T) {
 	_, fakeIP, _ := net.ParseCIDR("fd44:7089:ff32:712b:4000::/64")
 	_, fakeIP2, _ := net.ParseCIDR("fd44:7089:ff32:712b:8000::/96")
 
-	runListRules(c, netlink.FAMILY_V6, fakeIP, fakeIP2)
+	runListRules(t, netlink.FAMILY_V6, fakeIP, fakeIP2)
 }
 
-func runListRules(c *C, family int, fakeIP, fakeIP2 *net.IPNet) {
-	currentNS, err := netns.Get()
-	c.Assert(err, IsNil)
-	defer func() {
-		c.Assert(netns.Set(currentNS), IsNil)
-		c.Log("Set back to previous network ns")
-	}()
-
-	networkNS, err := netns.New()
-	c.Assert(err, IsNil)
-	c.Log("Inside new network ns")
-	defer func() {
-		c.Assert(networkNS.Close(), IsNil)
-		c.Log("Closed new network ns")
-	}()
-
-	defaultRules, _ := ListRules(family, nil)
-
+func runListRules(t *testing.T, family int, fakeIP, fakeIP2 *net.IPNet) {
 	tests := []struct {
 		name       string
 		ruleFilter *Rule
@@ -274,6 +262,7 @@ func runListRules(c *C, family int, fakeIP, fakeIP2 *net.IPNet) {
 			preRun:     func() *netlink.Rule { return nil },
 			postRun:    func(r *netlink.Rule) {},
 			setupWant: func(_ *netlink.Rule) ([]netlink.Rule, bool) {
+				defaultRules, _ := ListRules(family, nil)
 				return defaultRules, false
 			},
 		},
@@ -283,12 +272,13 @@ func runListRules(c *C, family int, fakeIP, fakeIP2 *net.IPNet) {
 			preRun: func() *netlink.Rule {
 				r := netlink.NewRule()
 				r.Src = fakeIP
+				r.Family = family
 				r.Priority = 1 // Must add priority and table otherwise it's auto-assigned
 				r.Table = 1
-				addRule(c, r)
+				addRule(t, r)
 				return r
 			},
-			postRun: func(r *netlink.Rule) { delRule(c, r) },
+			postRun: func(r *netlink.Rule) { delRule(t, r) },
 			setupWant: func(r *netlink.Rule) ([]netlink.Rule, bool) {
 				return []netlink.Rule{*r}, false
 			},
@@ -299,12 +289,13 @@ func runListRules(c *C, family int, fakeIP, fakeIP2 *net.IPNet) {
 			preRun: func() *netlink.Rule {
 				r := netlink.NewRule()
 				r.Dst = fakeIP
+				r.Family = family
 				r.Priority = 1 // Must add priority and table otherwise it's auto-assigned
 				r.Table = 1
-				addRule(c, r)
+				addRule(t, r)
 				return r
 			},
-			postRun: func(r *netlink.Rule) { delRule(c, r) },
+			postRun: func(r *netlink.Rule) { delRule(t, r) },
 			setupWant: func(r *netlink.Rule) ([]netlink.Rule, bool) {
 				return []netlink.Rule{*r}, false
 			},
@@ -315,22 +306,23 @@ func runListRules(c *C, family int, fakeIP, fakeIP2 *net.IPNet) {
 			preRun: func() *netlink.Rule {
 				r := netlink.NewRule()
 				r.Dst = fakeIP
+				r.Family = family
 				r.Priority = 1 // Must add priority and table otherwise it's auto-assigned
 				r.Table = 1
-				addRule(c, r)
+				addRule(t, r)
 
 				rc := *r // Create almost identical copy
 				rc.Src = fakeIP2
-				addRule(c, &rc)
+				addRule(t, &rc)
 
 				return r
 			},
 			postRun: func(r *netlink.Rule) {
-				delRule(c, r)
+				delRule(t, r)
 
 				rc := *r // Delete the almost identical copy
 				rc.Src = fakeIP2
-				delRule(c, &rc)
+				delRule(t, &rc)
 			},
 			setupWant: func(r *netlink.Rule) ([]netlink.Rule, bool) {
 				rs := []netlink.Rule{}
@@ -349,22 +341,23 @@ func runListRules(c *C, family int, fakeIP, fakeIP2 *net.IPNet) {
 			preRun: func() *netlink.Rule {
 				r := netlink.NewRule()
 				r.Dst = fakeIP
+				r.Family = family
 				r.Priority = 1 // Must add priority and table otherwise it's auto-assigned
 				r.Table = 1
-				addRule(c, r)
+				addRule(t, r)
 
 				rc := *r // Create almost identical copy
 				rc.Src = fakeIP2
-				addRule(c, &rc)
+				addRule(t, &rc)
 
 				return r
 			},
 			postRun: func(r *netlink.Rule) {
-				delRule(c, r)
+				delRule(t, r)
 
 				rc := *r // Delete the almost identical copy
 				rc.Src = fakeIP2
-				delRule(c, &rc)
+				delRule(t, &rc)
 			},
 			setupWant: func(r *netlink.Rule) ([]netlink.Rule, bool) {
 				rs := []netlink.Rule{}
@@ -383,25 +376,26 @@ func runListRules(c *C, family int, fakeIP, fakeIP2 *net.IPNet) {
 			preRun: func() *netlink.Rule {
 				r := netlink.NewRule()
 				r.Src = fakeIP
+				r.Family = family
 				r.Priority = 5
 				r.Table = 1
-				addRule(c, r)
+				addRule(t, r)
 
 				for i := 2; i < 5; i++ {
 					rc := *r // Create almost identical copy
 					rc.Table = i
-					addRule(c, &rc)
+					addRule(t, &rc)
 				}
 
 				return r
 			},
 			postRun: func(r *netlink.Rule) {
-				delRule(c, r)
+				delRule(t, r)
 
 				for i := 2; i < 5; i++ {
 					rc := *r // Delete the almost identical copy
 					rc.Table = i
-					delRule(c, &rc)
+					delRule(t, &rc)
 				}
 			},
 			setupWant: func(r *netlink.Rule) ([]netlink.Rule, bool) {
@@ -423,12 +417,13 @@ func runListRules(c *C, family int, fakeIP, fakeIP2 *net.IPNet) {
 			preRun: func() *netlink.Rule {
 				r := netlink.NewRule()
 				r.Src = fakeIP
+				r.Family = family
 				r.Priority = 1 // Must add priority otherwise it's auto-assigned
 				r.Table = 199
-				addRule(c, r)
+				addRule(t, r)
 				return r
 			},
-			postRun: func(r *netlink.Rule) { delRule(c, r) },
+			postRun: func(r *netlink.Rule) { delRule(t, r) },
 			setupWant: func(r *netlink.Rule) ([]netlink.Rule, bool) {
 				return []netlink.Rule{*r}, false
 			},
@@ -439,13 +434,14 @@ func runListRules(c *C, family int, fakeIP, fakeIP2 *net.IPNet) {
 			preRun: func() *netlink.Rule {
 				r := netlink.NewRule()
 				r.Src = fakeIP
+				r.Family = family
 				r.Priority = 1 // Must add priority and table otherwise it's auto-assigned
 				r.Table = 1
 				r.Mask = 0x5
-				addRule(c, r)
+				addRule(t, r)
 				return r
 			},
-			postRun: func(r *netlink.Rule) { delRule(c, r) },
+			postRun: func(r *netlink.Rule) { delRule(t, r) },
 			setupWant: func(r *netlink.Rule) ([]netlink.Rule, bool) {
 				return []netlink.Rule{*r}, false
 			},
@@ -456,41 +452,59 @@ func runListRules(c *C, family int, fakeIP, fakeIP2 *net.IPNet) {
 			preRun: func() *netlink.Rule {
 				r := netlink.NewRule()
 				r.Src = fakeIP
+				r.Family = family
 				r.Priority = 1 // Must add priority, table, mask otherwise it's auto-assigned
 				r.Table = 1
 				r.Mask = 0xff
 				r.Mark = 0xbb
-				addRule(c, r)
+				addRule(t, r)
 				return r
 			},
-			postRun: func(r *netlink.Rule) { delRule(c, r) },
+			postRun: func(r *netlink.Rule) { delRule(t, r) },
 			setupWant: func(r *netlink.Rule) ([]netlink.Rule, bool) {
 				return []netlink.Rule{*r}, false
 			},
 		},
 	}
 	for _, tt := range tests {
-		rule := tt.preRun()
-		rules, err := ListRules(family, tt.ruleFilter)
-		tt.postRun(rule)
+		t.Run(tt.name, func(t *testing.T) {
+			withFreshNetNS(t, func() {
+				rule := tt.preRun()
+				rules, err := ListRules(family, tt.ruleFilter)
+				tt.postRun(rule)
 
-		wantRules, wantErr := tt.setupWant(rule)
+				wantRules, wantErr := tt.setupWant(rule)
 
-		if diff := cmp.Diff(wantRules, rules); diff != "" {
-			c.Errorf("expected len: %d, got: %d\n%s\n", len(wantRules), len(rules), diff)
-		}
-		c.Assert(err != nil, Equals, wantErr)
+				if diff := cmp.Diff(wantRules, rules); diff != "" {
+					t.Errorf("expected len: %d, got: %d\n%s\n", len(wantRules), len(rules), diff)
+				}
+				require.Equal(t, err != nil, wantErr)
+			})
+		})
 	}
 }
 
-func addRule(c *C, r *netlink.Rule) {
+func addRule(tb testing.TB, r *netlink.Rule) {
 	if err := netlink.RuleAdd(r); err != nil {
-		c.Logf("Unable to add rule: %v", err)
+		tb.Logf("Unable to add rule: %v", err)
 	}
 }
 
-func delRule(c *C, r *netlink.Rule) {
+func delRule(tb testing.TB, r *netlink.Rule) {
 	if err := netlink.RuleDel(r); err != nil {
-		c.Logf("Unable to delete rule: %v", err)
+		tb.Logf("Unable to delete rule: %v", err)
 	}
+}
+
+func withFreshNetNS(t *testing.T, test func()) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	oldNetNS, err := netns.Get()
+	require.NoError(t, err)
+	testNetNS, err := netns.New()
+	require.NoError(t, err)
+	defer func() { require.NoError(t, testNetNS.Close()) }()
+	defer func() { require.NoError(t, netns.Set(oldNetNS)) }()
+	test()
 }

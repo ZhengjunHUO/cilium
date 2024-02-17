@@ -7,13 +7,14 @@ import (
 	"regexp"
 	"testing"
 
-	. "gopkg.in/check.v1"
+	. "github.com/cilium/checkmate"
 
 	"github.com/cilium/cilium/pkg/checker"
 	"github.com/cilium/cilium/pkg/defaults"
 	"github.com/cilium/cilium/pkg/fqdn/dns"
 	"github.com/cilium/cilium/pkg/fqdn/re"
 	"github.com/cilium/cilium/pkg/identity"
+	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/policy"
 	"github.com/cilium/cilium/pkg/policy/api"
 )
@@ -210,8 +211,12 @@ type MockCachedSelector struct {
 	key string
 }
 
-func (m MockCachedSelector) GetSelections() []identity.NumericIdentity {
+func (m MockCachedSelector) GetSelections() identity.NumericIdentitySlice {
 	return nil
+}
+
+func (m MockCachedSelector) GetMetadataLabels() labels.LabelArray {
+	panic("implement me")
 }
 
 func (m MockCachedSelector) Selects(_ identity.NumericIdentity) bool {

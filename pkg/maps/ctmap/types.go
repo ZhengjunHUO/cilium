@@ -10,6 +10,7 @@ import (
 
 	"github.com/cilium/cilium/pkg/bpf"
 	"github.com/cilium/cilium/pkg/byteorder"
+	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/tuple"
 )
 
@@ -56,6 +57,21 @@ func (m mapType) String() string {
 	return fmt.Sprintf("Unknown (%d)", int(m))
 }
 
+func (m mapType) name() string {
+	switch m {
+	case mapTypeIPv4TCPLocal, mapTypeIPv4TCPGlobal:
+		return "tcp4"
+	case mapTypeIPv6TCPLocal, mapTypeIPv6TCPGlobal:
+		return "tcp6"
+	case mapTypeIPv4AnyLocal, mapTypeIPv4AnyGlobal:
+		return "any4"
+	case mapTypeIPv6AnyLocal, mapTypeIPv6AnyGlobal:
+		return "any6"
+	default:
+		panic("Unexpected map type " + m.String())
+	}
+}
+
 func (m mapType) isIPv4() bool {
 	switch m {
 	case mapTypeIPv4TCPLocal, mapTypeIPv4TCPGlobal, mapTypeIPv4AnyLocal, mapTypeIPv4AnyGlobal:
@@ -94,6 +110,62 @@ func (m mapType) isTCP() bool {
 		return true
 	}
 	return false
+}
+
+func (m mapType) key() bpf.MapKey {
+	switch m {
+	case mapTypeIPv4TCPLocal, mapTypeIPv4AnyLocal:
+		return &CtKey4{}
+	case mapTypeIPv6TCPLocal, mapTypeIPv6AnyLocal:
+		return &CtKey6{}
+	case mapTypeIPv4TCPGlobal, mapTypeIPv4AnyGlobal:
+		return &CtKey4Global{}
+	case mapTypeIPv6TCPGlobal, mapTypeIPv6AnyGlobal:
+		return &CtKey6Global{}
+	default:
+		panic("Unexpected map type " + m.String())
+	}
+}
+
+func (m mapType) value() bpf.MapValue {
+	return &CtEntry{}
+}
+
+func (m mapType) maxEntries() int {
+	switch m {
+	case mapTypeIPv4TCPGlobal, mapTypeIPv6TCPGlobal:
+		if option.Config.CTMapEntriesGlobalTCP != 0 {
+			return option.Config.CTMapEntriesGlobalTCP
+		}
+		return option.CTMapEntriesGlobalTCPDefault
+
+	case mapTypeIPv4AnyGlobal, mapTypeIPv6AnyGlobal:
+		if option.Config.CTMapEntriesGlobalAny != 0 {
+			return option.Config.CTMapEntriesGlobalAny
+		}
+		return option.CTMapEntriesGlobalAnyDefault
+
+	case mapTypeIPv4TCPLocal, mapTypeIPv6TCPLocal, mapTypeIPv4AnyLocal, mapTypeIPv6AnyLocal:
+		return mapNumEntriesLocal
+
+	default:
+		panic("Unexpected map type " + m.String())
+	}
+}
+
+func (m mapType) bpfDefine() string {
+	switch m {
+	case mapTypeIPv4TCPLocal, mapTypeIPv4TCPGlobal:
+		return "CT_MAP_TCP4"
+	case mapTypeIPv6TCPLocal, mapTypeIPv6TCPGlobal:
+		return "CT_MAP_TCP6"
+	case mapTypeIPv4AnyLocal, mapTypeIPv4AnyGlobal:
+		return "CT_MAP_ANY4"
+	case mapTypeIPv6AnyLocal, mapTypeIPv6AnyGlobal:
+		return "CT_MAP_ANY6"
+	default:
+		panic("Unexpected map type " + m.String())
+	}
 }
 
 type CTMapIPVersion int
@@ -145,15 +217,9 @@ type CtKey interface {
 	GetTupleKey() tuple.TupleKey
 }
 
-// CtKey4 is needed to provide CtEntry type to Lookup values
-// +k8s:deepcopy-gen=true
-// +k8s:deepcopy-gen:interfaces=github.com/cilium/cilium/pkg/bpf.MapKey
 type CtKey4 struct {
 	tuple.TupleKey4
 }
-
-// NewValue creates a new bpf.MapValue.
-func (k *CtKey4) NewValue() bpf.MapValue { return &CtEntry{} }
 
 // ToNetwork converts CtKey4 ports to network byte order.
 func (k *CtKey4) ToNetwork() CtKey {
@@ -180,8 +246,7 @@ func (k *CtKey4) String() string {
 	return fmt.Sprintf("%s:%d, %d, %d, %d", k.DestAddr, k.SourcePort, k.DestPort, k.NextHeader, k.Flags)
 }
 
-// GetKeyPtr returns the unsafe.Pointer for k.
-func (k *CtKey4) GetKeyPtr() unsafe.Pointer { return unsafe.Pointer(k) }
+func (k *CtKey4) New() bpf.MapKey { return &CtKey4{} }
 
 // Dump writes the contents of key to sb and returns true if the value for next
 // header in the key is nonzero.
@@ -199,7 +264,12 @@ func (k *CtKey4) Dump(sb *strings.Builder, reverse bool) bool {
 		addrDest = k.DestAddr.String()
 	}
 
-	if k.Flags&TUPLE_F_IN != 0 {
+	if k.Flags&TUPLE_F_SERVICE != 0 {
+		sb.WriteString(fmt.Sprintf("%s SVC %s %d:%d ",
+			k.NextHeader.String(), k.DestAddr.String(), k.DestPort,
+			k.SourcePort),
+		)
+	} else if k.Flags&TUPLE_F_IN != 0 {
 		sb.WriteString(fmt.Sprintf("%s IN %s %d:%d ",
 			k.NextHeader.String(), addrDest, k.SourcePort,
 			k.DestPort),
@@ -215,10 +285,6 @@ func (k *CtKey4) Dump(sb *strings.Builder, reverse bool) bool {
 		sb.WriteString("related ")
 	}
 
-	if k.Flags&TUPLE_F_SERVICE != 0 {
-		sb.WriteString("service ")
-	}
-
 	return true
 }
 
@@ -226,15 +292,9 @@ func (k *CtKey4) GetTupleKey() tuple.TupleKey {
 	return &k.TupleKey4
 }
 
-// CtKey4Global is needed to provide CtEntry type to Lookup values
-// +k8s:deepcopy-gen=true
-// +k8s:deepcopy-gen:interfaces=github.com/cilium/cilium/pkg/bpf.MapKey
 type CtKey4Global struct {
 	tuple.TupleKey4Global
 }
-
-// NewValue creates a new bpf.MapValue.
-func (k *CtKey4Global) NewValue() bpf.MapValue { return &CtEntry{} }
 
 // ToNetwork converts ports to network byte order.
 //
@@ -267,8 +327,7 @@ func (k *CtKey4Global) String() string {
 	return fmt.Sprintf("%s:%d --> %s:%d, %d, %d", k.SourceAddr, k.SourcePort, k.DestAddr, k.DestPort, k.NextHeader, k.Flags)
 }
 
-// GetKeyPtr returns the unsafe.Pointer for k.
-func (k *CtKey4Global) GetKeyPtr() unsafe.Pointer { return unsafe.Pointer(k) }
+func (k *CtKey4Global) New() bpf.MapKey { return &CtKey4Global{} }
 
 // Dump writes the contents of key to sb and returns true if the value for next
 // header in the key is nonzero.
@@ -288,7 +347,12 @@ func (k *CtKey4Global) Dump(sb *strings.Builder, reverse bool) bool {
 		addrDest = k.DestAddr.String()
 	}
 
-	if k.Flags&TUPLE_F_IN != 0 {
+	if k.Flags&TUPLE_F_SERVICE != 0 {
+		sb.WriteString(fmt.Sprintf("%s SVC %s:%d -> %s:%d ",
+			k.NextHeader.String(), k.SourceAddr.String(), k.DestPort,
+			k.DestAddr.String(), k.SourcePort),
+		)
+	} else if k.Flags&TUPLE_F_IN != 0 {
 		sb.WriteString(fmt.Sprintf("%s IN %s:%d -> %s:%d ",
 			k.NextHeader.String(), addrSource, k.SourcePort,
 			addrDest, k.DestPort),
@@ -304,10 +368,6 @@ func (k *CtKey4Global) Dump(sb *strings.Builder, reverse bool) bool {
 		sb.WriteString("related ")
 	}
 
-	if k.Flags&TUPLE_F_SERVICE != 0 {
-		sb.WriteString("service ")
-	}
-
 	return true
 }
 
@@ -316,14 +376,9 @@ func (k *CtKey4Global) GetTupleKey() tuple.TupleKey {
 }
 
 // CtKey6 is needed to provide CtEntry type to Lookup values
-// +k8s:deepcopy-gen=true
-// +k8s:deepcopy-gen:interfaces=github.com/cilium/cilium/pkg/bpf.MapKey
 type CtKey6 struct {
 	tuple.TupleKey6
 }
-
-// NewValue creates a new bpf.MapValue.
-func (k *CtKey6) NewValue() bpf.MapValue { return &CtEntry{} }
 
 // ToNetwork converts CtKey6 ports to network byte order.
 func (k *CtKey6) ToNetwork() CtKey {
@@ -348,8 +403,7 @@ func (k *CtKey6) String() string {
 	return fmt.Sprintf("[%s]:%d, %d, %d, %d", k.DestAddr, k.SourcePort, k.DestPort, k.NextHeader, k.Flags)
 }
 
-// GetKeyPtr returns the unsafe.Pointer for k.
-func (k *CtKey6) GetKeyPtr() unsafe.Pointer { return unsafe.Pointer(k) }
+func (k *CtKey6) New() bpf.MapKey { return &CtKey6{} }
 
 // Dump writes the contents of key to sb and returns true if the value for next
 // header in the key is nonzero.
@@ -367,7 +421,12 @@ func (k *CtKey6) Dump(sb *strings.Builder, reverse bool) bool {
 		addrDest = k.DestAddr.String()
 	}
 
-	if k.Flags&TUPLE_F_IN != 0 {
+	if k.Flags&TUPLE_F_SERVICE != 0 {
+		sb.WriteString(fmt.Sprintf("%s SVC %s %d:%d ",
+			k.NextHeader.String(), k.DestAddr.String(), k.DestPort,
+			k.SourcePort),
+		)
+	} else if k.Flags&TUPLE_F_IN != 0 {
 		sb.WriteString(fmt.Sprintf("%s IN %s %d:%d ",
 			k.NextHeader.String(), addrDest, k.SourcePort,
 			k.DestPort),
@@ -383,10 +442,6 @@ func (k *CtKey6) Dump(sb *strings.Builder, reverse bool) bool {
 		sb.WriteString("related ")
 	}
 
-	if k.Flags&TUPLE_F_SERVICE != 0 {
-		sb.WriteString("service ")
-	}
-
 	return true
 }
 
@@ -395,16 +450,11 @@ func (k *CtKey6) GetTupleKey() tuple.TupleKey {
 }
 
 // CtKey6Global is needed to provide CtEntry type to Lookup values
-// +k8s:deepcopy-gen=true
-// +k8s:deepcopy-gen:interfaces=github.com/cilium/cilium/pkg/bpf.MapKey
 type CtKey6Global struct {
 	tuple.TupleKey6Global
 }
 
 const SizeofCtKey6Global = int(unsafe.Sizeof(CtKey6Global{}))
-
-// NewValue creates a new bpf.MapValue.
-func (k *CtKey6Global) NewValue() bpf.MapValue { return &CtEntry{} }
 
 // ToNetwork converts ports to network byte order.
 //
@@ -437,8 +487,7 @@ func (k *CtKey6Global) String() string {
 	return fmt.Sprintf("[%s]:%d --> [%s]:%d, %d, %d", k.SourceAddr, k.SourcePort, k.DestAddr, k.DestPort, k.NextHeader, k.Flags)
 }
 
-// GetKeyPtr returns the unsafe.Pointer for k.
-func (k *CtKey6Global) GetKeyPtr() unsafe.Pointer { return unsafe.Pointer(k) }
+func (k *CtKey6Global) New() bpf.MapKey { return &CtKey6Global{} }
 
 // Dump writes the contents of key to sb and returns true if the value for next
 // header in the key is nonzero.
@@ -458,7 +507,12 @@ func (k *CtKey6Global) Dump(sb *strings.Builder, reverse bool) bool {
 		addrDest = k.DestAddr.String()
 	}
 
-	if k.Flags&TUPLE_F_IN != 0 {
+	if k.Flags&TUPLE_F_SERVICE != 0 {
+		sb.WriteString(fmt.Sprintf("%s SVC %s:%d -> %s:%d ",
+			k.NextHeader.String(), k.SourceAddr.String(), k.DestPort,
+			k.DestAddr.String(), k.SourcePort),
+		)
+	} else if k.Flags&TUPLE_F_IN != 0 {
 		sb.WriteString(fmt.Sprintf("%s IN %s:%d -> %s:%d ",
 			k.NextHeader.String(), addrSource, k.SourcePort,
 			addrDest, k.DestPort),
@@ -474,10 +528,6 @@ func (k *CtKey6Global) Dump(sb *strings.Builder, reverse bool) bool {
 		sb.WriteString("related ")
 	}
 
-	if k.Flags&TUPLE_F_SERVICE != 0 {
-		sb.WriteString("service ")
-	}
-
 	return true
 }
 
@@ -486,8 +536,6 @@ func (k *CtKey6Global) GetTupleKey() tuple.TupleKey {
 }
 
 // CtEntry represents an entry in the connection tracking table.
-// +k8s:deepcopy-gen=true
-// +k8s:deepcopy-gen:interfaces=github.com/cilium/cilium/pkg/bpf.MapValue
 type CtEntry struct {
 	RxPackets uint64 `align:"rx_packets"`
 	RxBytes   uint64 `align:"$union0"`
@@ -507,9 +555,6 @@ type CtEntry struct {
 
 const SizeofCtEntry = int(unsafe.Sizeof(CtEntry{}))
 
-// GetValuePtr returns the unsafe.Pointer for s.
-func (c *CtEntry) GetValuePtr() unsafe.Pointer { return unsafe.Pointer(c) }
-
 const (
 	RxClosing = 1 << iota
 	TxClosing
@@ -524,6 +569,10 @@ const (
 	FromTunnel
 	MaxFlags
 )
+
+func (c *CtEntry) isDsrEntry() bool {
+	return c.Flags&DSR != 0
+}
 
 func (c *CtEntry) flagsString() string {
 	var sb strings.Builder
@@ -599,3 +648,5 @@ func (c *CtEntry) StringWithTimeDiff(toRemSecs func(uint32) string) string {
 func (c *CtEntry) String() string {
 	return c.StringWithTimeDiff(nil)
 }
+
+func (c *CtEntry) New() bpf.MapValue { return &CtEntry{} }

@@ -17,6 +17,8 @@ const (
 	// DialTimeout is the timeout that is used when establishing a new
 	// connection.
 	DialTimeout = 5 * time.Second
+	// HealthCheckInterval is the time interval between health checks.
+	HealthCheckInterval = 5 * time.Second
 	// GopsPort is the default port for gops to listen on.
 	GopsPort = 9893
 	// PprofAddress is the default port for pprof to listen on.
@@ -39,10 +41,17 @@ const (
 	// ErrorAggregationWindow is the time window during which errors with the
 	// same message are coalesced.
 	ErrorAggregationWindow = 10 * time.Second
+	// PeerUpdateInterval is the time interval in which relay is checking for
+	// newly joined peers for long running requests
+	PeerUpdateInterval = 2 * time.Second
 )
 
 var (
 	// ListenAddress is the address on which the Hubble Relay server listens
 	// for incoming gRPC requests.
 	ListenAddress = fmt.Sprintf(":%d", hubbledefaults.RelayPort)
+
+	// HealthListenAddress is the address on which the Hubble Relay gRPC health
+	// server listens on
+	HealthListenAddress = fmt.Sprintf(":%d", 4222)
 )

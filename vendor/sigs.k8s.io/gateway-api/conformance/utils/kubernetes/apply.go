@@ -19,6 +19,7 @@ package kubernetes
 import (
 	"bytes"
 	"context"
+	"embed"
 	"errors"
 	"fmt"
 	"io"
@@ -29,63 +30,110 @@ import (
 	"github.com/stretchr/testify/require"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/yaml"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"sigs.k8s.io/gateway-api/apis/v1beta1"
-	"sigs.k8s.io/gateway-api/conformance"
 	"sigs.k8s.io/gateway-api/conformance/utils/config"
 )
 
 // Applier prepares manifests depending on the available options and applies
 // them to the Kubernetes cluster.
 type Applier struct {
-	NamespaceLabels map[string]string
-	// ValidUniqueListenerPorts maps each listener port of each Gateway in the
-	// manifests to a valid, unique port. There must be as many
-	// ValidUniqueListenerPorts as there are listeners in the set of manifests.
-	// For example, given two Gateways, each with 2 listeners, there should be
-	// four ValidUniqueListenerPorts.
-	// If empty or nil, ports are not modified.
-	ValidUniqueListenerPorts []v1beta1.PortNumber
+	NamespaceLabels      map[string]string
+	NamespaceAnnotations map[string]string
 
 	// GatewayClass will be used as the spec.gatewayClassName when applying Gateway resources
 	GatewayClass string
 
 	// ControllerName will be used as the spec.controllerName when applying GatewayClass resources
 	ControllerName string
+
+	// FS is the filesystem to use when reading manifests.
+	FS embed.FS
+
+	// UsableNetworkAddresses is a list of addresses that are expected to be
+	// supported AND usable for Gateways in the underlying implementation.
+	UsableNetworkAddresses []v1beta1.GatewayAddress
+
+	// UnusableNetworkAddresses is a list of addresses that are expected to be
+	// supported, but not usable for Gateways in the underlying implementation.
+	UnusableNetworkAddresses []v1beta1.GatewayAddress
 }
 
-// prepareGateway adjusts both listener ports and the gatewayClassName. It
-// returns an index pointing to the next valid listener port.
-func (a Applier) prepareGateway(t *testing.T, uObj *unstructured.Unstructured, portIndex int) int {
+// prepareGateway adjusts the gatewayClassName.
+func (a Applier) prepareGateway(t *testing.T, uObj *unstructured.Unstructured) {
+	ns := uObj.GetNamespace()
+	name := uObj.GetName()
+
 	err := unstructured.SetNestedField(uObj.Object, a.GatewayClass, "spec", "gatewayClassName")
-	require.NoErrorf(t, err, "error setting `spec.gatewayClassName` on %s Gateway resource", uObj.GetName())
+	require.NoErrorf(t, err, "error setting `spec.gatewayClassName` on Gateway %s/%s", ns, name)
 
-	if len(a.ValidUniqueListenerPorts) > 0 {
-		listeners, _, err := unstructured.NestedSlice(uObj.Object, "spec", "listeners")
-		require.NoErrorf(t, err, "error getting `spec.listeners` on %s Gateway resource", uObj.GetName())
+	rawSpec, hasSpec, err := unstructured.NestedFieldCopy(uObj.Object, "spec")
+	require.NoError(t, err, "error retrieving spec.addresses to verify if any static addresses were present on Gateway resource %s/%s", ns, name)
+	require.True(t, hasSpec)
 
-		for i, uListener := range listeners {
-			require.Less(t, portIndex, len(a.ValidUniqueListenerPorts), "not enough unassigned valid ports for `spec.listeners[%d]` on %s Gateway resource", i, uObj.GetName())
+	rawSpecMap, ok := rawSpec.(map[string]interface{})
+	require.True(t, ok, "expected gw spec received %T", rawSpec)
 
-			listener, ok := uListener.(map[string]interface{})
-			require.Truef(t, ok, "unexpected type at `spec.listeners[%d]` on %s Gateway resource", i, uObj.GetName())
+	gwspec := &v1beta1.GatewaySpec{}
+	require.NoError(t, runtime.DefaultUnstructuredConverter.FromUnstructured(rawSpecMap, gwspec))
 
-			nextPort := a.ValidUniqueListenerPorts[portIndex]
-			err = unstructured.SetNestedField(listener, int64(nextPort), "port")
-			require.NoErrorf(t, err, "error setting `spec.listeners[%d].port` on %s Gateway resource", i, uObj.GetName())
+	// for tests which have placeholders for static gateway addresses we will
+	// inject real addresses from the address pools the caller provided.
+	if len(gwspec.Addresses) > 0 {
+		// this is a hack because we don't have any other great way to inject custom
+		// values into the test YAML at the time of writing: Gateways that include
+		// addresses with the following values:
+		//
+		//   * PLACEHOLDER_USABLE_ADDRS
+		//   * PLACEHOLDER_UNUSABLE_ADDRS
+		//
+		// indicate that they expect the caller of the test suite to have provided
+		// relevant addresses (usable, or unusable ones) in the test suite, and those
+		// addresses will be injected into the Gateway and the placeholders removed.
+		//
+		// A special "test/fake-invalid-type" can be provided as well in the test to
+		// explicitly trigger a failure to support a type. If an implementation ever
+		// comes along actually trying to support that type, I'm going to be very
+		// cranky.
+		//
+		// Note: I would really love to find a better way to do this kind of
+		// thing in the future.
+		var overlayUsable, overlayUnusable bool
+		var specialAddrs []v1beta1.GatewayAddress
+		for _, addr := range gwspec.Addresses {
+			switch addr.Value {
+			case "PLACEHOLDER_USABLE_ADDRS":
+				overlayUsable = true
+			case "PLACEHOLDER_UNUSABLE_ADDRS":
+				overlayUnusable = true
+			}
 
-			portIndex++
-			listeners[i] = listener
+			if addr.Type != nil && *addr.Type == "test/fake-invalid-type" {
+				specialAddrs = append(specialAddrs, addr)
+			}
 		}
 
-		err = unstructured.SetNestedSlice(uObj.Object, listeners, "spec", "listeners")
-		require.NoErrorf(t, err, "error setting `spec.listeners` on %s Gateway resource", uObj.GetName())
-	}
+		var primOverlayAddrs []interface{}
+		if len(specialAddrs) > 0 {
+			t.Logf("the test provides %d special addresses that will be kept", len(specialAddrs))
+			primOverlayAddrs = append(primOverlayAddrs, convertGatewayAddrsToPrimitives(specialAddrs)...)
+		}
+		if overlayUnusable {
+			t.Logf("address pool of %d unusable addresses will be overlaid", len(a.UnusableNetworkAddresses))
+			primOverlayAddrs = append(primOverlayAddrs, convertGatewayAddrsToPrimitives(a.UnusableNetworkAddresses)...)
+		}
+		if overlayUsable {
+			t.Logf("address pool of %d usable addresses will be overlaid", len(a.UsableNetworkAddresses))
+			primOverlayAddrs = append(primOverlayAddrs, convertGatewayAddrsToPrimitives(a.UsableNetworkAddresses)...)
+		}
 
-	return portIndex
+		err = unstructured.SetNestedSlice(uObj.Object, primOverlayAddrs, "spec", "addresses")
+		require.NoError(t, err, "could not overlay static addresses on Gateway %s/%s", ns, name)
+	}
 }
 
 // prepareGatewayClass adjust the spec.controllerName on the resource
@@ -95,11 +143,11 @@ func (a Applier) prepareGatewayClass(t *testing.T, uObj *unstructured.Unstructur
 }
 
 // prepareNamespace adjusts the Namespace labels.
-func prepareNamespace(t *testing.T, uObj *unstructured.Unstructured, namespaceLabels map[string]string) {
+func (a Applier) prepareNamespace(t *testing.T, uObj *unstructured.Unstructured) {
 	labels, _, err := unstructured.NestedStringMap(uObj.Object, "metadata", "labels")
 	require.NoErrorf(t, err, "error getting labels on Namespace %s", uObj.GetName())
 
-	for k, v := range namespaceLabels {
+	for k, v := range a.NamespaceLabels {
 		if labels == nil {
 			labels = map[string]string{}
 		}
@@ -112,16 +160,29 @@ func prepareNamespace(t *testing.T, uObj *unstructured.Unstructured, namespaceLa
 		err = unstructured.SetNestedStringMap(uObj.Object, labels, "metadata", "labels")
 	}
 	require.NoErrorf(t, err, "error setting labels on Namespace %s", uObj.GetName())
+
+	annotations, _, err := unstructured.NestedStringMap(uObj.Object, "metadata", "annotations")
+	require.NoErrorf(t, err, "error getting annotations on Namespace %s", uObj.GetName())
+
+	for k, v := range a.NamespaceAnnotations {
+		if annotations == nil {
+			annotations = map[string]string{}
+		}
+
+		annotations[k] = v
+	}
+
+	// SetNestedStringMap converts nil to an empty map
+	if annotations != nil {
+		err = unstructured.SetNestedStringMap(uObj.Object, annotations, "metadata", "annotations")
+	}
+	require.NoErrorf(t, err, "error setting annotations on Namespace %s", uObj.GetName())
 }
 
 // prepareResources uses the options from an Applier to tweak resources given by
 // a set of manifests.
 func (a Applier) prepareResources(t *testing.T, decoder *yaml.YAMLOrJSONDecoder) ([]unstructured.Unstructured, error) {
 	var resources []unstructured.Unstructured
-
-	// portIndex is incremented for each listener we see. For a manifest file
-	// with 2 gateways, each with 2 listeners, it will be incremented 4 times.
-	portIndex := 0
 
 	for {
 		uObj := unstructured.Unstructured{}
@@ -139,11 +200,11 @@ func (a Applier) prepareResources(t *testing.T, decoder *yaml.YAMLOrJSONDecoder)
 			a.prepareGatewayClass(t, &uObj)
 		}
 		if uObj.GetKind() == "Gateway" {
-			portIndex = a.prepareGateway(t, &uObj, portIndex)
+			a.prepareGateway(t, &uObj)
 		}
 
 		if uObj.GetKind() == "Namespace" && uObj.GetObjectKind().GroupVersionKind().Group == "" {
-			prepareNamespace(t, &uObj, a.NamespaceLabels)
+			a.prepareNamespace(t, &uObj)
 		}
 
 		resources = append(resources, uObj)
@@ -184,7 +245,7 @@ func (a Applier) MustApplyObjectsWithCleanup(t *testing.T, c client.Client, time
 // provided YAML file and registers a cleanup function for resources it created.
 // Note that this does not remove resources that already existed in the cluster.
 func (a Applier) MustApplyWithCleanup(t *testing.T, c client.Client, timeoutConfig config.TimeoutConfig, location string, cleanup bool) {
-	data, err := getContentsFromPathOrURL(location, timeoutConfig)
+	data, err := getContentsFromPathOrURL(a.FS, location, timeoutConfig)
 	require.NoError(t, err)
 
 	decoder := yaml.NewYAMLOrJSONDecoder(data, 4096)
@@ -218,7 +279,9 @@ func (a Applier) MustApplyWithCleanup(t *testing.T, c client.Client, timeoutConf
 					defer cancel()
 					t.Logf("Deleting %s %s", uObj.GetName(), uObj.GetKind())
 					err = c.Delete(ctx, uObj)
-					require.NoErrorf(t, err, "error deleting resource")
+					if !apierrors.IsNotFound(err) {
+						require.NoErrorf(t, err, "error deleting resource")
+					}
 				})
 			}
 			continue
@@ -234,7 +297,9 @@ func (a Applier) MustApplyWithCleanup(t *testing.T, c client.Client, timeoutConf
 				defer cancel()
 				t.Logf("Deleting %s %s", uObj.GetName(), uObj.GetKind())
 				err = c.Delete(ctx, uObj)
-				require.NoErrorf(t, err, "error deleting resource")
+				if !apierrors.IsNotFound(err) {
+					require.NoErrorf(t, err, "error deleting resource")
+				}
 			})
 		}
 		require.NoErrorf(t, err, "error updating resource")
@@ -243,7 +308,7 @@ func (a Applier) MustApplyWithCleanup(t *testing.T, c client.Client, timeoutConf
 
 // getContentsFromPathOrURL takes a string that can either be a local file
 // path or an https:// URL to YAML manifests and provides the contents.
-func getContentsFromPathOrURL(location string, timeoutConfig config.TimeoutConfig) (*bytes.Buffer, error) {
+func getContentsFromPathOrURL(fs embed.FS, location string, timeoutConfig config.TimeoutConfig) (*bytes.Buffer, error) {
 	if strings.HasPrefix(location, "http://") {
 		return nil, fmt.Errorf("data can't be retrieved from %s: http is not supported, use https", location)
 	} else if strings.HasPrefix(location, "https://") {
@@ -272,9 +337,26 @@ func getContentsFromPathOrURL(location string, timeoutConfig config.TimeoutConfi
 		}
 		return manifests, nil
 	}
-	b, err := conformance.Manifests.ReadFile(location)
+	b, err := fs.ReadFile(location)
 	if err != nil {
 		return nil, err
 	}
 	return bytes.NewBuffer(b), nil
+}
+
+// convertGatewayAddrsToPrimitives converts a slice of Gateway addresses
+// to a slice of primitive types and then returns them as a []interface{} so that
+// they can be applied back to an unstructured Gateway.
+func convertGatewayAddrsToPrimitives(gwaddrs []v1beta1.GatewayAddress) (raw []interface{}) {
+	for _, addr := range gwaddrs {
+		addrType := string(v1beta1.IPAddressType)
+		if addr.Type != nil {
+			addrType = string(*addr.Type)
+		}
+		raw = append(raw, map[string]interface{}{
+			"type":  addrType,
+			"value": addr.Value,
+		})
+	}
+	return
 }

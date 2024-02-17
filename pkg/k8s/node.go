@@ -11,6 +11,7 @@ import (
 	"github.com/cilium/cilium/pkg/annotation"
 	"github.com/cilium/cilium/pkg/cidr"
 	slim_corev1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/core/v1"
+	"github.com/cilium/cilium/pkg/labelsfilter"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/node/addressing"
 	nodeTypes "github.com/cilium/cilium/pkg/node/types"
@@ -36,8 +37,14 @@ func ParseNodeAddressType(k8sAddress slim_corev1.NodeAddressType) (addressing.Ad
 	return convertedAddr, err
 }
 
+type nodeAddressGroup struct {
+	typ    slim_corev1.NodeAddressType
+	family slim_corev1.IPFamily
+}
+
 // ParseNode parses a kubernetes node to a cilium node
 func ParseNode(k8sNode *slim_corev1.Node, source source.Source) *nodeTypes.Node {
+	addrGroups := make(map[nodeAddressGroup]struct{})
 	scopedLog := log.WithFields(logrus.Fields{
 		logfields.NodeName:  k8sNode.Name,
 		logfields.K8sNodeID: k8sNode.UID,
@@ -56,17 +63,33 @@ func ParseNode(k8sNode *slim_corev1.Node, source source.Source) *nodeTypes.Node 
 		if addr.Address == "" {
 			continue
 		}
+		addrGroup := nodeAddressGroup{
+			typ: addr.Type,
+		}
 		ip := net.ParseIP(addr.Address)
-		if ip == nil {
+		switch {
+		case ip != nil && ip.To4() != nil:
+			addrGroup.family = slim_corev1.IPv4Protocol
+		case ip != nil && ip.To16() != nil:
+			addrGroup.family = slim_corev1.IPv6Protocol
+		default:
 			scopedLog.WithFields(logrus.Fields{
 				logfields.IPAddr: addr.Address,
-				"type":           addr.Type,
+				logfields.Type:   addr.Type,
 			}).Warn("Ignoring invalid node IP")
 			continue
 		}
+		_, groupFound := addrGroups[addrGroup]
+		if groupFound {
+			scopedLog.WithFields(logrus.Fields{
+				logfields.Node: k8sNode.Name,
+				logfields.Type: addr.Type,
+			}).Warn("Detected multiple IPs of the same address type and family, Cilium will only consider the first IP in the Node resource")
+			continue
+		}
+		addrGroups[addrGroup] = struct{}{}
 
 		addressType, err := ParseNodeAddressType(addr.Type)
-
 		if err != nil {
 			scopedLog.WithError(err).Warn("invalid address type for node")
 		}
@@ -112,8 +135,14 @@ func ParseNode(k8sNode *slim_corev1.Node, source source.Source) *nodeTypes.Node 
 		}
 	}
 
-	newNode.Labels = k8sNode.GetLabels()
-	newNode.Annotations = k8sNode.GetAnnotations()
+	newNode.Labels = labelsfilter.FilterLabelsByRegex(option.Config.ExcludeNodeLabelPatterns, k8sNode.GetLabels())
+	newNode.Annotations = make(map[string]string)
+	// Propagate only Cilium specific annotations.
+	for key, value := range k8sNode.GetAnnotations() {
+		if annotation.CiliumPrefixRegex.MatchString(key) {
+			newNode.Annotations[key] = value
+		}
+	}
 
 	if !option.Config.AnnotateK8sNode {
 		return newNode
@@ -139,6 +168,7 @@ func ParseNode(k8sNode *slim_corev1.Node, source source.Source) *nodeTypes.Node 
 
 	k8sNodeAddHostIP(annotation.CiliumHostIP, annotation.CiliumHostIPAlias)
 	k8sNodeAddHostIP(annotation.CiliumHostIPv6, annotation.CiliumHostIPv6Alias)
+	newNode.IPAddresses = addrs
 
 	if key, ok := annotation.Get(k8sNode, annotation.CiliumEncryptionKey, annotation.CiliumEncryptionKeyAlias); ok {
 		if u, err := strconv.ParseUint(key, 10, 8); err == nil {

@@ -14,8 +14,9 @@ import (
 	"testing"
 	"time"
 
+	. "github.com/cilium/checkmate"
+	"github.com/stretchr/testify/require"
 	etcdAPI "go.etcd.io/etcd/client/v3"
-	. "gopkg.in/check.v1"
 
 	"github.com/cilium/cilium/pkg/checker"
 	"github.com/cilium/cilium/pkg/testutils"
@@ -28,15 +29,11 @@ type EtcdSuite struct {
 var _ = Suite(&EtcdSuite{})
 
 func (e *EtcdSuite) SetUpSuite(c *C) {
-	testutils.IntegrationCheck(c)
+	testutils.IntegrationTest(c)
 }
 
 func (e *EtcdSuite) SetUpTest(c *C) {
-	SetupDummy("etcd")
-}
-
-func (e *EtcdSuite) TearDownTest(c *C) {
-	Client().Close(context.TODO())
+	SetupDummy(c, "etcd")
 }
 
 type MaintenanceMocker struct {
@@ -119,60 +116,6 @@ func (s *EtcdSuite) TestHint(c *C) {
 	err = ctx.Err()
 
 	c.Assert(Hint(err), ErrorMatches, "etcd client timeout exceeded")
-}
-
-func (s *EtcdSuite) TestETCDVersionCheck(c *C) {
-	badVersionStr := "3.0.0"
-	goodVersion := "3.1.0"
-	mm := MaintenanceMocker{
-		OnStatus: func(ctx context.Context, endpoint string) (*etcdAPI.StatusResponse, error) {
-			switch endpoint {
-			case "http://127.0.0.1:4004":
-				return &etcdAPI.StatusResponse{
-					Version: badVersionStr,
-				}, nil
-			default:
-				return &etcdAPI.StatusResponse{
-					Version: goodVersion,
-				}, nil
-			}
-		},
-	}
-	// Check a good version
-	v, err := getEPVersion(context.TODO(), mm, "http://127.0.0.1:4003", time.Second)
-	c.Assert(err, IsNil)
-	c.Assert(v.String(), Equals, goodVersion)
-
-	// Check a bad version
-	v, err = getEPVersion(context.TODO(), mm, "http://127.0.0.1:4004", time.Second)
-	c.Assert(err, IsNil)
-	c.Assert(v.String(), Equals, badVersionStr)
-
-	// CheckMinVersion all good
-	cfg := etcdAPI.Config{}
-	cfg.Endpoints = []string{"http://127.0.0.1:4003", "http://127.0.0.1:4005"}
-	cli, err := etcdAPI.New(cfg)
-	c.Assert(err, IsNil)
-	cli.Maintenance = mm
-	client := etcdClient{
-		client: cli,
-	}
-
-	// short timeout for tests
-	timeout := time.Second
-
-	c.Assert(client.checkMinVersion(context.TODO(), timeout), IsNil)
-
-	// One endpoint has a bad version and should fail
-	cfg.Endpoints = []string{"http://127.0.0.1:4003", "http://127.0.0.1:4004", "http://127.0.0.1:4005"}
-	cli, err = etcdAPI.New(cfg)
-	c.Assert(err, IsNil)
-	cli.Maintenance = mm
-	client = etcdClient{
-		client: cli,
-	}
-
-	c.Assert(client.checkMinVersion(context.TODO(), timeout), Not(IsNil))
 }
 
 type EtcdHelpersSuite struct{}
@@ -341,9 +284,9 @@ type EtcdLockedSuite struct {
 var _ = Suite(&EtcdLockedSuite{})
 
 func (e *EtcdLockedSuite) SetUpSuite(c *C) {
-	testutils.IntegrationCheck(c)
+	testutils.IntegrationTest(c)
 
-	SetupDummy("etcd")
+	SetupDummy(c, "etcd")
 
 	// setup client
 	cfg := etcdAPI.Config{}
@@ -352,14 +295,6 @@ func (e *EtcdLockedSuite) SetUpSuite(c *C) {
 	cli, err := etcdAPI.New(cfg)
 	c.Assert(err, IsNil)
 	e.etcdClient = cli
-}
-
-func (e *EtcdLockedSuite) TearDownSuite(c *C) {
-	testutils.IntegrationCheck(c)
-
-	err := e.etcdClient.Close()
-	c.Assert(err, IsNil)
-	Client().Close(context.TODO())
 }
 
 func (e *EtcdLockedSuite) TestGetIfLocked(c *C) {
@@ -465,115 +400,6 @@ func (e *EtcdLockedSuite) TestGetIfLocked(c *C) {
 		want := tt.setupWanted()
 		value, err := Client().GetIfLocked(context.TODO(), args.key, args.lock)
 		c.Assert(err, Equals, want.err)
-		c.Assert(value, checker.DeepEquals, want.value)
-		err = tt.cleanup(args)
-		c.Assert(err, IsNil)
-	}
-}
-
-func (e *EtcdLockedSuite) TestGetPrefixIfLocked(c *C) {
-	randomPath := c.MkDir()
-	type args struct {
-		key  string
-		lock KVLocker
-	}
-	type wanted struct {
-		err   error
-		key   string
-		value []byte
-	}
-	tests := []struct {
-		name        string
-		setupArgs   func() args
-		setupWanted func() wanted
-		cleanup     func(args args) error
-	}{
-		{
-			name: "getting locked prefix path",
-			setupArgs: func() args {
-				key := randomPath + "foo"
-				kvlocker, err := Client().LockPath(context.Background(), "locks/"+key+"/.lock")
-				c.Assert(err, IsNil)
-				_, err = e.etcdClient.Put(context.Background(), key, "bar")
-				c.Assert(err, IsNil)
-
-				return args{
-					key:  key,
-					lock: kvlocker,
-				}
-			},
-			setupWanted: func() wanted {
-				return wanted{
-					err:   nil,
-					key:   randomPath + "foo",
-					value: []byte("bar"),
-				}
-			},
-			cleanup: func(args args) error {
-				_, err := e.etcdClient.Delete(context.Background(), args.key)
-				if err != nil {
-					return err
-				}
-				return args.lock.Unlock(context.TODO())
-			},
-		},
-		{
-			name: "getting locked prefix path with no value",
-			setupArgs: func() args {
-				key := randomPath + "foo"
-				kvlocker, err := Client().LockPath(context.Background(), "locks/"+key+"/.lock")
-				c.Assert(err, IsNil)
-
-				return args{
-					key:  key,
-					lock: kvlocker,
-				}
-			},
-			setupWanted: func() wanted {
-				return wanted{
-					err:   nil,
-					value: nil,
-				}
-			},
-			cleanup: func(args args) error {
-				return args.lock.Unlock(context.TODO())
-			},
-		},
-		{
-			name: "getting locked prefix path where lock was lost",
-			setupArgs: func() args {
-				key := randomPath + "foo"
-				kvlocker, err := Client().LockPath(context.Background(), "locks/"+key+"/.lock")
-				c.Assert(err, IsNil)
-				err = kvlocker.Unlock(context.TODO())
-				c.Assert(err, IsNil)
-				_, err = e.etcdClient.Put(context.Background(), key, "bar")
-				c.Assert(err, IsNil)
-
-				return args{
-					key:  key,
-					lock: kvlocker,
-				}
-			},
-			setupWanted: func() wanted {
-				return wanted{
-					err:   ErrLockLeaseExpired,
-					value: nil,
-				}
-			},
-			cleanup: func(args args) error {
-				_, err := e.etcdClient.Delete(context.Background(), args.key)
-				return err
-			},
-		},
-	}
-	for _, tt := range tests {
-		c.Log(tt.name)
-		args := tt.setupArgs()
-		want := tt.setupWanted()
-		k, value, err := Client().GetPrefixIfLocked(context.Background(), args.key, args.lock)
-		c.Assert(err, Equals, want.err)
-		c.Assert(k, Equals, want.key)
 		c.Assert(value, checker.DeepEquals, want.value)
 		err = tt.cleanup(args)
 		c.Assert(err, IsNil)
@@ -1662,268 +1488,167 @@ func TestShuffleEndpoints(t *testing.T) {
 	}
 }
 
-type EtcdRateLimiterSuite struct {
-	etcdClient *etcdAPI.Client
-	maxQPS     int
-	txnCount   int
+func TestEtcdRateLimiter(t *testing.T) {
+	testutils.IntegrationTest(t)
 
-	// minTime should be calculated as floor(txnCount / rateLimit) - 1
-	minTime time.Duration
-}
-
-var _ = Suite(&EtcdRateLimiterSuite{})
-
-func (e *EtcdRateLimiterSuite) setupWithRateLimiter() {
-	// The rate limiter is configured with max QPS and burst both
-	// configured to the provided value for rate limit option.
-	setupDummyWithConfigOpts("etcd", map[string]string{
-		EtcdRateLimitOption: fmt.Sprintf("%d", e.maxQPS),
+	t.Run("with QPS=100", func(t *testing.T) {
+		testEtcdRateLimiter(t, 100, 10, require.Less)
 	})
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*30)
-	defer cancel()
-	<-Client().Connected(ctx)
+	t.Run("with QPS=4", func(t *testing.T) {
+		testEtcdRateLimiter(t, 4, 10, require.Greater)
+	})
 }
 
-func (e *EtcdRateLimiterSuite) setupWithoutRateLimiter() {
-	SetupDummy("etcd")
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*30)
-	defer cancel()
-	<-Client().Connected(ctx)
-}
+func testEtcdRateLimiter(t *testing.T, qps, count int, cmp func(require.TestingT, interface{}, interface{}, ...interface{})) {
+	const (
+		prefix  = "foo"
+		condKey = prefix + "-cond-key"
+		value   = "bar"
 
-func (e *EtcdRateLimiterSuite) SetUpSuite(c *C) {
-	testutils.IntegrationCheck(c)
+		threshold = time.Second
+	)
 
-	e.maxQPS = 3
-	e.txnCount = e.maxQPS*2 + 2
-	e.minTime = time.Second
-
-	// setup client
-	cfg := etcdAPI.Config{}
-	cfg.Endpoints = []string{etcdDummyAddress}
-	cfg.DialTimeout = 0
-	cli, err := etcdAPI.New(cfg)
-	c.Assert(err, IsNil)
-	e.etcdClient = cli
-}
-
-func (e *EtcdRateLimiterSuite) TearDownSuite(c *C) {
-	testutils.IntegrationCheck(c)
-
-	err := e.etcdClient.Close()
-	c.Assert(err, IsNil)
-}
-
-func (e *EtcdRateLimiterSuite) getKey(prefix string, c int) string {
-	if prefix != "" {
-		return fmt.Sprintf("%s-%d", prefix, c)
+	ctx := context.Background()
+	getKey := func(id int) string {
+		return fmt.Sprintf("%s-%d", prefix, id)
 	}
 
-	return fmt.Sprintf("foobar-%d", c)
-}
-
-func (e *EtcdRateLimiterSuite) populateKVPairs(c *C, prefix string, count int) {
-	for i := 0; i < count; i++ {
-		key := e.getKey(prefix, i)
-
-		_, err := e.etcdClient.Put(context.Background(), key, "bar")
-		c.Assert(err, IsNil)
+	// Initialize a separate etcd client which is not subject to any rate limiting
+	cfg := etcdAPI.Config{
+		Endpoints:   []string{etcdDummyAddress},
+		DialTimeout: 5 * time.Second,
 	}
-}
+	client, err := etcdAPI.New(cfg)
+	require.NoError(t, err)
 
-func (e *EtcdRateLimiterSuite) cleanKVPairs(c *C, prefix string, count int) {
-	for i := 0; i < count; i++ {
-		key := e.getKey(prefix, i)
+	t.Cleanup(func() {
+		require.NoError(t, client.Close())
+	})
 
-		_, err := e.etcdClient.Delete(context.Background(), key)
-		c.Assert(err, IsNil)
-	}
-}
-
-func (e *EtcdRateLimiterSuite) TestRateLimiter(c *C) {
-	randomPath := c.MkDir()
-	kvstoreVal := []byte("bar")
-	key := randomPath + "foo"
-	condKey := key + "-cond-key"
-
-	opsFuncList := []struct {
-		fn              func(*C, string, int, KVLocker)
+	tests := []struct {
+		fn              func(*testing.T, string, int, KVLocker)
 		name            string
 		useKVLocker     bool
 		needCondKey     bool
 		populateKVPairs bool
-		cleanKVPairs    bool
 	}{
 		{
-			fn: func(c *C, key string, k int, locker KVLocker) {
-				value, err := Client().GetIfLocked(context.TODO(), e.getKey(key, k), locker)
-				c.Assert(err, IsNil)
-				c.Assert(value, checker.DeepEquals, kvstoreVal)
+			fn: func(t *testing.T, key string, k int, locker KVLocker) {
+				val, err := Client().GetIfLocked(ctx, getKey(k), locker)
+				require.NoError(t, err)
+				require.Equal(t, []byte(value), val)
 			},
 			name:            "GetIfLocked",
 			useKVLocker:     true,
 			populateKVPairs: true,
-			cleanKVPairs:    true,
 		},
 		{
-			fn: func(c *C, key string, k int, _ KVLocker) {
-				value, err := Client().Get(context.TODO(), e.getKey(key, k))
-				c.Assert(err, IsNil)
-				c.Assert(value, checker.DeepEquals, kvstoreVal)
+			fn: func(t *testing.T, key string, k int, _ KVLocker) {
+				val, err := Client().Get(ctx, getKey(k))
+				require.NoError(t, err)
+				require.Equal(t, []byte(value), val)
 			},
 			name:            "Get",
 			populateKVPairs: true,
-			cleanKVPairs:    true,
 		},
 		{
-			fn: func(c *C, key string, k int, _ KVLocker) {
-				retKey, value, err := Client().GetPrefix(context.TODO(), e.getKey(key, k))
-				c.Assert(err, IsNil)
-				c.Assert(retKey, Equals, e.getKey(key, k))
-				c.Assert(value, checker.DeepEquals, kvstoreVal)
-			},
-			name:            "GetPrefix",
-			populateKVPairs: true,
-			cleanKVPairs:    true,
-		},
-		{
-			fn: func(c *C, key string, k int, locker KVLocker) {
-				retKey, value, err := Client().GetPrefixIfLocked(context.TODO(), e.getKey(key, k), locker)
-				c.Assert(err, IsNil)
-				c.Assert(retKey, Equals, e.getKey(key, k))
-				c.Assert(value, checker.DeepEquals, kvstoreVal)
-			},
-			name:            "GetPrefixIfLocked",
-			useKVLocker:     true,
-			populateKVPairs: true,
-			cleanKVPairs:    true,
-		},
-		{
-			fn: func(c *C, key string, k int, _ KVLocker) {
-				kvPairs, err := Client().ListPrefix(context.TODO(), e.getKey(key, k))
-				c.Assert(err, IsNil)
-				c.Assert(len(kvPairs), Equals, 1)
-				value, ok := kvPairs[e.getKey(key, k)]
-				c.Assert(ok, Equals, true)
-				c.Assert(value.Data, checker.DeepEquals, kvstoreVal)
+			fn: func(t *testing.T, key string, k int, _ KVLocker) {
+				kvPairs, err := Client().ListPrefix(ctx, getKey(k))
+				require.NoError(t, err)
+				require.Len(t, kvPairs, 1)
+				val, ok := kvPairs[getKey(k)]
+				require.True(t, ok)
+				require.Equal(t, []byte(value), val.Data)
 			},
 			name:            "ListPrefix",
 			populateKVPairs: true,
-			cleanKVPairs:    true,
 		},
 		{
-			fn: func(c *C, key string, k int, locker KVLocker) {
-				kvPairs, err := Client().ListPrefixIfLocked(context.TODO(), e.getKey(key, k), locker)
-				c.Assert(err, IsNil)
-				c.Assert(len(kvPairs), Equals, 1)
-				value, ok := kvPairs[e.getKey(key, k)]
-				c.Assert(ok, Equals, true)
-				c.Assert(value.Data, checker.DeepEquals, kvstoreVal)
+			fn: func(t *testing.T, key string, k int, locker KVLocker) {
+				kvPairs, err := Client().ListPrefixIfLocked(ctx, getKey(k), locker)
+				require.NoError(t, err)
+				require.Len(t, kvPairs, 1)
+				val, ok := kvPairs[getKey(k)]
+				require.True(t, ok)
+				require.Equal(t, []byte(value), val.Data)
 			},
 			name:            "ListPrefixIfLocked",
 			useKVLocker:     true,
 			populateKVPairs: true,
-			cleanKVPairs:    true,
 		},
 		{
-			fn: func(c *C, key string, k int, _ KVLocker) {
-				newVal := []byte("bar-new")
-				updated, err := Client().UpdateIfDifferent(context.TODO(), e.getKey(key, k), newVal, true)
-				c.Assert(err, IsNil)
-				c.Assert(updated, Equals, true)
+			fn: func(t *testing.T, key string, k int, _ KVLocker) {
+				updated, err := Client().UpdateIfDifferent(ctx, getKey(k), []byte("bar-new"), true)
+				require.NoError(t, err)
+				require.True(t, updated)
 			},
 			name:            "UpdateIfDifferent",
 			populateKVPairs: true,
-			cleanKVPairs:    true,
 		},
 		{
-			fn: func(c *C, key string, k int, locker KVLocker) {
-				newVal := []byte("bar-new")
-				updated, err := Client().UpdateIfDifferentIfLocked(context.TODO(), e.getKey(key, k), newVal, true, locker)
-				c.Assert(err, IsNil)
-				c.Assert(updated, Equals, true)
+			fn: func(t *testing.T, key string, k int, locker KVLocker) {
+				updated, err := Client().UpdateIfDifferentIfLocked(ctx, getKey(k), []byte("bar-new"), true, locker)
+				require.NoError(t, err)
+				require.True(t, updated)
 			},
 			name:            "UpdateIfDifferentIfLocked",
 			useKVLocker:     true,
 			populateKVPairs: true,
-			cleanKVPairs:    true,
 		},
 		{
-			fn: func(c *C, key string, k int, _ KVLocker) {
-				err := Client().Set(context.TODO(), e.getKey(key, k), kvstoreVal)
-				c.Assert(err, IsNil)
+			fn: func(t *testing.T, key string, k int, _ KVLocker) {
+				err := Client().Update(ctx, getKey(k), []byte(value), true)
+				require.NoError(t, err)
 			},
-			name:         "Set",
-			cleanKVPairs: true,
+			name: "Update",
 		},
 		{
-			fn: func(c *C, key string, k int, _ KVLocker) {
-				err := Client().Update(context.TODO(), e.getKey(key, k), []byte(kvstoreVal), true)
-				c.Assert(err, IsNil)
+			fn: func(t *testing.T, key string, k int, locker KVLocker) {
+				err := Client().UpdateIfLocked(ctx, getKey(k), []byte(value), true, locker)
+				require.NoError(t, err)
 			},
-			name:         "Update",
-			cleanKVPairs: true,
+			name:        "UpdateIfLocked",
+			useKVLocker: true,
 		},
 		{
-			fn: func(c *C, key string, k int, locker KVLocker) {
-				err := Client().UpdateIfLocked(context.TODO(), e.getKey(key, k), []byte(kvstoreVal), true, locker)
-				c.Assert(err, IsNil)
+			fn: func(t *testing.T, key string, k int, _ KVLocker) {
+				created, err := Client().CreateOnly(ctx, getKey(k), []byte(value), true)
+				require.NoError(t, err)
+				require.True(t, created)
 			},
-			name:         "UpdateIfLocked",
-			useKVLocker:  true,
-			cleanKVPairs: true,
+			name: "CreateOnly",
 		},
 		{
-			fn: func(c *C, key string, k int, _ KVLocker) {
-				created, err := Client().CreateOnly(context.TODO(), e.getKey(key, k), []byte(kvstoreVal), true)
-				c.Assert(err, IsNil)
-				c.Assert(created, Equals, true)
+			fn: func(t *testing.T, key string, k int, locker KVLocker) {
+				created, err := Client().CreateOnlyIfLocked(ctx, getKey(k), []byte(value), true, locker)
+				require.NoError(t, err)
+				require.True(t, created)
 			},
-			name:         "CreateOnly",
-			cleanKVPairs: true,
+			name:        "CreateOnlyIfLocked",
+			useKVLocker: true,
 		},
 		{
-			fn: func(c *C, key string, k int, locker KVLocker) {
-				created, err := Client().CreateOnlyIfLocked(context.TODO(), e.getKey(key, k), []byte(kvstoreVal), true, locker)
-				c.Assert(err, IsNil)
-				c.Assert(created, Equals, true)
-			},
-			name:         "CreateOnlyIfLocked",
-			useKVLocker:  true,
-			cleanKVPairs: true,
-		},
-		{
-			fn: func(c *C, key string, k int, _ KVLocker) {
-				err := Client().CreateIfExists(context.TODO(), condKey, e.getKey(key, k), []byte(kvstoreVal), true)
-				c.Assert(err, IsNil)
-			},
-			name:         "CreateIfExists",
-			useKVLocker:  true,
-			needCondKey:  true,
-			cleanKVPairs: true,
-		},
-		{
-			fn: func(c *C, key string, k int, _ KVLocker) {
-				err := Client().Delete(context.TODO(), e.getKey(key, k))
-				c.Assert(err, IsNil)
+			fn: func(t *testing.T, key string, k int, _ KVLocker) {
+				err := Client().Delete(ctx, getKey(k))
+				require.NoError(t, err)
 			},
 			name:            "Delete",
 			populateKVPairs: true,
 		},
 		{
-			fn: func(c *C, key string, k int, locker KVLocker) {
-				err := Client().DeleteIfLocked(context.TODO(), e.getKey(key, k), locker)
-				c.Assert(err, IsNil)
+			fn: func(t *testing.T, key string, k int, locker KVLocker) {
+				err := Client().DeleteIfLocked(ctx, getKey(k), locker)
+				require.NoError(t, err)
 			},
 			name:            "DeleteIfLocked",
 			useKVLocker:     true,
 			populateKVPairs: true,
 		},
 		{
-			fn: func(c *C, key string, k int, _ KVLocker) {
-				err := Client().DeletePrefix(context.TODO(), e.getKey(key, k))
-				c.Assert(err, IsNil)
+			fn: func(t *testing.T, key string, k int, _ KVLocker) {
+				err := Client().DeletePrefix(ctx, getKey(k))
+				require.NoError(t, err)
 			},
 			name:            "DeletePrefix",
 			useKVLocker:     true,
@@ -1931,88 +1656,110 @@ func (e *EtcdRateLimiterSuite) TestRateLimiter(c *C) {
 		},
 	}
 
-	for _, op := range opsFuncList {
-		c.Logf("Validating operation: %s\n", op.name)
-		var (
-			kvlocker KVLocker
-			err      error
-		)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var (
+				kvlocker KVLocker
+				err      error
+			)
 
-		if op.populateKVPairs {
-			e.populateKVPairs(c, key, e.txnCount)
+			SetupDummyWithConfigOpts(t, "etcd", map[string]string{
+				EtcdRateLimitOption: fmt.Sprintf("%d", qps),
+			})
+
+			if tt.populateKVPairs {
+				for i := 0; i < count; i++ {
+					_, err := client.Put(ctx, getKey(i), value)
+					require.NoError(t, err)
+				}
+			}
+
+			if tt.needCondKey {
+				_, err = client.Put(ctx, condKey, value)
+				require.NoError(t, err)
+			}
+
+			if tt.useKVLocker {
+				kvlocker, err = Client().LockPath(ctx, "locks/"+prefix+"/.lock")
+				require.NoError(t, err)
+
+				t.Cleanup(func() {
+					require.NoError(t, kvlocker.Unlock(ctx))
+				})
+			}
+
+			start := time.Now()
+			wg := sync.WaitGroup{}
+			for i := 0; i < count; i++ {
+				wg.Add(1)
+				go func(wg *sync.WaitGroup, i int) {
+					defer wg.Done()
+					tt.fn(t, prefix, i, kvlocker)
+				}(&wg, i)
+			}
+			wg.Wait()
+
+			cmp(t, time.Since(start), threshold)
+		})
+	}
+}
+
+func (e *EtcdSuite) TestPaginatedList(c *C) {
+	const prefix = "list/paginated"
+	ctx := context.Background()
+
+	run := func(batch int) {
+		keys := map[string]struct{}{
+			path.Join(prefix, "immortal-finch"):   {},
+			path.Join(prefix, "rare-goshawk"):     {},
+			path.Join(prefix, "cunning-bison"):    {},
+			path.Join(prefix, "amusing-tick"):     {},
+			path.Join(prefix, "prepared-shark"):   {},
+			path.Join(prefix, "exciting-mustang"): {},
+			path.Join(prefix, "ethical-ibex"):     {},
+			path.Join(prefix, "accepted-kite"):    {},
+			path.Join(prefix, "model-javelin"):    {},
+			path.Join(prefix, "inviting-hog"):     {},
 		}
-		if op.needCondKey {
-			_, err = e.etcdClient.Put(context.Background(), condKey, string(kvstoreVal))
+
+		defer func(previous int) {
+			Client().(*etcdClient).listBatchSize = previous
+			c.Assert(Client().DeletePrefix(ctx, prefix), IsNil)
+		}(Client().(*etcdClient).listBatchSize)
+		Client().(*etcdClient).listBatchSize = batch
+
+		var expected int64
+		for key := range keys {
+			res, err := Client().(*etcdClient).client.Put(ctx, key, "value")
+			expected = res.Header.Revision
 			c.Assert(err, IsNil)
 		}
 
-		// Run test without rate limiter configured for etcd client.
-		e.setupWithoutRateLimiter()
+		kvs, found, err := Client().(*etcdClient).paginatedList(ctx, log, prefix)
+		c.Assert(err, IsNil)
 
-		if op.useKVLocker {
-			kvlocker, err = Client().LockPath(context.Background(), "locks/"+key+"/.lock")
-			c.Assert(err, IsNil)
+		for _, kv := range kvs {
+			key := string(kv.Key)
+			if _, ok := keys[key]; !ok {
+				c.Fatalf("Retrieved unexpected key, key: %s", key)
+			}
+			delete(keys, key)
 		}
 
-		start := time.Now()
-		wg := sync.WaitGroup{}
-		for i := 0; i < e.txnCount; i++ {
-			wg.Add(1)
-			go func(wg *sync.WaitGroup, i int) {
-				defer wg.Done()
-				op.fn(c, key, i, kvlocker)
-			}(&wg, i)
-		}
-		wg.Wait()
-		c.Assert(time.Since(start) < e.minTime, Equals, true)
+		c.Assert(keys, HasLen, 0)
 
-		if op.useKVLocker {
-			err = kvlocker.Unlock(context.TODO())
-			c.Assert(err, IsNil)
-		}
-		Client().Close(context.TODO())
-
-		// Clean created KV Pairs if populateKVPairs is disabled and cleanKVPairs is enabled.
-		if !op.populateKVPairs && op.cleanKVPairs {
-			e.cleanKVPairs(c, key, e.txnCount)
-		}
-
-		// Populate KV Pairs again if populateKVPairs is enabled and cleanKVPairs is disabled.
-		if op.populateKVPairs && !op.cleanKVPairs {
-			e.populateKVPairs(c, key, e.txnCount)
-		}
-
-		// Run tests with rate limiter configured for etcd client.
-		e.setupWithRateLimiter()
-		if op.useKVLocker {
-			kvlocker, err = Client().LockPath(context.Background(), "locks/"+key+"/.lock")
-			c.Assert(err, IsNil)
-		}
-
-		start = time.Now()
-		wg = sync.WaitGroup{}
-		for i := 0; i < e.txnCount; i++ {
-			wg.Add(1)
-			go func(wg *sync.WaitGroup, i int) {
-				defer wg.Done()
-				op.fn(c, key, i, kvlocker)
-			}(&wg, i)
-		}
-		wg.Wait()
-		c.Assert(time.Since(start) > e.minTime, Equals, true)
-
-		if op.useKVLocker {
-			err = kvlocker.Unlock(context.TODO())
-			c.Assert(err, IsNil)
-		}
-		Client().Close(context.TODO())
-
-		if op.needCondKey {
-			_, err = e.etcdClient.Delete(context.Background(), condKey)
-			c.Assert(err, IsNil)
-		}
-		if op.cleanKVPairs {
-			e.cleanKVPairs(c, key, e.txnCount)
+		// There is no guarantee that found == expected, because new operations might have occurred in parallel.
+		if found < expected {
+			c.Fatalf("Next revision (%d) is lower than the one of the last update (%d)", found, expected)
 		}
 	}
+
+	// Batch size = 1
+	run(1)
+
+	// Batch size = 4
+	run(4)
+
+	// Batch size = 11
+	run(11)
 }

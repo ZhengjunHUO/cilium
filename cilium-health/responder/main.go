@@ -5,7 +5,9 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 
@@ -29,10 +31,10 @@ func main() {
 	// Shutdown gracefully to halt server and remove pidfile
 	ctx, cancel := signal.NotifyContext(context.Background(), unix.SIGINT, unix.SIGHUP, unix.SIGTERM, unix.SIGQUIT)
 
-	srv := responder.NewServer(listen)
+	srv := responder.NewServers([]string{""}, listen)
 	defer srv.Shutdown()
 	go func() {
-		if err := srv.Serve(); err != nil {
+		if err := srv.Serve(); !errors.Is(err, http.ErrServerClosed) {
 			fmt.Fprintf(os.Stderr, "error while listening: %s\n", err.Error())
 			cancel()
 		}

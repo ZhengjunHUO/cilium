@@ -9,7 +9,7 @@ import (
 	"reflect"
 	"time"
 
-	"gopkg.in/check.v1"
+	check "github.com/cilium/checkmate"
 
 	"github.com/cilium/cilium/api/v1/models"
 	"github.com/cilium/cilium/pkg/checker"
@@ -80,7 +80,7 @@ func (s *EndpointSuite) newEndpoint(c *check.C, spec endpointGeneratorSpec) *End
 		})
 	}
 
-	e.desiredPolicy.PolicyMapState = policy.MapState{}
+	e.desiredPolicy.SetPolicyMap(nil)
 
 	if spec.numPortsPerIdentity == 0 {
 		spec.numPortsPerIdentity = 1
@@ -93,7 +93,7 @@ func (s *EndpointSuite) newEndpoint(c *check.C, spec endpointGeneratorSpec) *End
 				DestPort:         uint16(80 + n),
 				TrafficDirection: trafficdirection.Ingress.Uint8(),
 			}
-			e.desiredPolicy.PolicyMapState[key] = policy.MapStateEntry{}
+			e.desiredPolicy.GetPolicyMap().Insert(key, policy.MapStateEntry{})
 		}
 	}
 
@@ -104,7 +104,7 @@ func (s *EndpointSuite) newEndpoint(c *check.C, spec endpointGeneratorSpec) *End
 				DestPort:         uint16(80 + n),
 				TrafficDirection: trafficdirection.Egress.Uint8(),
 			}
-			e.desiredPolicy.PolicyMapState[key] = policy.MapStateEntry{}
+			e.desiredPolicy.GetPolicyMap().Insert(key, policy.MapStateEntry{})
 		}
 	}
 
@@ -115,10 +115,13 @@ func (s *EndpointSuite) TestGetCiliumEndpointStatusSuccessfulControllers(c *chec
 	e := s.newEndpoint(c, endpointGeneratorSpec{})
 	cepA := e.GetCiliumEndpointStatus(&endpointStatusConfiguration{})
 
+	controllerGroup := controller.NewGroup("controller")
+
 	// Run successful controllers in the background
 	for i := 0; i < 50; i++ {
 		e.controllers.UpdateController(fmt.Sprintf("controller-%d", i),
 			controller.ControllerParams{
+				Group: controllerGroup,
 				DoFunc: func(ctx context.Context) error {
 					return nil
 				},
@@ -373,7 +376,7 @@ func (s *EndpointSuite) TestgetEndpointPolicyMapState(c *check.C) {
 			name: "World shadows CIDR ingress",
 			args: []args{
 				{uint32(identity.ReservedIdentityWorld), 0, 0, trafficdirection.Ingress},
-				{uint32(identity.LocalIdentityFlag), 0, 0, trafficdirection.Ingress},
+				{uint32(identity.IdentityScopeLocal), 0, 0, trafficdirection.Ingress},
 			},
 			ingressResult: []apiResult{
 				{"reserved:world", uint64(identity.ReservedIdentityWorld), 0, 0},
@@ -384,7 +387,7 @@ func (s *EndpointSuite) TestgetEndpointPolicyMapState(c *check.C) {
 			name: "World shadows CIDR egress",
 			args: []args{
 				{uint32(identity.ReservedIdentityWorld), 0, 0, trafficdirection.Egress},
-				{uint32(identity.LocalIdentityFlag), 0, 0, trafficdirection.Egress},
+				{uint32(identity.IdentityScopeLocal), 0, 0, trafficdirection.Egress},
 			},
 			ingressResult: nil,
 			egressResult: []apiResult{
@@ -394,7 +397,7 @@ func (s *EndpointSuite) TestgetEndpointPolicyMapState(c *check.C) {
 	}
 
 	for _, tt := range tests {
-		e.desiredPolicy.PolicyMapState = policy.MapState{}
+		e.desiredPolicy.SetPolicyMap(nil)
 		for _, arg := range tt.args {
 			t := policy.Key{
 				Identity:         arg.identity,
@@ -402,7 +405,7 @@ func (s *EndpointSuite) TestgetEndpointPolicyMapState(c *check.C) {
 				Nexthdr:          arg.nexthdr,
 				TrafficDirection: arg.direction.Uint8(),
 			}
-			e.desiredPolicy.PolicyMapState[t] = policy.MapStateEntry{}
+			e.desiredPolicy.GetPolicyMap().Insert(t, policy.MapStateEntry{})
 		}
 		expectedIngressList := prepareExpectedList(tt.ingressResult)
 		expectedEgressList := prepareExpectedList(tt.egressResult)

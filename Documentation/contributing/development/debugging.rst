@@ -4,10 +4,79 @@
     Please use the official rendered version released here:
     https://docs.cilium.io
 
+.. _gs_debugging:
+
 #########
 Debugging
 #########
 
+Attaching a Debugger
+--------------------
+
+Cilium comes with a set of Makefile targets for quickly deploying development
+builds to a local :ref:`Kind <gs_kind>` cluster. One of these targets is
+``kind-debug-agent``, which generates a container image that wraps the Cilium
+agent with a `Delve (dlv) <https://github.com/go-delve/delve>`_ invocation. This
+causes the agent process to listen for connections from a debugger front-end on
+port 2345.
+
+To build and push a debug image to your local Kind cluster, run:
+
+.. code-block:: shell-session
+
+    $ make kind-debug-agent
+
+.. note::
+      The image is automatically pushed to the Kind nodes, but running Cilium
+      Pods are not restarted. To do so, run:
+
+      .. code-block:: shell-session
+        
+        $ kubectl delete pods -n kube-system -l app.kubernetes.io/name=cilium-agent
+
+If your Kind cluster was set up using ``make kind``, it will automatically
+be configured using with the following port mappings:
+
+- ``23401``: ``kind-control-plane-1``
+- ``2340*``: Subsequent ``kind-control-plane-*`` nodes, if defined
+- ``23411``: ``kind-worker-1``
+- ``2341*``: Subsequent ``kind-worker-*`` nodes, if defined
+
+The Delve listener supports multiple debugging protocols, so any IDEs or
+debugger front-ends that understand either the `Debug Adapter Protocol
+<https://microsoft.github.io/debug-adapter-protocol>`_ or Delve API v2 are
+supported.
+
+~~~~~~~~~~~~~~~~~~
+Visual Studio Code
+~~~~~~~~~~~~~~~~~~
+
+The Cilium repository contains a VS Code launch configuration
+(``.vscode/launch.json``) that includes debug targets for the Kind control
+plane, the first two ``kind-worker`` nodes and the :ref:`Cilium Operator
+<cilium_operator_internals>`.
+
+.. image:: _static/vscode-run-and-debug.png
+    :align: center
+
+|
+
+The preceding screenshot is taken from the 'Run And Debug' section in VS Code.
+The default shortcut to access this section is ``Shift+Ctrl+D``. Select a target
+to attach to, start the debug session and set a breakpoint to halt the agent or
+operator on a specific code statement. This only works for Go code, BPF C code
+cannot be debugged this way.
+
+See `the VS Code debugging guide <https://code.visualstudio.com/docs/editor/debugging>`_
+for more details.
+
+~~~~~~
+Neovim
+~~~~~~
+
+The Cilium repository contains a `.nvim directory
+<https://github.com/cilium/cilium/tree/main/.nvim>`_ containing a DAP
+configuration as well as a README on how to configure ``nvim-dap``.
 
 toFQDNs and DNS Debugging
 -------------------------
@@ -52,11 +121,11 @@ toFQDNs rules and events relating to those rules are also relevant.
 
 .. Note::
 
-    Be sure to run cilium monitor on the same node as the pod being debugged!
+    Be sure to run cilium-dbg monitor on the same node as the pod being debugged!
 
 .. code-block:: shell-session
 
-    $ kubectl exec pod/cilium-sbp8v -n kube-system -- cilium monitor --related-to 3459
+    $ kubectl exec pod/cilium-sbp8v -n kube-system -- cilium-dbg monitor --related-to 3459
     Listening for events on 4 CPUs with 64x4096 of shared memory
     Press Ctrl-C to quit
     level=info msg="Initializing dissection cache..." subsys=monitor
@@ -89,7 +158,7 @@ example.
 - If no L7 DNS requests appear, the proxy redirect is not in place. This may
   mean that the policy does not select this endpoint or there is an issue with
   the proxy redirection. Whether any redirects exist can be checked with
-  ``cilium status --all-redirects``.
+  ``cilium-dbg status --all-redirects``.
   In the past, a bug occurred with more permissive L3 rules overriding the
   proxy redirect, causing the proxy to never see the requests.
 - If the L7 DNS request is blocked, with an explicit denied message, then the
@@ -107,13 +176,13 @@ example.
   The pkg/proxy/dns.go file contains the DNS proxy implementation.
 
 If L7 DNS behaviour seems correct, see the sections below to further isolate
-the issue. This can be verified with ``cilium fqdn cache list``. The IPs in the
+the issue. This can be verified with ``cilium-dbg fqdn cache list``. The IPs in the
 response should appear in the cache for the appropriate endpoint. The lookup
 time is included in the json output of the command.
 
 .. code-block:: shell-session
 
-    $ kubectl exec pod/cilium-sbp8v -n kube-system -- cilium fqdn cache list
+    $ kubectl exec pod/cilium-sbp8v -n kube-system -- cilium-dbg fqdn cache list
     Endpoint   Source   FQDN         TTL    ExpirationTime             IPs
     3459       lookup   cilium.io.   3600   2020-04-21T15:04:27.146Z   104.198.14.52
 
@@ -165,6 +234,7 @@ callbacks provided by other packages via daemon in cilium-agent.
   ``--tofqdns-proxy-response-max-delay`` command line argument but defaults to
   100ms. It can be exceeded if the system is under load.
 
+.. _isolating-source-toFQDNs-issues-identities-policy:
 
 Identities and Policy
 ~~~~~~~~~~~~~~~~~~~~~
@@ -185,14 +255,14 @@ multiple layers of cache:
   does apply the ``--tofqdns-min-ttl`` value but not the
   ``--tofqdns-endpoint-max-ip-per-hostname`` value.
 
-If an IP exists in the FQDN cache (check with ``cilium fqdn cache list``) then
+If an IP exists in the FQDN cache (check with ``cilium-dbg fqdn cache list``) then
 ``toFQDNs`` rules that select a domain name, either explicitly via
 ``matchName`` or via ``matchPattern``, should cause IPs for that domain to have
 allocated Security Identities. These can be listed with:
 
 .. code-block:: shell-session
 
-    $ kubectl exec pod/cilium-sbp8v -n kube-system -- cilium identity list
+    $ kubectl exec pod/cilium-sbp8v -n kube-system -- cilium-dbg identity list
     ID         LABELS
     1          reserved:host
     2          reserved:world
@@ -215,12 +285,12 @@ Note that this is the identity in the monitor output for the HTTP connection.
 In cases where there is no matching identity for an IP in the fqdn cache it may
 simply be because no policy selects an associated domain. The policy system
 represents each ``toFQDNs:`` rule with a ``FQDNSelector`` instance. These
-receive updates from a global ``NameManage`` in the daemon.
+receive updates from a global ``NameManager`` in the daemon.
 They can be listed along with other selectors (roughly corresponding to any L3 rule):
 
 .. code-block:: shell-session
 
-    $ kubectl exec pod/cilium-sbp8v -n kube-system -- cilium policy selectors
+    $ kubectl exec pod/cilium-sbp8v -n kube-system -- cilium-dbg policy selectors
     SELECTOR                                                                                                         USERS   IDENTITIES
     MatchName: , MatchPattern: *                                                                                     1       16777217
     &LabelSelector{MatchLabels:map[string]string{},MatchExpressions:[]LabelSelectorRequirement{},}                   2       1
@@ -308,7 +378,7 @@ Endpoint with the new CIDR Identity of the IP. This can be verified:
 
 .. code-block:: shell-session
 
-    $ kubectl exec pod/cilium-sbp8v -n kube-system -- cilium bpf policy get 3459
+    $ kubectl exec pod/cilium-sbp8v -n kube-system -- cilium-dbg bpf policy get 3459
     DIRECTION   LABELS (source:key[=value])   PORT/PROTO   PROXY PORT   BYTES   PACKETS
     Ingress     reserved:unknown              ANY          NONE         1367    7
     Ingress     reserved:host                 ANY          NONE         0       0
@@ -322,7 +392,7 @@ there may be cases where this doesn't occur:
 
 .. code-block:: shell-session
 
-    $ kubectl exec pod/cilium-sbp8v -n kube-system -- cilium bpf policy get -n 3459
+    $ kubectl exec pod/cilium-sbp8v -n kube-system -- cilium-dbg bpf policy get -n 3459
     DIRECTION   IDENTITY   PORT/PROTO   PROXY PORT   BYTES   PACKETS
     Ingress     0          ANY          NONE         1367    7
     Ingress     1          ANY          NONE         0       0
@@ -340,7 +410,7 @@ specified port.
 An identity missing here can be an error in various places:
 
 - Policy doesn't actually allow this Endpoint to connect. A sanity check is to
-  use ``cilium endpoint list`` to see if cilium thinks it should have policy
+  use ``cilium-dbg endpoint list`` to see if cilium thinks it should have policy
   enforcement.
 - Endpoint regeneration is slow and the Policy Map has not been updated yet.
   This can occur in cases where we have leaked IPs from the DNS cache (i.e.
@@ -405,3 +475,50 @@ For example:
     $ make LOCKDEBUG=1
     $ # Deadlock detection during integration tests:
     $ make LOCKDEBUG=1 integration-tests
+
+CPU Profiling and Memory Leaks
+------------------------------
+
+Cilium bundles ``gops``, a standard tool for Golang applications, which
+provides the ability to collect CPU and memory profiles using ``pprof``.
+Inspecting profiles can help identify CPU bottlenecks and memory leaks.
+
+To capture a profile, take a :ref:`sysdump <sysdump>` of the cluster with the
+Cilium CLI or more directly, use the ``cilium-bugtool`` command that is
+included in the Cilium image:
+
+.. code-block:: shell-session
+
+    $ kubectl exec -ti -n kube-system <cilium-pod-name> -- cilium-bugtool --get-pprof --pprof-trace-seconds N
+    $ kubectl cp -n kube-system <cilium-pod-name>:/tmp/cilium-bugtool-<time-generated-name>.tar ./cilium-pprof.tar
+    $ tar xf ./cilium-pprof.tar
+
+Be mindful that the profile window is the number of seconds passed to
+``--pprof-trace-seconds``. Ensure that the number of seconds are enough to
+capture Cilium while it is exhibiting the problematic behavior to debug.
+
+There are 6 files that encompass the tar archive:
+
+.. code-block:: shell-session
+
+    Permissions Size User  Date Modified Name
+    .rw-r--r--   940 chris  6 Jul 14:04  gops-memstats-$(pidof-cilium-agent).md
+    .rw-r--r--  211k chris  6 Jul 14:04  gops-stack-$(pidof-cilium-agent).md
+    .rw-r--r--    58 chris  6 Jul 14:04  gops-stats-$(pidof-cilium-agent).md
+    .rw-r--r--   212 chris  6 Jul 14:04  pprof-cpu
+    .rw-r--r--  2.3M chris  6 Jul 14:04  pprof-heap
+    .rw-r--r--   25k chris  6 Jul 14:04  pprof-trace
+
+The files prefixed with ``pprof-`` are profiles. For more information on each
+one, see `Julia Evan's blog`_ on ``pprof``.
+
+To view the CPU or memory profile, simply execute the following command:
+
+.. code-block:: shell-session
+
+    $ go tool pprof -http localhost:9090 pprof-cpu  # for CPU
+    $ go tool pprof -http localhost:9090 pprof-heap # for memory
+
+This opens a browser window for profile inspection.
+
+.. _Julia Evan's blog: https://jvns.ca/blog/2017/09/24/profiling-go-with-pprof/

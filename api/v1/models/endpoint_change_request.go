@@ -28,6 +28,9 @@ type EndpointChangeRequest struct {
 	// ID assigned by container runtime
 	ContainerID string `json:"container-id,omitempty"`
 
+	// Name of network device in container netns
+	ContainerInterfaceName string `json:"container-interface-name,omitempty"`
+
 	// Name assigned to container
 	ContainerName string `json:"container-name,omitempty"`
 
@@ -36,6 +39,9 @@ type EndpointChangeRequest struct {
 
 	// ID of datapath tail call map
 	DatapathMapID int64 `json:"datapath-map-id,omitempty"`
+
+	// Disables lookup using legacy endpoint identifiers (container name, container id, pod name) for this endpoint
+	DisableLegacyIdentifiers bool `json:"disable-legacy-identifiers,omitempty"`
 
 	// Docker endpoint ID
 	DockerEndpointID string `json:"docker-endpoint-id,omitempty"`
@@ -49,10 +55,10 @@ type EndpointChangeRequest struct {
 	// Local endpoint ID
 	ID int64 `json:"id,omitempty"`
 
-	// Index of network device
+	// Index of network device in host netns
 	InterfaceIndex int64 `json:"interface-index,omitempty"`
 
-	// Name of network device
+	// Name of network device in host netns
 	InterfaceName string `json:"interface-name,omitempty"`
 
 	// Kubernetes namespace name
@@ -72,6 +78,9 @@ type EndpointChangeRequest struct {
 
 	// Whether policy enforcement is enabled or not
 	PolicyEnabled bool `json:"policy-enabled,omitempty"`
+
+	// Properties is used to store information about the endpoint at creation. Useful for tests.
+	Properties map[string]interface{} `json:"properties,omitempty"`
 
 	// Current state of endpoint
 	// Required: true

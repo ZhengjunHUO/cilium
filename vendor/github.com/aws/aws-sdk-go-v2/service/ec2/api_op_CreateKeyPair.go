@@ -4,6 +4,7 @@ package ec2
 
 import (
 	"context"
+	"fmt"
 	awsmiddleware "github.com/aws/aws-sdk-go-v2/aws/middleware"
 	"github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
@@ -19,10 +20,9 @@ import (
 // Amazon EC2 returns an error. The key pair returned to you is available only in
 // the Amazon Web Services Region in which you create it. If you prefer, you can
 // create your own key pair using a third-party tool and upload it to any Region
-// using ImportKeyPair. You can have up to 5,000 key pairs per Amazon Web Services
-// Region. For more information, see Amazon EC2 key pairs
-// (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-key-pairs.html) in the
-// Amazon Elastic Compute Cloud User Guide.
+// using ImportKeyPair . You can have up to 5,000 key pairs per Amazon Web Services
+// Region. For more information, see Amazon EC2 key pairs (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-key-pairs.html)
+// in the Amazon Elastic Compute Cloud User Guide.
 func (c *Client) CreateKeyPair(ctx context.Context, params *CreateKeyPairInput, optFns ...func(*Options)) (*CreateKeyPairOutput, error) {
 	if params == nil {
 		params = &CreateKeyPairInput{}
@@ -47,8 +47,8 @@ type CreateKeyPairInput struct {
 
 	// Checks whether you have the required permissions for the action, without
 	// actually making the request, and provides an error response. If you have the
-	// required permissions, the error response is DryRunOperation. Otherwise, it is
-	// UnauthorizedOperation.
+	// required permissions, the error response is DryRunOperation . Otherwise, it is
+	// UnauthorizedOperation .
 	DryRun *bool
 
 	// The format of the key pair. Default: pem
@@ -67,11 +67,10 @@ type CreateKeyPairInput struct {
 // Describes a key pair.
 type CreateKeyPairOutput struct {
 
-	// * For RSA key pairs, the key fingerprint is the SHA-1 digest of the DER encoded
-	// private key.
-	//
-	// * For ED25519 key pairs, the key fingerprint is the base64-encoded
-	// SHA-256 digest, which is the default for OpenSSH, starting with OpenSSH 6.8.
+	//   - For RSA key pairs, the key fingerprint is the SHA-1 digest of the DER
+	//   encoded private key.
+	//   - For ED25519 key pairs, the key fingerprint is the base64-encoded SHA-256
+	//   digest, which is the default for OpenSSH, starting with OpenSSH 6.8.
 	KeyFingerprint *string
 
 	// An unencrypted PEM encoded RSA or ED25519 private key.
@@ -93,12 +92,22 @@ type CreateKeyPairOutput struct {
 }
 
 func (c *Client) addOperationCreateKeyPairMiddlewares(stack *middleware.Stack, options Options) (err error) {
+	if err := stack.Serialize.Add(&setOperationInputMiddleware{}, middleware.After); err != nil {
+		return err
+	}
 	err = stack.Serialize.Add(&awsEc2query_serializeOpCreateKeyPair{}, middleware.After)
 	if err != nil {
 		return err
 	}
 	err = stack.Deserialize.Add(&awsEc2query_deserializeOpCreateKeyPair{}, middleware.After)
 	if err != nil {
+		return err
+	}
+	if err := addProtocolFinalizerMiddlewares(stack, options, "CreateKeyPair"); err != nil {
+		return fmt.Errorf("add protocol finalizers: %v", err)
+	}
+
+	if err = addlegacyEndpointContextSetter(stack, options); err != nil {
 		return err
 	}
 	if err = addSetLoggerMiddleware(stack, options); err != nil {
@@ -119,16 +128,13 @@ func (c *Client) addOperationCreateKeyPairMiddlewares(stack *middleware.Stack, o
 	if err = addRetryMiddlewares(stack, options); err != nil {
 		return err
 	}
-	if err = addHTTPSignerV4Middleware(stack, options); err != nil {
-		return err
-	}
 	if err = awsmiddleware.AddRawResponseToMetadata(stack); err != nil {
 		return err
 	}
 	if err = awsmiddleware.AddRecordResponseTiming(stack); err != nil {
 		return err
 	}
-	if err = addClientUserAgent(stack); err != nil {
+	if err = addClientUserAgent(stack, options); err != nil {
 		return err
 	}
 	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
@@ -137,10 +143,16 @@ func (c *Client) addOperationCreateKeyPairMiddlewares(stack *middleware.Stack, o
 	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
 		return err
 	}
+	if err = addSetLegacyContextSigningOptionsMiddleware(stack); err != nil {
+		return err
+	}
 	if err = addOpCreateKeyPairValidationMiddleware(stack); err != nil {
 		return err
 	}
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opCreateKeyPair(options.Region), middleware.Before); err != nil {
+		return err
+	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
@@ -152,6 +164,9 @@ func (c *Client) addOperationCreateKeyPairMiddlewares(stack *middleware.Stack, o
 	if err = addRequestResponseLogging(stack, options); err != nil {
 		return err
 	}
+	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -159,7 +174,6 @@ func newServiceMetadataMiddleware_opCreateKeyPair(region string) *awsmiddleware.
 	return &awsmiddleware.RegisterServiceMetadata{
 		Region:        region,
 		ServiceID:     ServiceID,
-		SigningName:   "ec2",
 		OperationName: "CreateKeyPair",
 	}
 }

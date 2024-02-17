@@ -6,77 +6,79 @@ package proxy
 import (
 	"fmt"
 	"net"
-	"sync"
+
+	"github.com/sirupsen/logrus"
 
 	"github.com/cilium/cilium/pkg/completion"
+	datapath "github.com/cilium/cilium/pkg/datapath/types"
 	"github.com/cilium/cilium/pkg/envoy"
-	"github.com/cilium/cilium/pkg/logging/logfields"
-	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/policy"
+	"github.com/cilium/cilium/pkg/proxy/endpoint"
+	"github.com/cilium/cilium/pkg/proxy/types"
 	"github.com/cilium/cilium/pkg/revert"
 )
-
-// the global Envoy instance
-var envoyProxy *envoy.Envoy
 
 // envoyRedirect implements the RedirectImplementation interface for an l7 proxy.
 type envoyRedirect struct {
 	listenerName string
-	xdsServer    *envoy.XDSServer
+	xdsServer    envoy.XDSServer
+	adminClient  *envoy.EnvoyAdminClient
 }
 
-var envoyOnce sync.Once
-
-func startEnvoy(stateDir string, xdsServer *envoy.XDSServer, wg *completion.WaitGroup) {
-	envoyOnce.Do(func() {
-		// Start Envoy on first invocation
-		envoyProxy = envoy.StartEnvoy(stateDir, option.Config.EnvoyLogPath, 0)
-
-		// Add Prometheus listener if the port is (properly) configured
-		if option.Config.ProxyPrometheusPort < 0 || option.Config.ProxyPrometheusPort > 65535 {
-			log.WithField(logfields.Port, option.Config.ProxyPrometheusPort).Error("Envoy: Invalid configured proxy-prometheus-port")
-		} else if option.Config.ProxyPrometheusPort != 0 {
-			xdsServer.AddMetricsListener(uint16(option.Config.ProxyPrometheusPort), wg)
-		}
-	})
+type envoyProxyIntegration struct {
+	adminClient *envoy.EnvoyAdminClient
+	xdsServer   envoy.XDSServer
+	datapath    datapath.Datapath
 }
 
-// createEnvoyRedirect creates a redirect with corresponding proxy
-// configuration. This will launch a proxy instance.
-func createEnvoyRedirect(r *Redirect, stateDir string, xdsServer *envoy.XDSServer, mayUseOriginalSourceAddr bool, wg *completion.WaitGroup) (RedirectImplementation, error) {
-	startEnvoy(stateDir, xdsServer, wg)
-
-	l := r.listener
-	if envoyProxy != nil {
-		redir := &envoyRedirect{
-			listenerName: net.JoinHostPort(r.name, fmt.Sprintf("%d", l.proxyPort)),
-			xdsServer:    xdsServer,
-		}
-		// Only use original source address for egress
-		if l.ingress {
-			mayUseOriginalSourceAddr = false
-		}
-		xdsServer.AddListener(redir.listenerName, policy.L7ParserType(l.proxyType), l.proxyPort, l.ingress,
-			mayUseOriginalSourceAddr, wg)
-
-		return redir, nil
+// createRedirect creates a redirect with corresponding proxy configuration. This will launch a proxy instance.
+func (p *envoyProxyIntegration) createRedirect(r *Redirect, wg *completion.WaitGroup) (RedirectImplementation, error) {
+	if r.listener.proxyType == types.ProxyTypeCRD {
+		// CRD Listeners already exist, create a no-op implementation
+		return &CRDRedirect{}, nil
 	}
 
-	return nil, fmt.Errorf("%s: Envoy proxy process failed to start, cannot add redirect", r.name)
+	// create an Envoy Listener for Cilium policy enforcement
+	return p.handleEnvoyRedirect(r, wg)
 }
 
-// UpdateRules is a no-op for envoy, as redirect data is synchronized via the
-// xDS cache.
+func (p *envoyProxyIntegration) changeLogLevel(level logrus.Level) error {
+	return p.adminClient.ChangeLogLevel(level)
+}
+
+func (p *envoyProxyIntegration) handleEnvoyRedirect(r *Redirect, wg *completion.WaitGroup) (RedirectImplementation, error) {
+	l := r.listener
+	redirect := &envoyRedirect{
+		listenerName: net.JoinHostPort(r.name, fmt.Sprintf("%d", l.proxyPort)),
+		xdsServer:    p.xdsServer,
+		adminClient:  p.adminClient,
+	}
+
+	mayUseOriginalSourceAddr := p.datapath.SupportsOriginalSourceAddr()
+	// Only use original source address for egress
+	if l.ingress {
+		mayUseOriginalSourceAddr = false
+	}
+	p.xdsServer.AddListener(redirect.listenerName, policy.L7ParserType(l.proxyType), l.proxyPort, l.ingress, mayUseOriginalSourceAddr, wg)
+
+	return redirect, nil
+}
+
+func (p *envoyProxyIntegration) UpdateNetworkPolicy(ep endpoint.EndpointUpdater, vis *policy.VisibilityPolicy, policy *policy.L4Policy, ingressPolicyEnforced, egressPolicyEnforced bool, wg *completion.WaitGroup) (error, func() error) {
+	return p.xdsServer.UpdateNetworkPolicy(ep, vis, policy, ingressPolicyEnforced, egressPolicyEnforced, wg)
+}
+
+func (p *envoyProxyIntegration) RemoveNetworkPolicy(ep endpoint.EndpointInfoSource) {
+	p.xdsServer.RemoveNetworkPolicy(ep)
+}
+
+// UpdateRules is a no-op for envoy, as redirect data is synchronized via the xDS cache.
 func (k *envoyRedirect) UpdateRules(wg *completion.WaitGroup) (revert.RevertFunc, error) {
 	return func() error { return nil }, nil
 }
 
 // Close the redirect.
 func (r *envoyRedirect) Close(wg *completion.WaitGroup) (revert.FinalizeFunc, revert.RevertFunc) {
-	if envoyProxy == nil {
-		return nil, nil
-	}
-
 	revertFunc := r.xdsServer.RemoveListener(r.listenerName, wg)
 
 	return nil, func() error {

@@ -12,6 +12,8 @@ import (
 	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
+// An Amazon Web Services Verified Access endpoint is where you define your
+// application along with an optional endpoint-level access policy.
 func (c *Client) CreateVerifiedAccessEndpoint(ctx context.Context, params *CreateVerifiedAccessEndpointInput, optFns ...func(*Options)) (*CreateVerifiedAccessEndpointOutput, error) {
 	if params == nil {
 		params = &CreateVerifiedAccessEndpointInput{}
@@ -29,44 +31,80 @@ func (c *Client) CreateVerifiedAccessEndpoint(ctx context.Context, params *Creat
 
 type CreateVerifiedAccessEndpointInput struct {
 
+	// The DNS name for users to reach your application.
+	//
 	// This member is required.
 	ApplicationDomain *string
 
+	// The type of attachment.
+	//
 	// This member is required.
 	AttachmentType types.VerifiedAccessEndpointAttachmentType
 
+	// The ARN of the public TLS/SSL certificate in Amazon Web Services Certificate
+	// Manager to associate with the endpoint. The CN in the certificate must match the
+	// DNS name your end users will use to reach your application.
+	//
 	// This member is required.
 	DomainCertificateArn *string
 
+	// A custom identifier that is prepended to the DNS name that is generated for the
+	// endpoint.
+	//
 	// This member is required.
 	EndpointDomainPrefix *string
 
+	// The type of Verified Access endpoint to create.
+	//
 	// This member is required.
 	EndpointType types.VerifiedAccessEndpointType
 
+	// The ID of the Verified Access group to associate the endpoint with.
+	//
 	// This member is required.
 	VerifiedAccessGroupId *string
 
+	// A unique, case-sensitive token that you provide to ensure idempotency of your
+	// modification request. For more information, see Ensuring Idempotency (https://docs.aws.amazon.com/AWSEC2/latest/APIReference/Run_Instance_Idempotency.html)
+	// .
 	ClientToken *string
 
+	// A description for the Verified Access endpoint.
 	Description *string
 
+	// Checks whether you have the required permissions for the action, without
+	// actually making the request, and provides an error response. If you have the
+	// required permissions, the error response is DryRunOperation . Otherwise, it is
+	// UnauthorizedOperation .
 	DryRun *bool
 
+	// The load balancer details. This parameter is required if the endpoint type is
+	// load-balancer .
 	LoadBalancerOptions *types.CreateVerifiedAccessEndpointLoadBalancerOptions
 
+	// The network interface details. This parameter is required if the endpoint type
+	// is network-interface .
 	NetworkInterfaceOptions *types.CreateVerifiedAccessEndpointEniOptions
 
+	// The Verified Access policy document.
 	PolicyDocument *string
 
+	// The IDs of the security groups to associate with the Verified Access endpoint.
+	// Required if AttachmentType is set to vpc .
 	SecurityGroupIds []string
 
+	// The options for server side encryption.
+	SseSpecification *types.VerifiedAccessSseSpecificationRequest
+
+	// The tags to assign to the Verified Access endpoint.
 	TagSpecifications []types.TagSpecification
 
 	noSmithyDocumentSerde
 }
 
 type CreateVerifiedAccessEndpointOutput struct {
+
+	// Details about the Verified Access endpoint.
 	VerifiedAccessEndpoint *types.VerifiedAccessEndpoint
 
 	// Metadata pertaining to the operation's result.
@@ -76,12 +114,22 @@ type CreateVerifiedAccessEndpointOutput struct {
 }
 
 func (c *Client) addOperationCreateVerifiedAccessEndpointMiddlewares(stack *middleware.Stack, options Options) (err error) {
+	if err := stack.Serialize.Add(&setOperationInputMiddleware{}, middleware.After); err != nil {
+		return err
+	}
 	err = stack.Serialize.Add(&awsEc2query_serializeOpCreateVerifiedAccessEndpoint{}, middleware.After)
 	if err != nil {
 		return err
 	}
 	err = stack.Deserialize.Add(&awsEc2query_deserializeOpCreateVerifiedAccessEndpoint{}, middleware.After)
 	if err != nil {
+		return err
+	}
+	if err := addProtocolFinalizerMiddlewares(stack, options, "CreateVerifiedAccessEndpoint"); err != nil {
+		return fmt.Errorf("add protocol finalizers: %v", err)
+	}
+
+	if err = addlegacyEndpointContextSetter(stack, options); err != nil {
 		return err
 	}
 	if err = addSetLoggerMiddleware(stack, options); err != nil {
@@ -102,22 +150,22 @@ func (c *Client) addOperationCreateVerifiedAccessEndpointMiddlewares(stack *midd
 	if err = addRetryMiddlewares(stack, options); err != nil {
 		return err
 	}
-	if err = addHTTPSignerV4Middleware(stack, options); err != nil {
-		return err
-	}
 	if err = awsmiddleware.AddRawResponseToMetadata(stack); err != nil {
 		return err
 	}
 	if err = awsmiddleware.AddRecordResponseTiming(stack); err != nil {
 		return err
 	}
-	if err = addClientUserAgent(stack); err != nil {
+	if err = addClientUserAgent(stack, options); err != nil {
 		return err
 	}
 	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
 		return err
 	}
 	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
+		return err
+	}
+	if err = addSetLegacyContextSigningOptionsMiddleware(stack); err != nil {
 		return err
 	}
 	if err = addIdempotencyToken_opCreateVerifiedAccessEndpointMiddleware(stack, options); err != nil {
@@ -129,6 +177,9 @@ func (c *Client) addOperationCreateVerifiedAccessEndpointMiddlewares(stack *midd
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opCreateVerifiedAccessEndpoint(options.Region), middleware.Before); err != nil {
 		return err
 	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
+		return err
+	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
 		return err
 	}
@@ -136,6 +187,9 @@ func (c *Client) addOperationCreateVerifiedAccessEndpointMiddlewares(stack *midd
 		return err
 	}
 	if err = addRequestResponseLogging(stack, options); err != nil {
+		return err
+	}
+	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
 		return err
 	}
 	return nil
@@ -178,7 +232,6 @@ func newServiceMetadataMiddleware_opCreateVerifiedAccessEndpoint(region string) 
 	return &awsmiddleware.RegisterServiceMetadata{
 		Region:        region,
 		ServiceID:     ServiceID,
-		SigningName:   "ec2",
 		OperationName: "CreateVerifiedAccessEndpoint",
 	}
 }

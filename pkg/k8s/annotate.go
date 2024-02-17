@@ -13,7 +13,6 @@ import (
 
 	"github.com/sirupsen/logrus"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 	k8sTypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 
@@ -24,6 +23,8 @@ import (
 )
 
 type nodeAnnotation = map[string]string
+
+var nodeAnnotationControllerGroup = controller.NewGroup("update-k8s-node-annotations")
 
 func prepareNodeAnnotation(nd nodeTypes.Node, encryptKey uint8) nodeAnnotation {
 	annotationMap := map[string]fmt.Stringer{
@@ -60,7 +61,7 @@ func updateNodeAnnotation(c kubernetes.Interface, nodeName string, annotation no
 	}
 	patch := []byte(fmt.Sprintf(`{"metadata":{"annotations":%s}}`, raw))
 
-	_, err = c.CoreV1().Nodes().Patch(context.TODO(), nodeName, types.StrategicMergePatchType, patch, metav1.PatchOptions{}, "status")
+	_, err = c.CoreV1().Nodes().Patch(context.TODO(), nodeName, k8sTypes.StrategicMergePatchType, patch, metav1.PatchOptions{}, "status")
 
 	return err
 }
@@ -85,6 +86,7 @@ func AnnotateNode(cs kubernetes.Interface, nodeName string, nd nodeTypes.Node, e
 	annotation := prepareNodeAnnotation(nd, encryptKey)
 	controller.NewManager().UpdateController("update-k8s-node-annotations",
 		controller.ControllerParams{
+			Group: nodeAnnotationControllerGroup,
 			DoFunc: func(_ context.Context) error {
 				err := updateNodeAnnotation(cs, nodeName, annotation)
 				if err != nil {

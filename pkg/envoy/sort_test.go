@@ -4,11 +4,11 @@
 package envoy
 
 import (
+	. "github.com/cilium/checkmate"
 	cilium "github.com/cilium/proxy/go/cilium/api"
 	envoy_config_core "github.com/cilium/proxy/go/envoy/config/core/v3"
 	envoy_config_route "github.com/cilium/proxy/go/envoy/config/route/v3"
 	envoy_type_matcher "github.com/cilium/proxy/go/envoy/type/matcher/v3"
-	. "gopkg.in/check.v1"
 
 	"github.com/cilium/cilium/pkg/checker"
 )
@@ -127,12 +127,12 @@ var PortNetworkPolicyRule1 = &cilium.PortNetworkPolicyRule{
 }
 
 var PortNetworkPolicyRule2 = &cilium.PortNetworkPolicyRule{
-	RemotePolicies: []uint64{1},
+	RemotePolicies: []uint32{1},
 	L7:             nil,
 }
 
 var PortNetworkPolicyRule3 = &cilium.PortNetworkPolicyRule{
-	RemotePolicies: []uint64{1, 2},
+	RemotePolicies: []uint32{1, 2},
 	L7:             nil,
 }
 
@@ -148,7 +148,7 @@ var PortNetworkPolicyRule4 = &cilium.PortNetworkPolicyRule{
 }
 
 var PortNetworkPolicyRule5 = &cilium.PortNetworkPolicyRule{
-	RemotePolicies: []uint64{1, 2},
+	RemotePolicies: []uint32{1, 2},
 	L7: &cilium.PortNetworkPolicyRule_HttpRules{
 		HttpRules: &cilium.HttpNetworkPolicyRules{
 			HttpRules: []*cilium.HttpNetworkPolicyRule{
@@ -159,7 +159,7 @@ var PortNetworkPolicyRule5 = &cilium.PortNetworkPolicyRule{
 }
 
 var PortNetworkPolicyRule6 = &cilium.PortNetworkPolicyRule{
-	RemotePolicies: []uint64{1, 2},
+	RemotePolicies: []uint32{1, 2},
 	L7: &cilium.PortNetworkPolicyRule_HttpRules{
 		HttpRules: &cilium.HttpNetworkPolicyRules{
 			HttpRules: []*cilium.HttpNetworkPolicyRule{
@@ -171,7 +171,7 @@ var PortNetworkPolicyRule6 = &cilium.PortNetworkPolicyRule{
 }
 
 var PortNetworkPolicyRule7 = &cilium.PortNetworkPolicyRule{
-	RemotePolicies: []uint64{1, 2},
+	RemotePolicies: []uint32{1, 2},
 	L7: &cilium.PortNetworkPolicyRule_HttpRules{
 		HttpRules: &cilium.HttpNetworkPolicyRules{
 			HttpRules: []*cilium.HttpNetworkPolicyRule{

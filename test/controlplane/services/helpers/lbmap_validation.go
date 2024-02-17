@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -15,15 +16,14 @@ import (
 	"github.com/pmezard/go-difflib/difflib"
 	"golang.org/x/exp/constraints"
 	"golang.org/x/exp/maps"
-	"golang.org/x/exp/slices"
 
-	fakeDatapath "github.com/cilium/cilium/pkg/datapath/fake"
+	fakeTypes "github.com/cilium/cilium/pkg/datapath/fake/types"
 	lb "github.com/cilium/cilium/pkg/loadbalancer"
 	"github.com/cilium/cilium/pkg/testutils/mockmaps"
 	"github.com/cilium/cilium/test/controlplane/suite"
 )
 
-func ValidateLBMapGoldenFile(file string, datapath *fakeDatapath.FakeDatapath) error {
+func ValidateLBMapGoldenFile(file string, datapath *fakeTypes.FakeDatapath) error {
 	lbmap := datapath.LBMockMap()
 	writeLBMap := func() error {
 		f, err := os.OpenFile(file, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)

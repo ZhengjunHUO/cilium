@@ -3,8 +3,10 @@
 
 syntax = "proto3";
 
+import "google/protobuf/any.proto";
 import "google/protobuf/wrappers.proto";
 import "google/protobuf/timestamp.proto";
+import "google/protobuf/field_mask.proto";
 import public "flow/flow.proto";
 import "relay/relay.proto";
 
@@ -26,6 +28,12 @@ service Observer {
 
     // GetNodes returns information about nodes in a cluster.
     rpc GetNodes(GetNodesRequest) returns (GetNodesResponse) {}
+
+    // GetNamespaces returns information about namespaces in a cluster.
+    // The namespaces returned are namespaces which have had network flows in
+    // the last hour. The namespaces are returned sorted by cluster name and
+    // namespace in ascending order.
+    rpc GetNamespaces(GetNamespacesRequest) returns (GetNamespacesResponse) {}
 
     // ServerStatus returns some details about the running hubble server.
     rpc ServerStatus(ServerStatusRequest) returns (ServerStatusResponse) {}
@@ -66,6 +74,10 @@ message ServerStatusResponse {
 
     // Version is the version of Cilium/Hubble.
     string version = 8;
+
+    // Approximate rate of flows seen by Hubble per second over the last minute.
+    // In a multi-node context, this is the sum of all flows rates.
+    double flows_rate = 9;
 }
 
 message GetFlowsRequest {
@@ -105,6 +117,28 @@ message GetFlowsRequest {
 
     // Until this time for returned flows. Incompatible with `number`.
     google.protobuf.Timestamp until = 8;
+
+    // FieldMask allows clients to limit flow's fields that will be returned.
+    // For example, {paths: ["source.id", "destination.id"]} will return flows
+    // with only these two fields set.
+    google.protobuf.FieldMask field_mask = 10;
+
+    // Experimental contains fields that are not stable yet. Support for
+    // experimental features is always optional and subject to change.
+    message Experimental {
+        // FieldMask allows clients to limit flow's fields that will be returned.
+        // For example, {paths: ["source.id", "destination.id"]} will return flows
+        // with only these two fields set.
+        // Deprecated in favor of top-level field_mask. This field will be
+        // removed in v1.17.
+        google.protobuf.FieldMask field_mask = 1 [deprecated=true];
+    }
+    Experimental experimental = 999;
+
+    // extensions can be used to add arbitrary additional metadata to GetFlowsRequest.
+    // This can be used to extend functionality for other Hubble compatible
+    // APIs, or experiment with new functionality without needing to change the public API.
+    google.protobuf.Any extensions = 150000;
 }
 
 // GetFlowsResponse contains either a flow or a protocol message.
@@ -234,6 +268,19 @@ message TLS {
     // ServerName is the TLS server name that can be used as part of the TLS
     // cert validation process.
     string server_name = 2;
+}
+
+message GetNamespacesRequest {}
+
+// GetNamespacesResponse contains the list of namespaces.
+message GetNamespacesResponse {
+    // Namespaces is a list of namespaces with flows
+    repeated Namespace namespaces = 1;
+}
+
+message Namespace {
+  string cluster = 1;
+  string namespace = 2;
 }
 
 // ExportEvent contains an event to be exported. Not to be used outside of the

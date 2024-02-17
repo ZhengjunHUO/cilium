@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 PS4='+[\t] '
 set -eux
@@ -22,7 +22,7 @@ function cilium_install {
             --devices=eth0 \
             --datapath-mode=lb-only \
             "$@"
-    while ! ${CILIUM_EXEC} cilium status; do sleep 3; done
+    while ! ${CILIUM_EXEC} cilium-dbg status; do sleep 3; done
     sleep 1
 }
 
@@ -66,17 +66,17 @@ WORKER_MAC=$(nsenter -t $NGINX_PID -n ip -o l show dev eth0 | grep -oP '(?<=link
 LB_VIP="10.0.0.4"
 
 ${CILIUM_EXEC} \
-    cilium service update --id 1 --frontend "${LB_VIP}:80" --backends "[${WORKER_IP6}]:80" --k8s-node-port
+    cilium-dbg service update --id 1 --frontend "${LB_VIP}:80" --backends "[${WORKER_IP6}]:80" --k8s-load-balancer
 
-SVC_BEFORE=$(${CILIUM_EXEC} cilium service list)
+SVC_BEFORE=$(${CILIUM_EXEC} cilium-dbg service list)
 
-${CILIUM_EXEC} cilium bpf lb list
+${CILIUM_EXEC} cilium-dbg bpf lb list
 
-MAG_V4=$(${CILIUM_EXEC} cilium bpf lb maglev list -o=jsonpath='{.\[1\]/v4}' | tr -d '\r')
-MAG_V6=$(${CILIUM_EXEC} cilium bpf lb maglev list -o=jsonpath='{.\[1\]/v6}' | tr -d '\r')
+MAG_V4=$(${CILIUM_EXEC} cilium-dbg bpf lb maglev list -o=jsonpath='{.\[1\]/v4}' | tr -d '\r')
+MAG_V6=$(${CILIUM_EXEC} cilium-dbg bpf lb maglev list -o=jsonpath='{.\[1\]/v6}' | tr -d '\r')
 if [ ! -z "$MAG_V4" -o -z "$MAG_V6" ]; then
 	echo "Invalid content of Maglev table!"
-	${CILIUM_EXEC} cilium bpf lb maglev list
+	${CILIUM_EXEC} cilium-dbg bpf lb maglev list
 	exit 1
 fi
 
@@ -91,7 +91,7 @@ nsenter -t $CONTROL_PLANE_PID -n ip neigh add ${WORKER_IP6} dev eth0 lladdr ${WO
 
 # Issue 10 requests to LB
 for i in $(seq 1 10); do
-    curl -o /dev/null "${LB_VIP}:80" || (echo "Failed $i"; exit -1)
+    curl -s -o /dev/null "${LB_VIP}:80" || (echo "Failed $i"; exit -1)
 done
 
 # Install Cilium as standalone L4LB: XDP/Maglev/SNAT
@@ -103,9 +103,9 @@ cilium_install \
 
 # Check that restoration went fine. Note that we currently cannot do runtime test
 # as veth + XDP is broken when switching protocols. Needs something bare metal.
-SVC_AFTER=$(${CILIUM_EXEC} cilium service list)
+SVC_AFTER=$(${CILIUM_EXEC} cilium-dbg service list)
 
-${CILIUM_EXEC} cilium bpf lb list
+${CILIUM_EXEC} cilium-dbg bpf lb list
 
 [ "$SVC_BEFORE" != "$SVC_AFTER" ] && exit 1
 
@@ -118,7 +118,7 @@ cilium_install \
 
 # Check that curl still works after restore
 for i in $(seq 1 10); do
-    curl -o /dev/null "${LB_VIP}:80" || (echo "Failed $i"; exit -1)
+    curl -s -o /dev/null "${LB_VIP}:80" || (echo "Failed $i"; exit -1)
 done
 
 # Install Cilium as standalone L4LB: tc/Random/SNAT
@@ -130,7 +130,7 @@ cilium_install \
 
 # Check that curl also works for random selection
 for i in $(seq 1 10); do
-    curl -o /dev/null "${LB_VIP}:80" || (echo "Failed $i"; exit -1)
+    curl -s -o /dev/null "${LB_VIP}:80" || (echo "Failed $i"; exit -1)
 done
 
 # Add another IPv6->IPv6 service and reuse backend
@@ -138,22 +138,30 @@ done
 LB_ALT="fd00:dead:beef:15:bad::1"
 
 ${CILIUM_EXEC} \
-    cilium service update --id 2 --frontend "[${LB_ALT}]:80" --backends "[${WORKER_IP6}]:80" --k8s-node-port
+    cilium-dbg service update --id 2 --frontend "[${LB_ALT}]:80" --backends "[${WORKER_IP6}]:80" --k8s-load-balancer
 
-${CILIUM_EXEC} cilium service list
-${CILIUM_EXEC} cilium bpf lb list
+${CILIUM_EXEC} cilium-dbg service list
+${CILIUM_EXEC} cilium-dbg bpf lb list
 
 LB_NODE_IP=$(docker exec lb-node ip -o -6 a s eth0 | awk '{print $4}' | cut -d/ -f1 | head -n1)
 ip -6 r a "${LB_ALT}/128" via "$LB_NODE_IP"
 
 # Issue 10 requests to LB1
 for i in $(seq 1 10); do
-    curl -o /dev/null "${LB_VIP}:80" || (echo "Failed $i"; exit -1)
+    curl -s -o /dev/null "${LB_VIP}:80" || (echo "Failed $i"; exit -1)
 done
+
+# Try and sleep until the LB2 comes up, seems to be no other way to detect when the service is ready.
+set +e
+for i in $(seq 1 10); do
+    curl -s -o /dev/null "[${LB_ALT}]:80" && break
+    sleep 1
+done
+set -e
 
 # Issue 10 requests to LB2
 for i in $(seq 1 10); do
-    curl -o /dev/null "[${LB_ALT}]:80" || (echo "Failed $i"; exit -1)
+    curl -s -o /dev/null "[${LB_ALT}]:80" || (echo "Failed $i"; exit -1)
 done
 
 # Check if restore for both is proper and that this also works
@@ -169,16 +177,16 @@ cilium_install \
 
 # Issue 10 requests to LB1
 for i in $(seq 1 10); do
-    curl -o /dev/null "${LB_VIP}:80" || (echo "Failed $i"; exit -1)
+    curl -s -o /dev/null "${LB_VIP}:80" || (echo "Failed $i"; exit -1)
 done
 
 # Issue 10 requests to LB2
 for i in $(seq 1 10); do
-    curl -o /dev/null "[${LB_ALT}]:80" || (echo "Failed $i"; exit -1)
+    curl -s -o /dev/null "[${LB_ALT}]:80" || (echo "Failed $i"; exit -1)
 done
 
-${CILIUM_EXEC} cilium service delete 1
-${CILIUM_EXEC} cilium service delete 2
+${CILIUM_EXEC} cilium-dbg service delete 1
+${CILIUM_EXEC} cilium-dbg service delete 2
 nsenter -t $CONTROL_PLANE_PID -n ip neigh del ${WORKER_IP6} dev eth0
 
 # NAT 6->4 test suite (services)
@@ -187,17 +195,17 @@ nsenter -t $CONTROL_PLANE_PID -n ip neigh del ${WORKER_IP6} dev eth0
 LB_VIP="fd00:cafe::1"
 
 ${CILIUM_EXEC} \
-    cilium service update --id 1 --frontend "[${LB_VIP}]:80" --backends "${WORKER_IP4}:80" --k8s-node-port
+    cilium-dbg service update --id 1 --frontend "[${LB_VIP}]:80" --backends "${WORKER_IP4}:80" --k8s-load-balancer
 
-SVC_BEFORE=$(${CILIUM_EXEC} cilium service list)
+SVC_BEFORE=$(${CILIUM_EXEC} cilium-dbg service list)
 
-${CILIUM_EXEC} cilium bpf lb list
+${CILIUM_EXEC} cilium-dbg bpf lb list
 
-MAG_V4=$(${CILIUM_EXEC} cilium bpf lb maglev list -o=jsonpath='{.\[1\]/v4}' | tr -d '\r')
-MAG_V6=$(${CILIUM_EXEC} cilium bpf lb maglev list -o=jsonpath='{.\[1\]/v6}' | tr -d '\r')
+MAG_V4=$(${CILIUM_EXEC} cilium-dbg bpf lb maglev list -o=jsonpath='{.\[1\]/v4}' | tr -d '\r')
+MAG_V6=$(${CILIUM_EXEC} cilium-dbg bpf lb maglev list -o=jsonpath='{.\[1\]/v6}' | tr -d '\r')
 if [ ! -z "$MAG_V4" -o -z "$MAG_V6" ]; then
 	echo "Invalid content of Maglev table!"
-	${CILIUM_EXEC} cilium bpf lb maglev list
+	${CILIUM_EXEC} cilium-dbg bpf lb maglev list
 	exit 1
 fi
 
@@ -212,7 +220,7 @@ nsenter -t $CONTROL_PLANE_PID -n ip neigh add ${WORKER_IP4} dev eth0 lladdr ${WO
 
 # Issue 10 requests to LB
 for i in $(seq 1 10); do
-    curl -o /dev/null "[${LB_VIP}]:80" || (echo "Failed $i"; exit -1)
+    curl -s -o /dev/null "[${LB_VIP}]:80" || (echo "Failed $i"; exit -1)
 done
 
 # Install Cilium as standalone L4LB: XDP/Maglev/SNAT
@@ -224,9 +232,9 @@ cilium_install \
 
 # Check that restoration went fine. Note that we currently cannot do runtime test
 # as veth + XDP is broken when switching protocols. Needs something bare metal.
-SVC_AFTER=$(${CILIUM_EXEC} cilium service list)
+SVC_AFTER=$(${CILIUM_EXEC} cilium-dbg service list)
 
-${CILIUM_EXEC} cilium bpf lb list
+${CILIUM_EXEC} cilium-dbg bpf lb list
 
 [ "$SVC_BEFORE" != "$SVC_AFTER" ] && exit 1
 
@@ -239,7 +247,7 @@ cilium_install \
 
 # Check that curl still works after restore
 for i in $(seq 1 10); do
-    curl -o /dev/null "[${LB_VIP}]:80" || (echo "Failed $i"; exit -1)
+    curl -s -o /dev/null "[${LB_VIP}]:80" || (echo "Failed $i"; exit -1)
 done
 
 # Install Cilium as standalone L4LB: tc/Random/SNAT
@@ -251,7 +259,7 @@ cilium_install \
 
 # Check that curl also works for random selection
 for i in $(seq 1 10); do
-    curl -o /dev/null "[${LB_VIP}]:80" || (echo "Failed $i"; exit -1)
+    curl -s -o /dev/null "[${LB_VIP}]:80" || (echo "Failed $i"; exit -1)
 done
 
 # Add another IPv4->IPv4 service and reuse backend
@@ -259,22 +267,22 @@ done
 LB_ALT="10.0.0.8"
 
 ${CILIUM_EXEC} \
-    cilium service update --id 2 --frontend "${LB_ALT}:80" --backends "${WORKER_IP4}:80" --k8s-node-port
+    cilium-dbg service update --id 2 --frontend "${LB_ALT}:80" --backends "${WORKER_IP4}:80" --k8s-load-balancer
 
-${CILIUM_EXEC} cilium service list
-${CILIUM_EXEC} cilium bpf lb list
+${CILIUM_EXEC} cilium-dbg service list
+${CILIUM_EXEC} cilium-dbg bpf lb list
 
 LB_NODE_IP=$(docker exec -t lb-node ip -o -4 a s eth0 | awk '{print $4}' | cut -d/ -f1 | head -n1)
 ip r a "${LB_ALT}/32" via "$LB_NODE_IP"
 
 # Issue 10 requests to LB1
 for i in $(seq 1 10); do
-    curl -o /dev/null "[${LB_VIP}]:80" || (echo "Failed $i"; exit -1)
+    curl -s -o /dev/null "[${LB_VIP}]:80" || (echo "Failed $i"; exit -1)
 done
 
 # Issue 10 requests to LB2
 for i in $(seq 1 10); do
-    curl -o /dev/null "${LB_ALT}:80" || (echo "Failed $i"; exit -1)
+    curl -s -o /dev/null "${LB_ALT}:80" || (echo "Failed $i"; exit -1)
 done
 
 # Check if restore for both is proper and that this also works
@@ -290,16 +298,16 @@ cilium_install \
 
 # Issue 10 requests to LB1
 for i in $(seq 1 10); do
-    curl -o /dev/null "[${LB_VIP}]:80" || (echo "Failed $i"; exit -1)
+    curl -s -o /dev/null "[${LB_VIP}]:80" || (echo "Failed $i"; exit -1)
 done
 
 # Issue 10 requests to LB2
 for i in $(seq 1 10); do
-    curl -o /dev/null "${LB_ALT}:80" || (echo "Failed $i"; exit -1)
+    curl -s -o /dev/null "${LB_ALT}:80" || (echo "Failed $i"; exit -1)
 done
 
-${CILIUM_EXEC} cilium service delete 1
-${CILIUM_EXEC} cilium service delete 2
+${CILIUM_EXEC} cilium-dbg service delete 1
+${CILIUM_EXEC} cilium-dbg service delete 2
 nsenter -t $CONTROL_PLANE_PID -n ip neigh del ${WORKER_IP4} dev eth0
 
 # Misc compilation tests
@@ -341,7 +349,7 @@ cilium_install \
 
 # Trigger recompilation with 32 IPv4 filter masks
 ${CILIUM_EXEC} \
-    cilium recorder update --id 1 --caplen 100 \
+    cilium-dbg recorder update --id 1 --caplen 100 \
         --filters="2.2.2.2/0 0 1.1.1.1/32 80 TCP,\
 2.2.2.2/1 0 1.1.1.1/32 80 TCP,\
 2.2.2.2/2 0 1.1.1.1/31 80 TCP,\
@@ -379,7 +387,7 @@ ${CILIUM_EXEC} \
 
 # Trigger recompilation with 32 IPv6 filter masks
 ${CILIUM_EXEC} \
-    cilium recorder update --id 2 --caplen 100 \
+    cilium-dbg recorder update --id 2 --caplen 100 \
         --filters="f00d::1/0 80 cafe::/128 0 UDP,\
 f00d::1/1 80 cafe::/127 0 UDP,\
 f00d::1/2 80 cafe::/126 0 UDP,\
@@ -415,11 +423,11 @@ f00d::1/31 80 cafe::/97 0 UDP,\
 f00d::1/32 80 cafe::/96 0 UDP,\
 f00d::1/32 80 cafe::/0 0 UDP"
 
-${CILIUM_EXEC} cilium recorder list
-${CILIUM_EXEC} cilium bpf recorder list
-${CILIUM_EXEC} cilium recorder delete 1
-${CILIUM_EXEC} cilium recorder delete 2
-${CILIUM_EXEC} cilium recorder list
+${CILIUM_EXEC} cilium-dbg recorder list
+${CILIUM_EXEC} cilium-dbg bpf recorder list
+${CILIUM_EXEC} cilium-dbg recorder delete 1
+${CILIUM_EXEC} cilium-dbg recorder delete 2
+${CILIUM_EXEC} cilium-dbg recorder list
 
 # cleanup
 docker rm -f lb-node

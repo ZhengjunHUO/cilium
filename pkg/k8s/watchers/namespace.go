@@ -15,7 +15,6 @@ import (
 	"github.com/cilium/cilium/pkg/k8s/resource"
 	slim_corev1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/core/v1"
 	slim_metav1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/meta/v1"
-	"github.com/cilium/cilium/pkg/k8s/watchers/resources"
 	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/labelsfilter"
 	"github.com/cilium/cilium/pkg/logging/logfields"
@@ -26,7 +25,6 @@ func (k *K8sWatcher) namespacesInit() {
 	apiGroup := k8sAPIGroupNamespaceV1Core
 
 	var synced atomic.Bool
-	synced.Store(false)
 
 	k.blockWaitGroupToSyncResources(
 		k.stop,
@@ -37,12 +35,12 @@ func (k *K8sWatcher) namespacesInit() {
 	k.k8sAPIGroups.AddAPI(apiGroup)
 
 	nsUpdater := namespaceUpdater{
-		oldLabels:       make(map[string]labels.Labels),
+		oldIdtyLabels:   make(map[string]labels.Labels),
 		endpointManager: k.endpointManager,
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	events := k.sharedResources.Namespaces.Events(ctx)
+	events := k.resources.Namespaces.Events(ctx)
 
 	go func() {
 		for {
@@ -59,7 +57,6 @@ func (k *K8sWatcher) namespacesInit() {
 					synced.Store(true)
 				case resource.Upsert:
 					err = nsUpdater.update(event.Object)
-					k.K8sEventProcessed(metricNS, resources.MetricUpdate, err == nil)
 				}
 				event.Done(err)
 			}
@@ -68,28 +65,28 @@ func (k *K8sWatcher) namespacesInit() {
 }
 
 type namespaceUpdater struct {
-	oldLabels map[string]labels.Labels
+	oldIdtyLabels map[string]labels.Labels
 
 	endpointManager endpointManager
 }
 
 func getNamespaceLabels(ns *slim_corev1.Namespace) labels.Labels {
-	labelMap := map[string]string{}
-	for k, v := range ns.GetLabels() {
+	lbls := ns.GetLabels()
+	labelMap := make(map[string]string, len(lbls))
+	for k, v := range lbls {
 		labelMap[policy.JoinPath(ciliumio.PodNamespaceMetaLabels, k)] = v
 	}
 	return labels.Map2Labels(labelMap, labels.LabelSourceK8s)
 }
 
 func (u *namespaceUpdater) update(newNS *slim_corev1.Namespace) error {
-	oldLabels := u.oldLabels[newNS.Name]
 	newLabels := getNamespaceLabels(newNS)
 
-	oldIdtyLabels, _ := labelsfilter.Filter(oldLabels)
+	oldIdtyLabels := u.oldIdtyLabels[newNS.Name]
 	newIdtyLabels, _ := labelsfilter.Filter(newLabels)
 
-	// Do not perform any other operations the the old labels are the same as
-	// the new labels
+	// Do not perform any other operations if the old labels are the same as
+	// the new labels.
 	if oldIdtyLabels.DeepEqual(&newIdtyLabels) {
 		return nil
 	}
@@ -99,10 +96,10 @@ func (u *namespaceUpdater) update(newNS *slim_corev1.Namespace) error {
 	for _, ep := range eps {
 		epNS := ep.GetK8sNamespace()
 		if newNS.Name == epNS {
-			err := ep.ModifyIdentityLabels(newIdtyLabels, oldIdtyLabels)
+			err := ep.ModifyIdentityLabels(labels.LabelSourceK8s, newIdtyLabels, oldIdtyLabels)
 			if err != nil {
 				log.WithError(err).WithField(logfields.EndpointID, ep.ID).
-					Warningf("unable to update endpoint with new namespace labels")
+					Warning("unable to update endpoint with new identity labels from namespace labels")
 				failed = true
 			}
 		}
@@ -110,6 +107,7 @@ func (u *namespaceUpdater) update(newNS *slim_corev1.Namespace) error {
 	if failed {
 		return errors.New("unable to update some endpoints with new namespace labels")
 	}
+	u.oldIdtyLabels[newNS.Name] = newIdtyLabels
 	return nil
 }
 
@@ -121,7 +119,7 @@ func (k *K8sWatcher) GetCachedNamespace(namespace string) (*slim_corev1.Namespac
 		},
 	}
 
-	store, err := k.sharedResources.Namespaces.Store(context.Background())
+	store, err := k.resources.Namespaces.Store(context.Background())
 	if err != nil {
 		return nil, err
 	}

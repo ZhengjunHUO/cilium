@@ -30,12 +30,6 @@ const (
 	// running in
 	PolicyLabelCluster = LabelPrefix + ".policy.cluster"
 
-	// PolicyLabelIstioSidecarProxy is the label key added to the identity of
-	// any pod that has been injected by Istio with a Cilium-compatible sidecar
-	// proxy. The value of this label is expected to be a boolean, i.e. "true"
-	// or "false".
-	PolicyLabelIstioSidecarProxy = LabelPrefix + ".policy.istiosidecarproxy"
-
 	// PodNamespaceMetaLabels is the label used to store the labels of the
 	// kubernetes namespace's labels.
 	PodNamespaceMetaLabels = LabelPrefix + ".namespace.labels"
@@ -61,9 +55,20 @@ const (
 	// documentation add the label for every resource object.
 	AppKubernetes = "app.kubernetes.io"
 
-	// CtrlPrefixPolicyStatus is the prefix used for the controllers set up
-	// to sync the CNP with kube-apiserver.
-	CtrlPrefixPolicyStatus = "sync-cnp-policy-status"
+	// StatefulSetPodNameLabel is the label name which, in-tree, is used to
+	// automatically label Pods that are owned by StatefulSets with their name,
+	// so that one can attach a Service to a specific Pod in the StatefulSet.
+	StatefulSetPodNameLabel = "statefulset.kubernetes.io/pod-name"
+
+	// StatefulSetPodIndexLabel is the label name which, in-tree, is used to
+	// automatically label Pods that are owned by StatefulSets with their
+	// ordinal index.
+	StatefulSetPodIndexLabel = "apps.kubernetes.io/pod-index"
+
+	// IndexedJobCompletionIndexLabel is the label name which, in-tree, is used
+	// to automatically label Pods that are owned by Indexed Jobs with their
+	// completion index.
+	IndexedJobCompletionIndexLabel = "batch.kubernetes.io/job-completion-index"
 
 	// CiliumIdentityAnnotationDeprecated is the previous annotation key used to map to an endpoint's security identity.
 	CiliumIdentityAnnotationDeprecated = "cilium-identity"

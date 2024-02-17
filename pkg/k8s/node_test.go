@@ -6,7 +6,7 @@ package k8s
 import (
 	"testing"
 
-	. "gopkg.in/check.v1"
+	. "github.com/cilium/checkmate"
 
 	"github.com/cilium/cilium/pkg/annotation"
 	"github.com/cilium/cilium/pkg/checker"
@@ -29,8 +29,14 @@ func (s *K8sSuite) TestParseNode(c *C) {
 		ObjectMeta: slim_metav1.ObjectMeta{
 			Name: "node1",
 			Annotations: map[string]string{
-				annotation.V4CIDRName: "10.254.0.0/16",
-				annotation.V6CIDRName: "f00d:aaaa:bbbb:cccc:dddd:eeee::/112",
+				annotation.V4CIDRName:     "10.254.0.0/16",
+				annotation.V6CIDRName:     "f00d:aaaa:bbbb:cccc:dddd:eeee::/112",
+				annotation.CiliumHostIP:   "10.254.9.9",
+				annotation.CiliumHostIPv6: "fd00:10:244:1::8ace",
+				"cilium.io/foo":           "value",
+				"qux.cilium.io/foo":       "value",
+				"fr3d.qux.cilium.io/foo":  "value",
+				"other.whatever.io/foo":   "value",
 			},
 			Labels: map[string]string{
 				"type": "m5.xlarge",
@@ -48,6 +54,16 @@ func (s *K8sSuite) TestParseNode(c *C) {
 	c.Assert(n.IPv6AllocCIDR, NotNil)
 	c.Assert(n.IPv6AllocCIDR.String(), Equals, "f00d:aaaa:bbbb:cccc:dddd:eeee::/112")
 	c.Assert(n.Labels["type"], Equals, "m5.xlarge")
+	c.Assert(len(n.IPAddresses), Equals, 2)
+	c.Assert(n.IPAddresses[0].IP.String(), Equals, "10.254.9.9")
+	c.Assert(n.IPAddresses[0].Type, Equals, nodeAddressing.NodeCiliumInternalIP)
+	c.Assert(n.IPAddresses[1].IP.String(), Equals, "fd00:10:244:1::8ace")
+	c.Assert(n.IPAddresses[1].Type, Equals, nodeAddressing.NodeCiliumInternalIP)
+
+	for _, key := range []string{"cilium.io/foo", "qux.cilium.io/foo", "fr3d.qux.cilium.io/foo"} {
+		c.Assert(n.Annotations[key], Equals, "value")
+	}
+	c.Assert(n.Annotations, Not(checker.HasKey), "other.whatever.io/foo")
 
 	// No IPv6 annotation
 	k8sNode = &slim_corev1.Node{
@@ -87,6 +103,91 @@ func (s *K8sSuite) TestParseNode(c *C) {
 	c.Assert(n.IPv4AllocCIDR.String(), Equals, "10.254.0.0/16")
 	c.Assert(n.IPv6AllocCIDR, NotNil)
 	c.Assert(n.IPv6AllocCIDR.String(), Equals, "f00d:aaaa:bbbb:cccc:dddd:eeee::/112")
+
+	// No IPv4/IPv6 annotations but PodCIDRs with IPv4/IPv6
+	k8sNode = &slim_corev1.Node{
+		ObjectMeta: slim_metav1.ObjectMeta{
+			Name: "node2",
+			Annotations: map[string]string{
+				annotation.V4CIDRName: "10.254.0.0/16",
+			},
+		},
+		Spec: slim_corev1.NodeSpec{
+			PodCIDR:  "10.1.0.0/16",
+			PodCIDRs: []string{"10.1.0.0/16", "f00d:aaaa:bbbb:cccc:dddd:eeee::/112"},
+		},
+	}
+
+	n = ParseNode(k8sNode, source.Local)
+	c.Assert(n.Name, Equals, "node2")
+	c.Assert(n.IPv4AllocCIDR, NotNil)
+	c.Assert(n.IPv4AllocCIDR.String(), Equals, "10.1.0.0/16")
+	c.Assert(n.IPv6AllocCIDR, NotNil)
+	c.Assert(n.IPv6AllocCIDR.String(), Equals, "f00d:aaaa:bbbb:cccc:dddd:eeee::/112")
+
+	// Node with multiple status addresses of the same type and family
+	expected := []string{"1.2.3.4", "f00d:aaaa:bbbb:cccc:dddd:eeee:0:1", "4.3.2.1", "f00d:aaaa:bbbb:cccc:dddd:eeef:0:1"}
+	notExpected := []string{"5.6.7.8", "f00d:aaaa:bbbb:cccc:dddd:aaaa::1", "8.7.6.5", "f00d:aaaa:bbbb:cccc:dddd:aaab::1"}
+	k8sNode = &slim_corev1.Node{
+		ObjectMeta: slim_metav1.ObjectMeta{
+			Name:        "node2",
+			Annotations: map[string]string{},
+		},
+		Spec: slim_corev1.NodeSpec{
+			PodCIDR: "10.1.0.0/16",
+		},
+		Status: slim_corev1.NodeStatus{
+			Addresses: []slim_corev1.NodeAddress{
+				{
+					Type:    slim_corev1.NodeInternalIP,
+					Address: expected[0],
+				},
+				{
+					Type:    slim_corev1.NodeInternalIP,
+					Address: notExpected[0],
+				},
+				{
+					Type:    slim_corev1.NodeInternalIP,
+					Address: expected[1],
+				},
+				{
+					Type:    slim_corev1.NodeInternalIP,
+					Address: notExpected[1],
+				},
+				{
+					Type:    slim_corev1.NodeExternalIP,
+					Address: expected[2],
+				},
+				{
+					Type:    slim_corev1.NodeExternalIP,
+					Address: notExpected[2],
+				},
+				{
+					Type:    slim_corev1.NodeExternalIP,
+					Address: expected[3],
+				},
+				{
+					Type:    slim_corev1.NodeExternalIP,
+					Address: notExpected[3],
+				},
+			},
+		},
+	}
+
+	n = ParseNode(k8sNode, source.Local)
+	c.Assert(n.Name, Equals, "node2")
+	c.Assert(n.IPv4AllocCIDR, NotNil)
+	c.Assert(n.IPv4AllocCIDR.String(), Equals, "10.1.0.0/16")
+	c.Assert(len(n.IPAddresses), Equals, len(expected))
+	addrsFound := 0
+	for _, addr := range n.IPAddresses {
+		for _, expect := range expected {
+			if addr.IP.String() == expect {
+				addrsFound++
+			}
+		}
+	}
+	c.Assert(addrsFound, Equals, len(expected))
 }
 
 func (s *K8sSuite) TestParseNodeWithoutAnnotations(c *C) {
@@ -101,8 +202,12 @@ func (s *K8sSuite) TestParseNodeWithoutAnnotations(c *C) {
 		ObjectMeta: slim_metav1.ObjectMeta{
 			Name: "node1",
 			Annotations: map[string]string{
-				annotation.V4CIDRName: "10.254.0.0/16",
-				annotation.V6CIDRName: "f00d:aaaa:bbbb:cccc:dddd:eeee::/112",
+				annotation.V4CIDRName:    "10.254.0.0/16",
+				annotation.V6CIDRName:    "f00d:aaaa:bbbb:cccc:dddd:eeee::/112",
+				"cilium.io/foo":          "value",
+				"qux.cilium.io/foo":      "value",
+				"fr3d.qux.cilium.io/foo": "value",
+				"other.whatever.io/foo":  "value",
 			},
 			Labels: map[string]string{
 				"type": "m5.xlarge",
@@ -119,6 +224,11 @@ func (s *K8sSuite) TestParseNodeWithoutAnnotations(c *C) {
 	c.Assert(n.IPv4AllocCIDR.String(), Equals, "10.1.0.0/16")
 	c.Assert(n.IPv6AllocCIDR, IsNil)
 	c.Assert(n.Labels["type"], Equals, "m5.xlarge")
+
+	for _, key := range []string{"cilium.io/foo", "qux.cilium.io/foo", "fr3d.qux.cilium.io/foo"} {
+		c.Assert(n.Annotations[key], Equals, "value")
+	}
+	c.Assert(n.Annotations, Not(checker.HasKey), "other.whatever.io/foo")
 
 	// No IPv6 annotation but PodCIDR with v6
 	k8sNode = &slim_corev1.Node{

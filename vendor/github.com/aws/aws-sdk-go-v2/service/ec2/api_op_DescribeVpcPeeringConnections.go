@@ -38,63 +38,45 @@ type DescribeVpcPeeringConnectionsInput struct {
 
 	// Checks whether you have the required permissions for the action, without
 	// actually making the request, and provides an error response. If you have the
-	// required permissions, the error response is DryRunOperation. Otherwise, it is
-	// UnauthorizedOperation.
+	// required permissions, the error response is DryRunOperation . Otherwise, it is
+	// UnauthorizedOperation .
 	DryRun *bool
 
-	// One or more filters.
-	//
-	// * accepter-vpc-info.cidr-block - The IPv4 CIDR block of
-	// the accepter VPC.
-	//
-	// * accepter-vpc-info.owner-id - The ID of the Amazon Web
-	// Services account that owns the accepter VPC.
-	//
-	// * accepter-vpc-info.vpc-id - The
-	// ID of the accepter VPC.
-	//
-	// * expiration-time - The expiration date and time for
-	// the VPC peering connection.
-	//
-	// * requester-vpc-info.cidr-block - The IPv4 CIDR
-	// block of the requester's VPC.
-	//
-	// * requester-vpc-info.owner-id - The ID of the
-	// Amazon Web Services account that owns the requester VPC.
-	//
-	// *
-	// requester-vpc-info.vpc-id - The ID of the requester VPC.
-	//
-	// * status-code - The
-	// status of the VPC peering connection (pending-acceptance | failed | expired |
-	// provisioning | active | deleting | deleted | rejected).
-	//
-	// * status-message - A
-	// message that provides more information about the status of the VPC peering
-	// connection, if applicable.
-	//
-	// * tag: - The key/value combination of a tag assigned
-	// to the resource. Use the tag key in the filter name and the tag value as the
-	// filter value. For example, to find all resources that have a tag with the key
-	// Owner and the value TeamA, specify tag:Owner for the filter name and TeamA for
-	// the filter value.
-	//
-	// * tag-key - The key of a tag assigned to the resource. Use
-	// this filter to find all resources assigned a tag with a specific key, regardless
-	// of the tag value.
-	//
-	// * vpc-peering-connection-id - The ID of the VPC peering
-	// connection.
+	// The filters.
+	//   - accepter-vpc-info.cidr-block - The IPv4 CIDR block of the accepter VPC.
+	//   - accepter-vpc-info.owner-id - The ID of the Amazon Web Services account that
+	//   owns the accepter VPC.
+	//   - accepter-vpc-info.vpc-id - The ID of the accepter VPC.
+	//   - expiration-time - The expiration date and time for the VPC peering
+	//   connection.
+	//   - requester-vpc-info.cidr-block - The IPv4 CIDR block of the requester's VPC.
+	//   - requester-vpc-info.owner-id - The ID of the Amazon Web Services account that
+	//   owns the requester VPC.
+	//   - requester-vpc-info.vpc-id - The ID of the requester VPC.
+	//   - status-code - The status of the VPC peering connection ( pending-acceptance
+	//   | failed | expired | provisioning | active | deleting | deleted | rejected ).
+	//   - status-message - A message that provides more information about the status
+	//   of the VPC peering connection, if applicable.
+	//   - tag : - The key/value combination of a tag assigned to the resource. Use the
+	//   tag key in the filter name and the tag value as the filter value. For example,
+	//   to find all resources that have a tag with the key Owner and the value TeamA ,
+	//   specify tag:Owner for the filter name and TeamA for the filter value.
+	//   - tag-key - The key of a tag assigned to the resource. Use this filter to find
+	//   all resources assigned a tag with a specific key, regardless of the tag value.
+	//   - vpc-peering-connection-id - The ID of the VPC peering connection.
 	Filters []types.Filter
 
-	// The maximum number of results to return with a single call. To retrieve the
-	// remaining results, make another call with the returned nextToken value.
+	// The maximum number of items to return for this request. To get the next page of
+	// items, make another request with the token returned in the output. For more
+	// information, see Pagination (https://docs.aws.amazon.com/AWSEC2/latest/APIReference/Query-Requests.html#api-pagination)
+	// .
 	MaxResults *int32
 
-	// The token for the next page of results.
+	// The token returned from a previous paginated request. Pagination continues from
+	// the end of the items returned by the previous request.
 	NextToken *string
 
-	// One or more VPC peering connection IDs. Default: Describes all your VPC peering
+	// The IDs of the VPC peering connections. Default: Describes all your VPC peering
 	// connections.
 	VpcPeeringConnectionIds []string
 
@@ -103,8 +85,8 @@ type DescribeVpcPeeringConnectionsInput struct {
 
 type DescribeVpcPeeringConnectionsOutput struct {
 
-	// The token to use to retrieve the next page of results. This value is null when
-	// there are no more results to return.
+	// The token to include in another request to get the next page of items. This
+	// value is null when there are no more items to return.
 	NextToken *string
 
 	// Information about the VPC peering connections.
@@ -117,12 +99,22 @@ type DescribeVpcPeeringConnectionsOutput struct {
 }
 
 func (c *Client) addOperationDescribeVpcPeeringConnectionsMiddlewares(stack *middleware.Stack, options Options) (err error) {
+	if err := stack.Serialize.Add(&setOperationInputMiddleware{}, middleware.After); err != nil {
+		return err
+	}
 	err = stack.Serialize.Add(&awsEc2query_serializeOpDescribeVpcPeeringConnections{}, middleware.After)
 	if err != nil {
 		return err
 	}
 	err = stack.Deserialize.Add(&awsEc2query_deserializeOpDescribeVpcPeeringConnections{}, middleware.After)
 	if err != nil {
+		return err
+	}
+	if err := addProtocolFinalizerMiddlewares(stack, options, "DescribeVpcPeeringConnections"); err != nil {
+		return fmt.Errorf("add protocol finalizers: %v", err)
+	}
+
+	if err = addlegacyEndpointContextSetter(stack, options); err != nil {
 		return err
 	}
 	if err = addSetLoggerMiddleware(stack, options); err != nil {
@@ -143,16 +135,13 @@ func (c *Client) addOperationDescribeVpcPeeringConnectionsMiddlewares(stack *mid
 	if err = addRetryMiddlewares(stack, options); err != nil {
 		return err
 	}
-	if err = addHTTPSignerV4Middleware(stack, options); err != nil {
-		return err
-	}
 	if err = awsmiddleware.AddRawResponseToMetadata(stack); err != nil {
 		return err
 	}
 	if err = awsmiddleware.AddRecordResponseTiming(stack); err != nil {
 		return err
 	}
-	if err = addClientUserAgent(stack); err != nil {
+	if err = addClientUserAgent(stack, options); err != nil {
 		return err
 	}
 	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
@@ -161,7 +150,13 @@ func (c *Client) addOperationDescribeVpcPeeringConnectionsMiddlewares(stack *mid
 	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
 		return err
 	}
+	if err = addSetLegacyContextSigningOptionsMiddleware(stack); err != nil {
+		return err
+	}
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opDescribeVpcPeeringConnections(options.Region), middleware.Before); err != nil {
+		return err
+	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
@@ -171,6 +166,9 @@ func (c *Client) addOperationDescribeVpcPeeringConnectionsMiddlewares(stack *mid
 		return err
 	}
 	if err = addRequestResponseLogging(stack, options); err != nil {
+		return err
+	}
+	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
 		return err
 	}
 	return nil
@@ -187,8 +185,10 @@ var _ DescribeVpcPeeringConnectionsAPIClient = (*Client)(nil)
 // DescribeVpcPeeringConnectionsPaginatorOptions is the paginator options for
 // DescribeVpcPeeringConnections
 type DescribeVpcPeeringConnectionsPaginatorOptions struct {
-	// The maximum number of results to return with a single call. To retrieve the
-	// remaining results, make another call with the returned nextToken value.
+	// The maximum number of items to return for this request. To get the next page of
+	// items, make another request with the token returned in the output. For more
+	// information, see Pagination (https://docs.aws.amazon.com/AWSEC2/latest/APIReference/Query-Requests.html#api-pagination)
+	// .
 	Limit int32
 
 	// Set to true if pagination should stop if the service returns a pagination token
@@ -284,8 +284,8 @@ type VpcPeeringConnectionDeletedWaiterOptions struct {
 	// Note that MinDelay must resolve to a value lesser than or equal to the MaxDelay.
 	MinDelay time.Duration
 
-	// MaxDelay is the maximum amount of time to delay between retries. If unset or set
-	// to zero, VpcPeeringConnectionDeletedWaiter will use default max delay of 120
+	// MaxDelay is the maximum amount of time to delay between retries. If unset or
+	// set to zero, VpcPeeringConnectionDeletedWaiter will use default max delay of 120
 	// seconds. Note that MaxDelay must resolve to value greater than or equal to the
 	// MinDelay.
 	MaxDelay time.Duration
@@ -475,8 +475,8 @@ type VpcPeeringConnectionExistsWaiterOptions struct {
 	// Note that MinDelay must resolve to a value lesser than or equal to the MaxDelay.
 	MinDelay time.Duration
 
-	// MaxDelay is the maximum amount of time to delay between retries. If unset or set
-	// to zero, VpcPeeringConnectionExistsWaiter will use default max delay of 120
+	// MaxDelay is the maximum amount of time to delay between retries. If unset or
+	// set to zero, VpcPeeringConnectionExistsWaiter will use default max delay of 120
 	// seconds. Note that MaxDelay must resolve to value greater than or equal to the
 	// MinDelay.
 	MaxDelay time.Duration
@@ -628,7 +628,6 @@ func newServiceMetadataMiddleware_opDescribeVpcPeeringConnections(region string)
 	return &awsmiddleware.RegisterServiceMetadata{
 		Region:        region,
 		ServiceID:     ServiceID,
-		SigningName:   "ec2",
 		OperationName: "DescribeVpcPeeringConnections",
 	}
 }

@@ -4,6 +4,8 @@
 #ifndef __BPF_CTX_SKB_H_
 #define __BPF_CTX_SKB_H_
 
+#define __section_entry __section("tc")
+
 #define __ctx_buff		__sk_buff
 #define __ctx_is		__ctx_skb
 
@@ -60,6 +62,29 @@
 #define get_hash(ctx)		ctx->hash
 #define get_hash_recalc(ctx)	get_hash(ctx)
 
+#define DEFINE_FUNC_CTX_POINTER(FIELD)						\
+static __always_inline void *							\
+ctx_ ## FIELD(const struct __sk_buff *ctx)					\
+{										\
+	void *ptr;								\
+										\
+	/* LLVM may generate u32 assignments of ctx->{data,data_end,data_meta}.	\
+	 * With this inline asm, LLVM loses track of the fact this field is on	\
+	 * 32 bits.								\
+	 */									\
+	asm volatile("%0 = *(u32 *)(%1 + %2)"					\
+		     : "=r"(ptr)						\
+		     : "r"(ctx), "i"(offsetof(struct __sk_buff, FIELD)));	\
+	return ptr;								\
+}
+/* This defines ctx_data(). */
+DEFINE_FUNC_CTX_POINTER(data)
+/* This defines ctx_data_end(). */
+DEFINE_FUNC_CTX_POINTER(data_end)
+/* This defines ctx_data_meta(). */
+DEFINE_FUNC_CTX_POINTER(data_meta)
+#undef DEFINE_FUNC_CTX_POINTER
+
 static __always_inline __maybe_unused int
 ctx_redirect(const struct __sk_buff *ctx __maybe_unused, int ifindex, __u32 flags)
 {
@@ -102,6 +127,15 @@ ctx_load_meta(const struct __sk_buff *ctx, const __u32 off)
 	return ctx->cb[off];
 }
 
+static __always_inline __maybe_unused __u32
+ctx_load_and_clear_meta(struct __sk_buff *ctx, const __u32 off)
+{
+	__u32 val = ctx_load_meta(ctx, off);
+
+	ctx_store_meta(ctx, off, 0);
+	return val;
+}
+
 static __always_inline __maybe_unused __u16
 ctx_get_protocol(const struct __sk_buff *ctx)
 {
@@ -112,6 +146,12 @@ static __always_inline __maybe_unused __u32
 ctx_get_ifindex(const struct __sk_buff *ctx)
 {
 	return ctx->ifindex;
+}
+
+static __always_inline __maybe_unused __u32
+ctx_get_ingress_ifindex(const struct __sk_buff *ctx)
+{
+	return ctx->ingress_ifindex;
 }
 
 #endif /* __BPF_CTX_SKB_H_ */

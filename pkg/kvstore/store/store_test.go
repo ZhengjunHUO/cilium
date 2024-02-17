@@ -10,13 +10,13 @@ import (
 	"testing"
 	"time"
 
-	. "gopkg.in/check.v1"
+	. "github.com/cilium/checkmate"
+	"k8s.io/apimachinery/pkg/util/rand"
 
 	"github.com/cilium/cilium/pkg/defaults"
 	"github.com/cilium/cilium/pkg/kvstore"
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/option"
-	"github.com/cilium/cilium/pkg/rand"
 	"github.com/cilium/cilium/pkg/testutils"
 )
 
@@ -32,7 +32,7 @@ func Test(t *testing.T) {
 type StoreSuite struct{}
 
 func (s *StoreSuite) SetUpSuite(c *C) {
-	testutils.IntegrationCheck(c)
+	testutils.IntegrationTest(c)
 }
 
 type StoreEtcdSuite struct {
@@ -42,16 +42,11 @@ type StoreEtcdSuite struct {
 var _ = Suite(&StoreEtcdSuite{})
 
 func (e *StoreEtcdSuite) SetUpSuite(c *C) {
-	testutils.IntegrationCheck(c)
+	testutils.IntegrationTest(c)
 }
 
 func (e *StoreEtcdSuite) SetUpTest(c *C) {
-	kvstore.SetupDummy("etcd")
-}
-
-func (e *StoreEtcdSuite) TearDownTest(c *C) {
-	kvstore.Client().DeletePrefix(context.TODO(), testPrefix)
-	kvstore.Client().Close(context.TODO())
+	kvstore.SetupDummy(c, "etcd")
 }
 
 type StoreConsulSuite struct {
@@ -61,17 +56,11 @@ type StoreConsulSuite struct {
 var _ = Suite(&StoreConsulSuite{})
 
 func (e *StoreConsulSuite) SetUpSuite(c *C) {
-	testutils.IntegrationCheck(c)
+	testutils.IntegrationTest(c)
 }
 
 func (e *StoreConsulSuite) SetUpTest(c *C) {
-	kvstore.SetupDummy("consul")
-}
-
-func (e *StoreConsulSuite) TearDownTest(c *C) {
-	kvstore.Client().DeletePrefix(context.TODO(), testPrefix)
-	kvstore.Client().Close(context.TODO())
-	time.Sleep(sharedKeyDeleteDelay + 5*time.Second)
+	kvstore.SetupDummy(c, "consul")
 }
 
 type TestType struct {
@@ -80,10 +69,10 @@ type TestType struct {
 
 var _ = TestType{}
 
-func (t *TestType) GetKeyName() string          { return t.Name }
-func (t *TestType) DeepKeyCopy() LocalKey       { return &TestType{Name: t.Name} }
-func (t *TestType) Marshal() ([]byte, error)    { return json.Marshal(t) }
-func (t *TestType) Unmarshal(data []byte) error { return json.Unmarshal(data, t) }
+func (t *TestType) GetKeyName() string                    { return t.Name }
+func (t *TestType) DeepKeyCopy() LocalKey                 { return &TestType{Name: t.Name} }
+func (t *TestType) Marshal() ([]byte, error)              { return json.Marshal(t) }
+func (t *TestType) Unmarshal(_ string, data []byte) error { return json.Unmarshal(data, t) }
 
 type opCounter struct {
 	deleted int
@@ -143,19 +132,19 @@ func (s *StoreSuite) TestStoreCreation(c *C) {
 	c.Assert(store, IsNil)
 
 	// Missing KeyCreator must result in error
-	store, err = JoinSharedStore(Configuration{Prefix: rand.RandomString()})
+	store, err = JoinSharedStore(Configuration{Prefix: rand.String(12)})
 	c.Assert(err, ErrorMatches, "KeyCreator must be specified")
 	c.Assert(store, IsNil)
 
 	// Basic creation should result in default values
-	store, err = JoinSharedStore(Configuration{Prefix: rand.RandomString(), KeyCreator: newTestType})
+	store, err = JoinSharedStore(Configuration{Prefix: rand.String(12), KeyCreator: newTestType})
 	c.Assert(err, IsNil)
 	c.Assert(store, Not(IsNil))
 	c.Assert(store.conf.SynchronizationInterval, Equals, option.Config.KVstorePeriodicSync)
 	store.Close(context.TODO())
 
 	// Test with kvstore client specified
-	store, err = JoinSharedStore(Configuration{Prefix: rand.RandomString(), KeyCreator: newTestType, Backend: kvstore.Client()})
+	store, err = JoinSharedStore(Configuration{Prefix: rand.String(12), KeyCreator: newTestType, Backend: kvstore.Client()})
 	c.Assert(err, IsNil)
 	c.Assert(store, Not(IsNil))
 	c.Assert(store.conf.SynchronizationInterval, Equals, option.Config.KVstorePeriodicSync)
@@ -180,7 +169,7 @@ func expect(check func() bool) error {
 func (s *StoreSuite) TestStoreOperations(c *C) {
 	// Basic creation should result in default values
 	store, err := JoinSharedStore(Configuration{
-		Prefix:               rand.RandomString(),
+		Prefix:               rand.String(12),
 		KeyCreator:           newTestType,
 		Observer:             &observer{},
 		SharedKeyDeleteDelay: sharedKeyDeleteDelay,
@@ -227,7 +216,7 @@ func (s *StoreSuite) TestStoreOperations(c *C) {
 func (s *StoreSuite) TestStorePeriodicSync(c *C) {
 	// Create a store with a very short periodic sync interval
 	store, err := JoinSharedStore(Configuration{
-		Prefix:                  rand.RandomString(),
+		Prefix:                  rand.String(12),
 		KeyCreator:              newTestType,
 		SynchronizationInterval: 10 * time.Millisecond,
 		SharedKeyDeleteDelay:    defaults.NodeDeleteDelay,
@@ -257,7 +246,7 @@ func (s *StoreSuite) TestStorePeriodicSync(c *C) {
 
 func (s *StoreSuite) TestStoreLocalKeyProtection(c *C) {
 	store, err := JoinSharedStore(Configuration{
-		Prefix:                  rand.RandomString(),
+		Prefix:                  rand.String(12),
 		KeyCreator:              newTestType,
 		SynchronizationInterval: time.Hour, // ensure that periodic sync does not interfer
 		Observer:                &observer{},
@@ -309,12 +298,12 @@ func setupStoreCollaboration(c *C, storePrefix, keyPrefix string) *SharedStore {
 }
 
 func (s *StoreSuite) TestStoreCollaboration(c *C) {
-	storePrefix := rand.RandomString()
+	storePrefix := rand.String(12)
 
-	collab1 := setupStoreCollaboration(c, storePrefix, rand.RandomString())
+	collab1 := setupStoreCollaboration(c, storePrefix, rand.String(12))
 	defer collab1.Close(context.TODO())
 
-	collab2 := setupStoreCollaboration(c, storePrefix, rand.RandomString())
+	collab2 := setupStoreCollaboration(c, storePrefix, rand.String(12))
 	defer collab2.Close(context.TODO())
 
 	c.Assert(expect(func() bool {

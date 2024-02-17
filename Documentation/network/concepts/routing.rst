@@ -4,6 +4,8 @@
     Please use the official rendered version released here:
     https://docs.cilium.io
 
+.. _routing:
+
 #######
 Routing
 #######
@@ -28,6 +30,9 @@ Requirements on the network
 * Encapsulation relies on normal node to node connectivity. This means that if
   Cilium nodes can already reach each other, all routing requirements are
   already met.
+
+* The underlying network must support IPv4. See :gh-issue:`17240`
+  for the status of IPv6-based tunneling.
 
 * The underlying network and firewalls must allow encapsulated packets:
 
@@ -294,8 +299,7 @@ The following configuration options must be set to run the datapath on GKE:
   * ``ipam: kubernetes``: Enable :ref:`k8s_hostscope` IPAM
   * ``routing-mode: native``: Enable native routing mode
   * ``enable-endpoint-routes: true``: Enable per-endpoint routing on the node
-  * ``enable-local-node-route: false``: Disable installation of the local node route
-
+    (automatically disables the local node route).
 * ``ipv4-native-routing-cidr: x.x.x.x/y``: Set the CIDR in which native routing
   is supported.
 

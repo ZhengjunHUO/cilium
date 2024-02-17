@@ -7,11 +7,13 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 
+	"github.com/cilium/cilium/api/v1/models"
 	"github.com/cilium/cilium/pkg/identity"
 )
 
 type CertificateRotationEvent struct {
 	Identity identity.NumericIdentity
+	Deleted  bool
 }
 
 type CertificateProvider interface {
@@ -36,4 +38,7 @@ type CertificateProvider interface {
 
 	// SubscribeToRotatedIdentities will return a channel with the identities that have rotated certificates
 	SubscribeToRotatedIdentities() <-chan CertificateRotationEvent
+
+	// Status will return the status of the certificate provider
+	Status() *models.Status
 }

@@ -4,6 +4,7 @@ package ec2
 
 import (
 	"context"
+	"fmt"
 	awsmiddleware "github.com/aws/aws-sdk-go-v2/aws/middleware"
 	"github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
@@ -12,18 +13,11 @@ import (
 )
 
 // Disassociates a target network from the specified Client VPN endpoint. When you
-// disassociate the last target network from a Client VPN, the following
-// happens:
-//
-// * The route that was automatically added for the VPC is deleted
-//
-// * All
-// active client connections are terminated
-//
-// * New client connections are
-// disallowed
-//
-// * The Client VPN endpoint's status changes to pending-associate
+// disassociate the last target network from a Client VPN, the following happens:
+//   - The route that was automatically added for the VPC is deleted
+//   - All active client connections are terminated
+//   - New client connections are disallowed
+//   - The Client VPN endpoint's status changes to pending-associate
 func (c *Client) DisassociateClientVpnTargetNetwork(ctx context.Context, params *DisassociateClientVpnTargetNetworkInput, optFns ...func(*Options)) (*DisassociateClientVpnTargetNetworkOutput, error) {
 	if params == nil {
 		params = &DisassociateClientVpnTargetNetworkInput{}
@@ -53,8 +47,8 @@ type DisassociateClientVpnTargetNetworkInput struct {
 
 	// Checks whether you have the required permissions for the action, without
 	// actually making the request, and provides an error response. If you have the
-	// required permissions, the error response is DryRunOperation. Otherwise, it is
-	// UnauthorizedOperation.
+	// required permissions, the error response is DryRunOperation . Otherwise, it is
+	// UnauthorizedOperation .
 	DryRun *bool
 
 	noSmithyDocumentSerde
@@ -75,12 +69,22 @@ type DisassociateClientVpnTargetNetworkOutput struct {
 }
 
 func (c *Client) addOperationDisassociateClientVpnTargetNetworkMiddlewares(stack *middleware.Stack, options Options) (err error) {
+	if err := stack.Serialize.Add(&setOperationInputMiddleware{}, middleware.After); err != nil {
+		return err
+	}
 	err = stack.Serialize.Add(&awsEc2query_serializeOpDisassociateClientVpnTargetNetwork{}, middleware.After)
 	if err != nil {
 		return err
 	}
 	err = stack.Deserialize.Add(&awsEc2query_deserializeOpDisassociateClientVpnTargetNetwork{}, middleware.After)
 	if err != nil {
+		return err
+	}
+	if err := addProtocolFinalizerMiddlewares(stack, options, "DisassociateClientVpnTargetNetwork"); err != nil {
+		return fmt.Errorf("add protocol finalizers: %v", err)
+	}
+
+	if err = addlegacyEndpointContextSetter(stack, options); err != nil {
 		return err
 	}
 	if err = addSetLoggerMiddleware(stack, options); err != nil {
@@ -101,16 +105,13 @@ func (c *Client) addOperationDisassociateClientVpnTargetNetworkMiddlewares(stack
 	if err = addRetryMiddlewares(stack, options); err != nil {
 		return err
 	}
-	if err = addHTTPSignerV4Middleware(stack, options); err != nil {
-		return err
-	}
 	if err = awsmiddleware.AddRawResponseToMetadata(stack); err != nil {
 		return err
 	}
 	if err = awsmiddleware.AddRecordResponseTiming(stack); err != nil {
 		return err
 	}
-	if err = addClientUserAgent(stack); err != nil {
+	if err = addClientUserAgent(stack, options); err != nil {
 		return err
 	}
 	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
@@ -119,10 +120,16 @@ func (c *Client) addOperationDisassociateClientVpnTargetNetworkMiddlewares(stack
 	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
 		return err
 	}
+	if err = addSetLegacyContextSigningOptionsMiddleware(stack); err != nil {
+		return err
+	}
 	if err = addOpDisassociateClientVpnTargetNetworkValidationMiddleware(stack); err != nil {
 		return err
 	}
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opDisassociateClientVpnTargetNetwork(options.Region), middleware.Before); err != nil {
+		return err
+	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
@@ -134,6 +141,9 @@ func (c *Client) addOperationDisassociateClientVpnTargetNetworkMiddlewares(stack
 	if err = addRequestResponseLogging(stack, options); err != nil {
 		return err
 	}
+	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -141,7 +151,6 @@ func newServiceMetadataMiddleware_opDisassociateClientVpnTargetNetwork(region st
 	return &awsmiddleware.RegisterServiceMetadata{
 		Region:        region,
 		ServiceID:     ServiceID,
-		SigningName:   "ec2",
 		OperationName: "DisassociateClientVpnTargetNetwork",
 	}
 }

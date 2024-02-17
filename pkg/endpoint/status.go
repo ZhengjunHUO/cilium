@@ -4,12 +4,11 @@
 package endpoint
 
 import (
-	"fmt"
 	"sort"
-	"time"
 
 	"github.com/cilium/cilium/api/v1/models"
 	"github.com/cilium/cilium/pkg/lock"
+	"github.com/cilium/cilium/pkg/time"
 )
 
 type StatusCode int
@@ -55,9 +54,9 @@ func (sc StatusCode) String() string {
 
 func (s Status) String() string {
 	if s.Msg == "" {
-		return fmt.Sprintf("%s", s.Code)
+		return s.Code.String()
 	}
-	return fmt.Sprintf("%s - %s", s.Code, s.Msg)
+	return s.Code.String() + " - " + s.Msg
 }
 
 type StatusResponse struct {

@@ -22,9 +22,7 @@ const (
 )
 
 func getDerivativeName(obj v1.Object) string {
-	return fmt.Sprintf("%s-togroups-%s",
-		obj.GetName(),
-		obj.GetUID())
+	return obj.GetName() + "-togroups-" + string(obj.GetUID())
 }
 
 // createDerivativeCNP will return a new CNP based on the given rule.
@@ -208,7 +206,7 @@ func updateDerivativeCNPStatus(clientset client.Clientset, cnp *cilium_v2.Cilium
 		// that the new policy is not in the cache to not loop over it. The
 		// kubernetes watcher should take care about that.
 		groupsCNPCache.DeleteCNP(k8sCNP)
-		return fmt.Errorf("policy UID mistmatch")
+		return fmt.Errorf("policy UID mismatch")
 	}
 
 	k8sCNP.SetDerivedPolicyStatus(derivativeName, status)
@@ -237,7 +235,7 @@ func updateDerivativeCCNPStatus(clientset client.Clientset, cnp *cilium_v2.Ciliu
 		groupsCNPCache.DeleteCNP(&cilium_v2.CiliumNetworkPolicy{
 			ObjectMeta: k8sCCNP.ObjectMeta,
 		})
-		return fmt.Errorf("policy UID mistmatch")
+		return fmt.Errorf("policy UID mismatch")
 	}
 
 	k8sCCNP.SetDerivedPolicyStatus(derivativeName, status)

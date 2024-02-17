@@ -153,8 +153,6 @@ on GH actions.
 +-------------------------------+---------------------------------------------+-----------------------------------------------+-----------+-------------+-------------------+
 |                               | images/bpftool/Dockerfile                   | docker.io/cilium/cilium-bpftool               |     Y     |      Y      |     GH Action     |
 |                               +---------------------------------------------+-----------------------------------------------+-----------+-------------+-------------------+
-|                               | images/iproute2/Dockerfile                  | docker.io/cilium/cilium-iproute2              |     Y     |      Y      |     GH Action     |
-|                               +---------------------------------------------+-----------------------------------------------+-----------+-------------+-------------------+
 |                               | images/llvm/Dockerfile                      | docker.io/cilium/cilium-llvm                  |     Y     |      Y      |     GH Action     |
 | github.com/cilium/image-tools +---------------------------------------------+-----------------------------------------------+-----------+-------------+-------------------+
 |                               | images/compilers/Dockerfile                 | docker.io/cilium/image-compilers              |     Y     |      Y      |     GH Action     |
@@ -174,7 +172,6 @@ Image dependency:
        depends on:
         quay.io/cilium/cilium-runtime
          depends on:
-          docker.io/cilium/cilium-iproute2
           docker.io/cilium/cilium-bpftool
           docker.io/cilium/cilium-llvm
       quay.io/cilium/cilium-envoy
@@ -185,13 +182,12 @@ Image dependency:
            depends on:
             quay.io/cilium/cilium-runtime
              depends on:
-              docker.io/cilium/cilium-iproute2
               docker.io/cilium/cilium-bpftool
               docker.io/cilium/cilium-llvm
 
 
 
-.. _update_cilim_builder_runtime_images:
+.. _update_cilium_builder_runtime_images:
 
 Update cilium-builder and cilium-runtime images
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -236,24 +232,11 @@ different value and then proceed with the steps below.
 
 #. If the PR was opened from the main repository, the build will automatically
    generate one commit and push it to your branch with all the necessary changes
-   across files in the repository. Once this is done the CI can be executed.
+   across files in the repository.
 
-#. Update the versions of the images that are pulled into the CI VMs.
+#. Run the full CI and ensure that it passes.
 
-* Open a PR against the :ref:`packer_ci` with an update to said image versions. Once your PR is merged, a new version of the VM will be ready for consumption in the CI.
-* Update the ``SERVER_VERSION``  field in ``test/Vagrantfile`` to contain the new version, which is the build number from the `Jenkins Job for the VMs <https://jenkins.cilium.io/job/Vagrant-Master-Boxes-Packer-Build/>`_. For example, build 119 from the pipeline would be the value to set for ``SERVER_VERSION``.
-* Open a pull request with this version change in the cilium repository.
-
-Nightly Docker image
-~~~~~~~~~~~~~~~~~~~~
-
-After each successful Nightly build, a `cilium/nightly`_ image is pushed to dockerhub.
-
-To use latest nightly build, please use ``cilium/nightly:latest`` tag.
-Nightly images are stored on dockerhub tagged with following format: ``YYYYMMDD-<job number>``.
-Job number is added to tag for the unlikely event of two consecutive nightly builds being built on the same date.
-
-.. _cilium/nightly: https://hub.docker.com/r/cilium/nightly/
+#. Merge the PR.
 
 Image Building Process
 ~~~~~~~~~~~~~~~~~~~~~~

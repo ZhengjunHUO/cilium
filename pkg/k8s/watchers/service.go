@@ -17,7 +17,6 @@ import (
 
 func (k *K8sWatcher) servicesInit() {
 	var synced atomic.Bool
-	synced.Store(false)
 	swgSvcs := lock.NewStoppableWaitGroup()
 
 	k.blockWaitGroupToSyncResources(
@@ -36,7 +35,7 @@ func (k *K8sWatcher) serviceEventLoop(synced *atomic.Bool, swg *lock.StoppableWa
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	events := k.sharedResources.Services.Events(ctx)
+	events := k.resources.Services.Events(ctx)
 	for {
 		select {
 		case <-k.stop:
@@ -51,14 +50,12 @@ func (k *K8sWatcher) serviceEventLoop(synced *atomic.Bool, swg *lock.StoppableWa
 				synced.Store(true)
 			case resource.Upsert:
 				svc := event.Object
-				k.K8sEventReceived(apiGroup, resources.MetricService, resources.MetricUpdate, true, false)
+				k.k8sResourceSynced.SetEventTimestamp(apiGroup)
 				err = k.upsertK8sServiceV1(svc, swg)
-				k.K8sEventProcessed(resources.MetricService, resources.MetricUpdate, err == nil)
 			case resource.Delete:
 				svc := event.Object
-				k.K8sEventReceived(apiGroup, resources.MetricService, resources.MetricUpdate, true, false)
+				k.k8sResourceSynced.SetEventTimestamp(apiGroup)
 				err = k.deleteK8sServiceV1(svc, swg)
-				k.K8sEventProcessed(resources.MetricService, resources.MetricDelete, err == nil)
 			}
 			event.Done(err)
 		}

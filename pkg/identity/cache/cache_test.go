@@ -7,11 +7,11 @@ import (
 	"context"
 	"testing"
 
-	. "gopkg.in/check.v1"
+	. "github.com/cilium/checkmate"
 
+	cmtypes "github.com/cilium/cilium/pkg/clustermesh/types"
 	"github.com/cilium/cilium/pkg/identity"
 	"github.com/cilium/cilium/pkg/labels"
-	fakeConfig "github.com/cilium/cilium/pkg/option/fake"
 	"github.com/cilium/cilium/pkg/testutils"
 )
 
@@ -36,12 +36,12 @@ type IdentityCacheTestSuite struct{}
 var _ = Suite(&IdentityCacheTestSuite{})
 
 func (s *IdentityCacheTestSuite) SetUpSuite(c *C) {
-	testutils.IntegrationCheck(c)
+	testutils.IntegrationTest(c)
 }
 
 func (s *IdentityCacheTestSuite) TestLookupReservedIdentity(c *C) {
 	mgr := NewCachingIdentityAllocator(newDummyOwner())
-	<-mgr.InitIdentityAllocator(nil, nil)
+	<-mgr.InitIdentityAllocator(nil)
 
 	hostID := identity.GetReservedID("host")
 	c.Assert(mgr.LookupIdentityByID(context.TODO(), hostID), Not(IsNil))
@@ -57,7 +57,7 @@ func (s *IdentityCacheTestSuite) TestLookupReservedIdentity(c *C) {
 	c.Assert(id, Not(IsNil))
 	c.Assert(id.ID, Equals, worldID)
 
-	identity.InitWellKnownIdentities(&fakeConfig.Config{})
+	identity.InitWellKnownIdentities(fakeConfig, cmtypes.ClusterInfo{Name: "default", ID: 5})
 
 	id = mgr.LookupIdentity(context.TODO(), kvstoreLabels)
 	c.Assert(id, Not(IsNil))
@@ -86,6 +86,26 @@ func (s *IdentityCacheTestSuite) TestLookupReservedIdentityByLabels(c *C) {
 			want: identity.NewIdentity(ni, labels.Labels{"kvstore": labels.NewLabel("kvstore", "", labels.LabelSourceReserved)}),
 		},
 		{
+			name: "fixed-identity+reserved-identity returns fixed",
+			args: args{
+				lbls: labels.Labels{
+					labels.LabelKeyFixedIdentity: labels.ParseLabel(labels.LabelKeyFixedIdentity + "=" + "kvstore"),
+					labels.IDNameHost:            labels.LabelHost[labels.IDNameHost],
+				},
+			},
+			want: identity.NewIdentity(ni, labels.Labels{"kvstore": labels.NewLabel("kvstore", "", labels.LabelSourceReserved)}),
+		},
+		{
+			name: "reserved-identity+fixed-identity returns fixed",
+			args: args{
+				lbls: labels.Labels{
+					labels.IDNameHost:            labels.LabelHost[labels.IDNameHost],
+					labels.LabelKeyFixedIdentity: labels.ParseLabel(labels.LabelKeyFixedIdentity + "=" + "kvstore"),
+				},
+			},
+			want: identity.NewIdentity(ni, labels.Labels{"kvstore": labels.NewLabel("kvstore", "", labels.LabelSourceReserved)}),
+		},
+		{
 			name: "non-existing-fixed-identity",
 			args: args{
 				lbls: labels.Labels{labels.LabelKeyFixedIdentity: labels.ParseLabel(labels.LabelKeyFixedIdentity + "=" + "kube-dns")},
@@ -95,21 +115,21 @@ func (s *IdentityCacheTestSuite) TestLookupReservedIdentityByLabels(c *C) {
 		{
 			name: "reserved-identity",
 			args: args{
-				lbls: labels.Labels{labels.LabelSourceReserved: labels.NewLabel(labels.LabelSourceReservedKeyPrefix+"host", "", labels.LabelSourceReserved)},
+				lbls: labels.LabelHost,
 			},
-			want: identity.NewIdentity(identity.ReservedIdentityHost, labels.Labels{"host": labels.ParseLabel("reserved:host")}),
+			want: identity.NewIdentity(identity.ReservedIdentityHost, labels.LabelHost),
 		},
 		{
 			name: "reserved-identity+other-labels",
 			args: args{
 				lbls: labels.Labels{
-					labels.LabelSourceReserved: labels.ParseLabel("reserved:host"),
-					"id.foo":                   labels.ParseLabel("id.foo"),
+					labels.IDNameHost: labels.LabelHost[labels.IDNameHost],
+					"id.foo":          labels.ParseLabel("id.foo"),
 				},
 			},
 			want: identity.NewIdentity(identity.ReservedIdentityHost, labels.Labels{
-				labels.LabelSourceReserved: labels.ParseLabel("reserved:host"),
-				"id.foo":                   labels.ParseLabel("id.foo"),
+				labels.IDNameHost: labels.LabelHost[labels.IDNameHost],
+				"id.foo":          labels.ParseLabel("id.foo"),
 			},
 			),
 		},
@@ -119,6 +139,15 @@ func (s *IdentityCacheTestSuite) TestLookupReservedIdentityByLabels(c *C) {
 				lbls: kvstoreLabels,
 			},
 			want: identity.NewIdentity(identity.ReservedCiliumKVStore, kvstoreLabels),
+		},
+		{
+			name: "no fixed and reserved identities returns nil",
+			args: args{
+				lbls: labels.Labels{
+					"id.foo": labels.ParseLabel("id.foo"),
+				},
+			},
+			want: nil,
 		},
 	}
 

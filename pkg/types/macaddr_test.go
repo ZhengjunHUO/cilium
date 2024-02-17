@@ -6,7 +6,7 @@ package types
 import (
 	"net"
 
-	"gopkg.in/check.v1"
+	check "github.com/cilium/checkmate"
 
 	"github.com/cilium/cilium/pkg/checker"
 )
@@ -18,8 +18,7 @@ type MACAddrSuite struct{}
 var _ = check.Suite(&MACAddrSuite{})
 
 func (s *MACAddrSuite) TestHardwareAddr(c *check.C) {
-	var expectedAddress net.HardwareAddr
-	expectedAddress = []byte{1, 2, 3, 4, 5, 6}
+	var expectedAddress net.HardwareAddr = []byte{1, 2, 3, 4, 5, 6}
 	result := testMACAddress.hardwareAddr()
 
 	c.Assert(result, checker.DeepEquals, expectedAddress)

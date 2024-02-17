@@ -17,13 +17,15 @@ static const char fib_dmac[6] = {0x13, 0x37, 0x13, 0x37, 0x13, 0x37};
 long mock_fib_lookup(__maybe_unused void *ctx, struct bpf_fib_lookup *params,
 		     __maybe_unused int plen, __maybe_unused __u32 flags)
 {
-	memcpy(params->smac, fib_smac, sizeof(fib_smac));
-	memcpy(params->dmac, fib_dmac, sizeof(fib_dmac));
+	__bpf_memcpy_builtin(params->smac, fib_smac, ETH_ALEN);
+	__bpf_memcpy_builtin(params->dmac, fib_dmac, ETH_ALEN);
 	return 0;
 }
 
 #include "bpf_xdp.c"
 #include "lib/nodeport.h"
+
+#include "lib/lb.h"
 
 struct {
 	__uint(type, BPF_MAP_TYPE_PROG_ARRAY);
@@ -121,39 +123,9 @@ int test1_setup(struct __ctx_buff *ctx)
 	if (ret)
 		return ret;
 
-	/* Register a fake LB backend with endpoint ID 124 matching our packet. */
-	struct lb4_key lb_svc_key = {
-		.address = FRONTEND_IP,
-		.dport = FRONTEND_PORT,
-		.scope = LB_LOOKUP_SCOPE_EXT
-	};
-	/* Create a service with only one backend */
-	struct lb4_service lb_svc_value = {
-		.count = 1,
-		.flags = SVC_FLAG_ROUTABLE,
-	};
-	map_update_elem(&LB4_SERVICES_MAP_V2, &lb_svc_key, &lb_svc_value, BPF_ANY);
-	/* We need to register both in the external and internal scopes for the */
-	/* packet to be redirected to a neighboring node */
-	lb_svc_key.scope = LB_LOOKUP_SCOPE_INT;
-	map_update_elem(&LB4_SERVICES_MAP_V2, &lb_svc_key, &lb_svc_value, BPF_ANY);
-
-	/* A backend between 1 and .count is chosen, since we have only one backend */
-	/* it is always backend_slot 1. Point it to backend_id 124. */
-	lb_svc_key.scope = LB_LOOKUP_SCOPE_EXT;
-	lb_svc_key.backend_slot = 1;
-	lb_svc_value.backend_id = 124;
-	map_update_elem(&LB4_SERVICES_MAP_V2, &lb_svc_key, &lb_svc_value, BPF_ANY);
-
-	/* Create backend id 124 which contains the IP and port to send the */
-	/* packet to. */
-	struct lb4_backend backend = {
-		.address = BACKEND_IP,
-		.port = BACKEND_PORT,
-		.proto = IPPROTO_TCP,
-		.flags = 0,
-	};
-	map_update_elem(&LB4_BACKEND_MAP, &lb_svc_value.backend_id, &backend, BPF_ANY);
+	lb_v4_add_service(FRONTEND_IP, FRONTEND_PORT, 1, 1);
+	lb_v4_add_backend(FRONTEND_IP, FRONTEND_PORT, 1, 124,
+			  BACKEND_IP, BACKEND_PORT, IPPROTO_TCP, 0);
 
 	/* Jump into the entrypoint */
 	tail_call_static(ctx, &entry_call_map, 0);
@@ -228,26 +200,13 @@ int test1_check(__maybe_unused const struct __ctx_buff *ctx)
 SETUP("xdp", "xdp_lb4_drop_no_backend")
 int test2_setup(struct __ctx_buff *ctx)
 {
-	/* Fake Service matching our packet. */
-	struct lb4_key lb_svc_key = {
-		.address = FRONTEND_IP,
-		.dport = FRONTEND_PORT,
-		.scope = LB_LOOKUP_SCOPE_EXT
-	};
-	/* Service with no backends */
-	struct lb4_service lb_svc_value = {
-		.count = 0,
-		.flags = SVC_FLAG_ROUTABLE,
-	};
 	int ret;
 
 	ret = build_packet(ctx);
 	if (ret)
 		return ret;
 
-	map_update_elem(&LB4_SERVICES_MAP_V2, &lb_svc_key, &lb_svc_value, BPF_ANY);
-	lb_svc_key.scope = LB_LOOKUP_SCOPE_INT;
-	map_update_elem(&LB4_SERVICES_MAP_V2, &lb_svc_key, &lb_svc_value, BPF_ANY);
+	lb_v4_add_service(FRONTEND_IP, FRONTEND_PORT, 0, 1);
 
 	/* Jump into the entrypoint */
 	tail_call_static(ctx, &entry_call_map, 0);

@@ -7,7 +7,6 @@ import (
 	"context"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/cilium/cilium/api/v1/models"
 	"github.com/cilium/cilium/pkg/identity"
@@ -18,6 +17,7 @@ import (
 	"github.com/cilium/cilium/pkg/node"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/policy"
+	"github.com/cilium/cilium/pkg/time"
 )
 
 // StatusNA is value of fields in the output of 'kubectl get cep' in case of disabled "--endpoint-status"
@@ -257,23 +257,24 @@ func (e *Endpoint) getEndpointPolicy() (ep *cilium_v2.EndpointPolicy) {
 	if !allowsAllIngress || !allowsAllEgress {
 		allowsWorldIngress, allowsWorldEgress := e.desiredPolicy.AllowsIdentity(identity.ReservedIdentityWorld)
 
-		for policyKey, policyValue := range e.desiredPolicy.PolicyMapState {
+		e.desiredPolicy.GetPolicyMap().ForEach(func(policyKey policy.Key, policyValue policy.MapStateEntry) bool {
 			// Skip listing identities if enforcement is disabled in direction,
 			// or if the identity corresponds to a CIDR identity and the world is allowed.
 			id := identity.NumericIdentity(policyKey.Identity)
 			switch {
 			case policyKey.IsIngress():
 				if allowsAllIngress || (id.HasLocalScope() && allowsWorldIngress) {
-					continue
+					return true
 				}
 			case policyKey.IsEgress():
 				if allowsAllEgress || (id.HasLocalScope() && allowsWorldEgress) {
-					continue
+					return true
 				}
 			}
 
 			populateResponseWithPolicyKey(e.allocator, ep, &policyKey, policyValue.IsDeny)
-		}
+			return true
+		})
 	}
 
 	if ep.Ingress.Allowed != nil {
@@ -354,7 +355,7 @@ func (e *Endpoint) GetCiliumEndpointStatus(conf EndpointStatusConfiguration) *ci
 		Identity:            getEndpointIdentity(identitymodel.CreateModel(e.SecurityIdentity)),
 		Networking:          getEndpointNetworking(e.getModelNetworkingRLocked()),
 		State:               compressEndpointState(e.getModelCurrentStateRLocked()),
-		Encryption:          cilium_v2.EncryptionSpec{Key: int(node.GetEncryptKeyIndex())},
+		Encryption:          cilium_v2.EncryptionSpec{Key: int(node.GetEndpointEncryptKeyIndex())},
 		NamedPorts:          e.getNamedPortsModel(),
 	}
 

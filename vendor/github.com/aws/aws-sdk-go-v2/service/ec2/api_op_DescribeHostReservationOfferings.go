@@ -18,8 +18,7 @@ import (
 // Hosts. When purchasing an offering, ensure that the instance family and Region
 // of the offering matches that of the Dedicated Hosts with which it is to be
 // associated. For more information about supported instance types, see Dedicated
-// Hosts
-// (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/dedicated-hosts-overview.html)
+// Hosts (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/dedicated-hosts-overview.html)
 // in the Amazon EC2 User Guide.
 func (c *Client) DescribeHostReservationOfferings(ctx context.Context, params *DescribeHostReservationOfferingsInput, optFns ...func(*Options)) (*DescribeHostReservationOfferingsOutput, error) {
 	if params == nil {
@@ -39,12 +38,9 @@ func (c *Client) DescribeHostReservationOfferings(ctx context.Context, params *D
 type DescribeHostReservationOfferingsInput struct {
 
 	// The filters.
-	//
-	// * instance-family - The instance family of the offering (for
-	// example, m4).
-	//
-	// * payment-option - The payment option (NoUpfront | PartialUpfront
-	// | AllUpfront).
+	//   - instance-family - The instance family of the offering (for example, m4 ).
+	//   - payment-option - The payment option ( NoUpfront | PartialUpfront |
+	//   AllUpfront ).
 	Filter []types.Filter
 
 	// This is the maximum duration of the reservation to purchase, specified in
@@ -92,12 +88,22 @@ type DescribeHostReservationOfferingsOutput struct {
 }
 
 func (c *Client) addOperationDescribeHostReservationOfferingsMiddlewares(stack *middleware.Stack, options Options) (err error) {
+	if err := stack.Serialize.Add(&setOperationInputMiddleware{}, middleware.After); err != nil {
+		return err
+	}
 	err = stack.Serialize.Add(&awsEc2query_serializeOpDescribeHostReservationOfferings{}, middleware.After)
 	if err != nil {
 		return err
 	}
 	err = stack.Deserialize.Add(&awsEc2query_deserializeOpDescribeHostReservationOfferings{}, middleware.After)
 	if err != nil {
+		return err
+	}
+	if err := addProtocolFinalizerMiddlewares(stack, options, "DescribeHostReservationOfferings"); err != nil {
+		return fmt.Errorf("add protocol finalizers: %v", err)
+	}
+
+	if err = addlegacyEndpointContextSetter(stack, options); err != nil {
 		return err
 	}
 	if err = addSetLoggerMiddleware(stack, options); err != nil {
@@ -118,16 +124,13 @@ func (c *Client) addOperationDescribeHostReservationOfferingsMiddlewares(stack *
 	if err = addRetryMiddlewares(stack, options); err != nil {
 		return err
 	}
-	if err = addHTTPSignerV4Middleware(stack, options); err != nil {
-		return err
-	}
 	if err = awsmiddleware.AddRawResponseToMetadata(stack); err != nil {
 		return err
 	}
 	if err = awsmiddleware.AddRecordResponseTiming(stack); err != nil {
 		return err
 	}
-	if err = addClientUserAgent(stack); err != nil {
+	if err = addClientUserAgent(stack, options); err != nil {
 		return err
 	}
 	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
@@ -136,7 +139,13 @@ func (c *Client) addOperationDescribeHostReservationOfferingsMiddlewares(stack *
 	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
 		return err
 	}
+	if err = addSetLegacyContextSigningOptionsMiddleware(stack); err != nil {
+		return err
+	}
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opDescribeHostReservationOfferings(options.Region), middleware.Before); err != nil {
+		return err
+	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
@@ -146,6 +155,9 @@ func (c *Client) addOperationDescribeHostReservationOfferingsMiddlewares(stack *
 		return err
 	}
 	if err = addRequestResponseLogging(stack, options); err != nil {
+		return err
+	}
+	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
 		return err
 	}
 	return nil
@@ -251,7 +263,6 @@ func newServiceMetadataMiddleware_opDescribeHostReservationOfferings(region stri
 	return &awsmiddleware.RegisterServiceMetadata{
 		Region:        region,
 		ServiceID:     ServiceID,
-		SigningName:   "ec2",
 		OperationName: "DescribeHostReservationOfferings",
 	}
 }

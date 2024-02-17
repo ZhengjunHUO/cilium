@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	. "gopkg.in/check.v1"
+	. "github.com/cilium/checkmate"
 
 	"github.com/cilium/cilium/pkg/testutils"
 )
@@ -29,6 +29,31 @@ func (b *ControllerSuite) TestUpdateRemoveController(c *C) {
 	mngr.UpdateController("test", ControllerParams{})
 	c.Assert(mngr.RemoveController("test"), IsNil)
 	c.Assert(mngr.RemoveController("not-exist"), Not(IsNil))
+}
+
+func (b *ControllerSuite) TestCreateController(c *C) {
+	var iterations atomic.Uint32
+	mngr := NewManager()
+	created := mngr.CreateController("test", ControllerParams{
+		DoFunc: func(ctx context.Context) error {
+			iterations.Add(1)
+			return nil
+		},
+	})
+	c.Assert(created, Equals, true)
+
+	// Second creation is a no-op.
+	created = mngr.CreateController("test", ControllerParams{
+		DoFunc: func(ctx context.Context) error {
+			iterations.Add(1)
+			return nil
+		},
+	})
+	c.Assert(created, Equals, false)
+
+	c.Assert(mngr.RemoveControllerAndWait("test"), IsNil)
+
+	c.Assert(iterations.Load(), Equals, uint32(1))
 }
 
 func (b *ControllerSuite) TestStopFunc(c *C) {
@@ -55,14 +80,14 @@ func (b *ControllerSuite) TestStopFunc(c *C) {
 }
 
 func (b *ControllerSuite) TestSelfExit(c *C) {
-	var iterations uint32
+	var iterations atomic.Uint32
 	waitChan := make(chan bool)
 
 	mngr := Manager{}
 	mngr.UpdateController("test", ControllerParams{
 		RunInterval: 100 * time.Millisecond,
 		DoFunc: func(ctx context.Context) error {
-			atomic.AddUint32(&iterations, 1)
+			iterations.Add(1)
 			return NewExitReason("test exit")
 		},
 		StopFunc: func(ctx context.Context) error {
@@ -75,7 +100,7 @@ func (b *ControllerSuite) TestSelfExit(c *C) {
 		c.Error("Controller exited")
 	case <-time.After(time.Second):
 	}
-	c.Assert(atomic.LoadUint32(&iterations), Equals, uint32(1))
+	c.Assert(iterations.Load(), Equals, uint32(1))
 
 	// The controller is inactive, and waiting for the next update or stop.
 	// A controller will only stop when explicitly removed and stopped.
@@ -170,6 +195,18 @@ func (b *ControllerSuite) TestCancellation(c *C) {
 	}
 }
 
+// terminationChannel returns a channel that is closed after the controller has
+// been terminated
+func (m *Manager) terminationChannel(name string) chan struct{} {
+	if c := m.lookup(name); c != nil {
+		return c.terminated
+	}
+
+	c := make(chan struct{})
+	close(c)
+	return c
+}
+
 func (b *ControllerSuite) TestWaitForTermination(c *C) {
 	mngr := NewManager()
 	mngr.UpdateController("test1", ControllerParams{})
@@ -179,7 +216,7 @@ func (b *ControllerSuite) TestWaitForTermination(c *C) {
 	// still running
 	c.Assert(testutils.WaitUntil(func() bool {
 		select {
-		case <-mngr.TerminationChannel("test1"):
+		case <-mngr.terminationChannel("test1"):
 			return false
 		default:
 			return true
@@ -190,7 +227,7 @@ func (b *ControllerSuite) TestWaitForTermination(c *C) {
 
 	// The controller must have been terminated already due to AndWait above
 	select {
-	case <-mngr.TerminationChannel("test1"):
+	case <-mngr.terminationChannel("test1"):
 	default:
 		c.Fail()
 	}

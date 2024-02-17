@@ -12,8 +12,8 @@ import (
 	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
-// Adds a route to a network to a Client VPN endpoint. Each Client VPN endpoint has
-// a route table that describes the available destination network routes. Each
+// Adds a route to a network to a Client VPN endpoint. Each Client VPN endpoint
+// has a route table that describes the available destination network routes. Each
 // route in the route table specifies the path for traﬃc to speciﬁc resources or
 // networks.
 func (c *Client) CreateClientVpnRoute(ctx context.Context, params *CreateClientVpnRouteInput, optFns ...func(*Options)) (*CreateClientVpnRouteOutput, error) {
@@ -40,32 +40,25 @@ type CreateClientVpnRouteInput struct {
 
 	// The IPv4 address range, in CIDR notation, of the route destination. For
 	// example:
-	//
-	// * To add a route for Internet access, enter 0.0.0.0/0
-	//
-	// * To add a
-	// route for a peered VPC, enter the peered VPC's IPv4 CIDR range
-	//
-	// * To add a route
-	// for an on-premises network, enter the Amazon Web Services Site-to-Site VPN
-	// connection's IPv4 CIDR range
-	//
-	// * To add a route for the local network, enter the
-	// client CIDR range
+	//   - To add a route for Internet access, enter 0.0.0.0/0
+	//   - To add a route for a peered VPC, enter the peered VPC's IPv4 CIDR range
+	//   - To add a route for an on-premises network, enter the Amazon Web Services
+	//   Site-to-Site VPN connection's IPv4 CIDR range
+	//   - To add a route for the local network, enter the client CIDR range
 	//
 	// This member is required.
 	DestinationCidrBlock *string
 
 	// The ID of the subnet through which you want to route traffic. The specified
 	// subnet must be an existing target network of the Client VPN endpoint.
-	// Alternatively, if you're adding a route for the local network, specify local.
+	// Alternatively, if you're adding a route for the local network, specify local .
 	//
 	// This member is required.
 	TargetVpcSubnetId *string
 
 	// Unique, case-sensitive identifier that you provide to ensure the idempotency of
-	// the request. For more information, see How to ensure idempotency
-	// (https://docs.aws.amazon.com/AWSEC2/latest/APIReference/Run_Instance_Idempotency.html).
+	// the request. For more information, see How to ensure idempotency (https://docs.aws.amazon.com/AWSEC2/latest/APIReference/Run_Instance_Idempotency.html)
+	// .
 	ClientToken *string
 
 	// A brief description of the route.
@@ -73,8 +66,8 @@ type CreateClientVpnRouteInput struct {
 
 	// Checks whether you have the required permissions for the action, without
 	// actually making the request, and provides an error response. If you have the
-	// required permissions, the error response is DryRunOperation. Otherwise, it is
-	// UnauthorizedOperation.
+	// required permissions, the error response is DryRunOperation . Otherwise, it is
+	// UnauthorizedOperation .
 	DryRun *bool
 
 	noSmithyDocumentSerde
@@ -92,12 +85,22 @@ type CreateClientVpnRouteOutput struct {
 }
 
 func (c *Client) addOperationCreateClientVpnRouteMiddlewares(stack *middleware.Stack, options Options) (err error) {
+	if err := stack.Serialize.Add(&setOperationInputMiddleware{}, middleware.After); err != nil {
+		return err
+	}
 	err = stack.Serialize.Add(&awsEc2query_serializeOpCreateClientVpnRoute{}, middleware.After)
 	if err != nil {
 		return err
 	}
 	err = stack.Deserialize.Add(&awsEc2query_deserializeOpCreateClientVpnRoute{}, middleware.After)
 	if err != nil {
+		return err
+	}
+	if err := addProtocolFinalizerMiddlewares(stack, options, "CreateClientVpnRoute"); err != nil {
+		return fmt.Errorf("add protocol finalizers: %v", err)
+	}
+
+	if err = addlegacyEndpointContextSetter(stack, options); err != nil {
 		return err
 	}
 	if err = addSetLoggerMiddleware(stack, options); err != nil {
@@ -118,22 +121,22 @@ func (c *Client) addOperationCreateClientVpnRouteMiddlewares(stack *middleware.S
 	if err = addRetryMiddlewares(stack, options); err != nil {
 		return err
 	}
-	if err = addHTTPSignerV4Middleware(stack, options); err != nil {
-		return err
-	}
 	if err = awsmiddleware.AddRawResponseToMetadata(stack); err != nil {
 		return err
 	}
 	if err = awsmiddleware.AddRecordResponseTiming(stack); err != nil {
 		return err
 	}
-	if err = addClientUserAgent(stack); err != nil {
+	if err = addClientUserAgent(stack, options); err != nil {
 		return err
 	}
 	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
 		return err
 	}
 	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
+		return err
+	}
+	if err = addSetLegacyContextSigningOptionsMiddleware(stack); err != nil {
 		return err
 	}
 	if err = addIdempotencyToken_opCreateClientVpnRouteMiddleware(stack, options); err != nil {
@@ -145,6 +148,9 @@ func (c *Client) addOperationCreateClientVpnRouteMiddlewares(stack *middleware.S
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opCreateClientVpnRoute(options.Region), middleware.Before); err != nil {
 		return err
 	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
+		return err
+	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
 		return err
 	}
@@ -152,6 +158,9 @@ func (c *Client) addOperationCreateClientVpnRouteMiddlewares(stack *middleware.S
 		return err
 	}
 	if err = addRequestResponseLogging(stack, options); err != nil {
+		return err
+	}
+	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
 		return err
 	}
 	return nil
@@ -194,7 +203,6 @@ func newServiceMetadataMiddleware_opCreateClientVpnRoute(region string) *awsmidd
 	return &awsmiddleware.RegisterServiceMetadata{
 		Region:        region,
 		ServiceID:     ServiceID,
-		SigningName:   "ec2",
 		OperationName: "CreateClientVpnRoute",
 	}
 }

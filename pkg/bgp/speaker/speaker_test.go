@@ -36,7 +36,7 @@ var (
 func TestSpeakerOnUpdateService(t *testing.T) {
 	// gen our test structures
 	service, _, metallbService, serviceID := mock.GenTestServicePairs()
-	endpoints, _, metallbendpoints := mock.GenTestEndpointsPairs()
+	endpoints, metallbendpoints := mock.GenTestEndpointsPairs()
 
 	// our test will block on this ctx, our mock will cancel it and thus
 	// unblock our test. If the event never gets to our mock, a timeout
@@ -210,7 +210,7 @@ func TestSpeakerOnDeleteService(t *testing.T) {
 func TestSpeakerOnUpdateEndpoints(t *testing.T) {
 	// gen our test structures
 	service, _, metallbService, serviceID := mock.GenTestServicePairs()
-	_, slimendpoints, metallbendpoints := mock.GenTestEndpointsPairs()
+	endpoints, metallbendpoints := mock.GenTestEndpointsPairs()
 
 	// our test will block on this ctx, our mock will cancel it and thus
 	// unblock our test. If the event never gets to our mock, a timeout
@@ -256,7 +256,7 @@ func TestSpeakerOnUpdateEndpoints(t *testing.T) {
 
 	go spkr.run(ctx)
 
-	err := spkr.OnUpdateEndpoints(&slimendpoints)
+	err := spkr.OnUpdateEndpoints(&endpoints)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -314,9 +314,9 @@ func TestSpeakerOnUpdateNode(t *testing.T) {
 	// MockSession.Set
 	// MockMetalLBSpeaker.SetNodeLabels
 	// MockMetalLBSpeaker.PeerSession
-	var callCount int32
+	var callCount atomic.Int32
 	go func() {
-		for atomic.LoadInt32(&callCount) != 3 {
+		for callCount.Load() != 3 {
 			// should be a very short spin if tests are
 			// passing.
 		}
@@ -332,7 +332,7 @@ func TestSpeakerOnUpdateNode(t *testing.T) {
 			rr.Lock()
 			rr.advs = advs
 			rr.Unlock()
-			atomic.AddInt32(&callCount, 1)
+			callCount.Add(1)
 			return nil
 		},
 	}
@@ -346,11 +346,11 @@ func TestSpeakerOnUpdateNode(t *testing.T) {
 			rr.Lock()
 			rr.labels = labels
 			rr.Unlock()
-			atomic.AddInt32(&callCount, 1)
+			callCount.Add(1)
 			return types.SyncStateSuccess
 		},
 		GetBGPController_: func() *metallbspr.BGPController {
-			atomic.AddInt32(&callCount, 1)
+			callCount.Add(1)
 			return &metallbspr.BGPController{
 				SvcAds: make(map[string][]*metallbbgp.Advertisement),
 				Peers: []*metallbspr.Peer{
@@ -372,7 +372,7 @@ func TestSpeakerOnUpdateNode(t *testing.T) {
 
 	go spkr.run(ctx)
 
-	err := spkr.OnUpdateNode(&node, &node, nil)
+	err := spkr.notifyNodeEvent(Update, &node, nodePodCIDRs(&node), false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -424,9 +424,9 @@ func TestSpeakerOnDeleteNode(t *testing.T) {
 	// the 2 calls we expect:
 	// MockSession.Set
 	// MockMetalLBSpeaker.PeerSession
-	var callCount int32
+	var callCount atomic.Int32
 	go func() {
-		for atomic.LoadInt32(&callCount) != 2 {
+		for callCount.Load() != 2 {
 			// should be a very short spin if tests are
 			// passing.
 		}
@@ -442,7 +442,7 @@ func TestSpeakerOnDeleteNode(t *testing.T) {
 			rr.Lock()
 			rr.advs = advs
 			rr.Unlock()
-			atomic.AddInt32(&callCount, 1)
+			callCount.Add(1)
 			return nil
 		},
 	}
@@ -451,7 +451,7 @@ func TestSpeakerOnDeleteNode(t *testing.T) {
 	// will return our mock session.
 	mock := &mock.MockMetalLBSpeaker{
 		PeerSession_: func() []metallbspr.Session {
-			atomic.AddInt32(&callCount, 1)
+			callCount.Add(1)
 			return []metallbspr.Session{mockSession}
 		},
 		GetBGPController_: func() *metallbspr.BGPController {
@@ -476,7 +476,7 @@ func TestSpeakerOnDeleteNode(t *testing.T) {
 
 	go spkr.run(ctx)
 
-	err := spkr.OnDeleteNode(&node, nil)
+	err := spkr.notifyNodeEvent(Delete, &node, nodePodCIDRs(&node), true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -499,25 +499,19 @@ func TestSpeakerOnDeleteNode(t *testing.T) {
 	if !spkr.shutDown() {
 		t.Fatalf("wanted speaker to be shutdown")
 	}
-	if err := spkr.OnAddNode(nil, nil); !errors.Is(err, ErrShutDown) {
+	if err := spkr.notifyNodeEvent(Add, nil, nil, true); !errors.Is(err, ErrShutDown) {
 		t.Fatalf("got: %v, want: %v", err, ErrShutDown)
 	}
-	if err := spkr.OnDeleteNode(nil, nil); !errors.Is(err, ErrShutDown) {
+	if err := spkr.notifyNodeEvent(Update, nil, nil, false); !errors.Is(err, ErrShutDown) {
 		t.Fatalf("got: %v, want: %v", err, ErrShutDown)
 	}
-	if err := spkr.OnAddCiliumNode(nil, nil); !errors.Is(err, ErrShutDown) {
-		t.Fatalf("got: %v, want: %v", err, ErrShutDown)
-	}
-	if err := spkr.OnDeleteCiliumNode(nil, nil); !errors.Is(err, ErrShutDown) {
+	if err := spkr.notifyNodeEvent(Delete, nil, nil, true); !errors.Is(err, ErrShutDown) {
 		t.Fatalf("got: %v, want: %v", err, ErrShutDown)
 	}
 	if err := spkr.OnDeleteService(nil); !errors.Is(err, ErrShutDown) {
 		t.Fatalf("got: %v, want: %v", err, ErrShutDown)
 	}
 	if err := spkr.OnUpdateEndpoints(nil); !errors.Is(err, ErrShutDown) {
-		t.Fatalf("got: %v, want: %v", err, ErrShutDown)
-	}
-	if err := spkr.OnUpdateNode(nil, nil, nil); !errors.Is(err, ErrShutDown) {
 		t.Fatalf("got: %v, want: %v", err, ErrShutDown)
 	}
 	if err := spkr.OnUpdateService(nil); !errors.Is(err, ErrShutDown) {
@@ -571,7 +565,7 @@ func TestSpeakerOnUpdateAndDeleteCiliumNode(t *testing.T) {
 
 	// CiliumNode with one pod CIDR
 	node, advs := mock.GenTestCiliumNodeAndAdvertisements(1)
-	err := spkr.OnUpdateCiliumNode(nil, &node, nil)
+	err := spkr.notifyNodeEvent(Update, &node, ciliumNodePodCIDRs(&node), false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -587,9 +581,8 @@ func TestSpeakerOnUpdateAndDeleteCiliumNode(t *testing.T) {
 	}
 
 	// Add two additional pod CIDRs to CiliumNode
-	oldNode := node
 	node, advs = mock.GenTestCiliumNodeAndAdvertisements(3)
-	err = spkr.OnUpdateCiliumNode(&oldNode, &node, nil)
+	err = spkr.notifyNodeEvent(Update, &node, ciliumNodePodCIDRs(&node), false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -605,7 +598,7 @@ func TestSpeakerOnUpdateAndDeleteCiliumNode(t *testing.T) {
 	}
 
 	// Delete CiliumNode
-	err = spkr.OnDeleteCiliumNode(&node, nil)
+	err = spkr.notifyNodeEvent(Delete, &node, ciliumNodePodCIDRs(&node), true)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -5,33 +5,29 @@ package endpoint
 
 import (
 	"context"
-	"net"
-	"net/netip"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
-	. "gopkg.in/check.v1"
+	. "github.com/cilium/checkmate"
 
-	"github.com/cilium/cilium/pkg/datapath/fake"
+	"github.com/cilium/cilium/api/v1/models"
+	fakeTypes "github.com/cilium/cilium/pkg/datapath/fake/types"
 	datapath "github.com/cilium/cilium/pkg/datapath/types"
 	"github.com/cilium/cilium/pkg/endpoint/regeneration"
 	"github.com/cilium/cilium/pkg/eventqueue"
 	"github.com/cilium/cilium/pkg/fqdn/restore"
-	"github.com/cilium/cilium/pkg/identity"
 	"github.com/cilium/cilium/pkg/identity/cache"
 	ciliumio "github.com/cilium/cilium/pkg/k8s/apis/cilium.io"
 	"github.com/cilium/cilium/pkg/kvstore"
 	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/labelsfilter"
 	"github.com/cilium/cilium/pkg/lock"
-	"github.com/cilium/cilium/pkg/maps/ctmap"
 	"github.com/cilium/cilium/pkg/metrics"
 	monitorAPI "github.com/cilium/cilium/pkg/monitor/api"
+	"github.com/cilium/cilium/pkg/node"
 	"github.com/cilium/cilium/pkg/option"
-	fakeConfig "github.com/cilium/cilium/pkg/option/fake"
 	"github.com/cilium/cilium/pkg/policy"
 	"github.com/cilium/cilium/pkg/policy/api"
 	"github.com/cilium/cilium/pkg/testutils"
@@ -47,7 +43,7 @@ type EndpointSuite struct {
 	regeneration.Owner
 	repo     *policy.Repository
 	datapath datapath.Datapath
-	mgr      fakeIdentityAllocator
+	mgr      *cache.CachingIdentityAllocator
 
 	// Owners interface mock
 	OnGetPolicyRepository     func() *policy.Repository
@@ -56,9 +52,6 @@ type EndpointSuite struct {
 	OnRemoveFromEndpointQueue func(epID uint64)
 	OnGetCompilationLock      func() *lock.RWMutex
 	OnSendNotification        func(msg monitorAPI.AgentNotifyMessage) error
-
-	// Metrics
-	collectors []prometheus.Collector
 }
 
 // suite can be used by testing.T benchmarks or tests as a mock regeneration.Owner
@@ -66,26 +59,22 @@ var suite = EndpointSuite{repo: policy.NewPolicyRepository(nil, nil, nil, nil)}
 var _ = Suite(&suite)
 
 func (s *EndpointSuite) SetUpSuite(c *C) {
-	testutils.IntegrationCheck(c)
+	testutils.IntegrationTest(c)
 
-	ctmap.InitMapInfo(option.CTMapEntriesGlobalTCPDefault, option.CTMapEntriesGlobalAnyDefault, true, true, true)
 	s.repo = policy.NewPolicyRepository(nil, nil, nil, nil)
 	// GetConfig the default labels prefix filter
-	err := labelsfilter.ParseLabelPrefixCfg(nil, "")
+	err := labelsfilter.ParseLabelPrefixCfg(nil, nil, "")
 	if err != nil {
 		panic("ParseLabelPrefixCfg() failed")
 	}
 
 	// Register metrics once before running the suite
-	_, s.collectors = metrics.CreateConfiguration([]string{"cilium_endpoint_state"})
-	metrics.MustRegister(s.collectors...)
+	metrics.NewLegacyMetrics().EndpointStateCount.SetEnabled(true)
 }
 
 func (s *EndpointSuite) TearDownSuite(c *C) {
 	// Unregister the metrics after the suite has finished
-	for _, c := range s.collectors {
-		metrics.Unregister(c)
-	}
+	metrics.EndpointStateCount.SetEnabled(false)
 }
 
 func (s *EndpointSuite) GetPolicyRepository() *policy.Repository {
@@ -122,42 +111,19 @@ func (s *EndpointSuite) GetDNSRules(epID uint16) restore.DNSRules {
 func (s *EndpointSuite) RemoveRestoredDNSRules(epID uint16) {
 }
 
-// TODO: Remove the etcd dependency from these tests with a full dummy
-// implementation of an identity allocator under pkg/testutils/identity.
-// Until we do that, these tests must rely on the real CachingIdentityAllocator
-// implementation inside.
-type fakeIdentityAllocator struct {
-	*cache.CachingIdentityAllocator
-}
-
-func (f fakeIdentityAllocator) AllocateCIDRsForIPs([]net.IP, map[netip.Prefix]*identity.Identity) ([]*identity.Identity, error) {
-	return nil, nil
-}
-
-func (f fakeIdentityAllocator) ReleaseCIDRIdentitiesByID(context.Context, []identity.NumericIdentity) {
-}
-
-func NewCachingIdentityAllocator(owner cache.IdentityAllocatorOwner) fakeIdentityAllocator {
-	return fakeIdentityAllocator{
-		CachingIdentityAllocator: cache.NewCachingIdentityAllocator(owner),
-	}
-}
-
-// func (f *fakeIdentityAllocator)
-
 func (s *EndpointSuite) SetUpTest(c *C) {
 	/* Required to test endpoint CEP policy model */
-	kvstore.SetupDummy("etcd")
-	identity.InitWellKnownIdentities(&fakeConfig.Config{})
+	kvstore.SetupDummy(c, "etcd")
 	// The nils are only used by k8s CRD identities. We default to kvstore.
-	mgr := NewCachingIdentityAllocator(&testidentity.IdentityAllocatorOwnerMock{})
-	<-mgr.InitIdentityAllocator(nil, nil)
+	mgr := cache.NewCachingIdentityAllocator(&testidentity.IdentityAllocatorOwnerMock{})
+	<-mgr.InitIdentityAllocator(nil)
 	s.mgr = mgr
-}
+	node.SetTestLocalNodeStore()
 
-func (s *EndpointSuite) TearDownTest(c *C) {
-	s.mgr.Close()
-	kvstore.Client().Close(context.TODO())
+	c.Cleanup(func() {
+		s.mgr.Close()
+		node.UnsetTestLocalNodeStore()
+	})
 }
 
 func (s *EndpointSuite) TestEndpointStatus(c *C) {
@@ -259,32 +225,57 @@ func (s *EndpointSuite) TestEndpointStatus(c *C) {
 	c.Assert(eps.String(), Equals, "OK")
 }
 
+func (s *EndpointSuite) TestEndpointDatapathOptions(c *C) {
+	e, err := NewEndpointFromChangeModel(context.TODO(), s, s, testipcache.NewMockIPCache(), &FakeEndpointProxy{}, s.mgr, &models.EndpointChangeRequest{
+		DatapathConfiguration: &models.EndpointDatapathConfiguration{
+			DisableSipVerification: true,
+		},
+	})
+	c.Assert(err, IsNil)
+	c.Assert(e.Options.GetValue(option.SourceIPVerification), Equals, option.OptionDisabled)
+}
+
 func (s *EndpointSuite) TestEndpointUpdateLabels(c *C) {
-	e := NewEndpointWithState(s, s, testipcache.NewMockIPCache(), &FakeEndpointProxy{}, testidentity.NewMockIdentityAllocator(nil), 100, StateWaitingForIdentity)
+	e := NewTestEndpointWithState(c, s, s, testipcache.NewMockIPCache(), &FakeEndpointProxy{}, testidentity.NewMockIdentityAllocator(nil), 100, StateWaitingForIdentity)
 
 	// Test that inserting identity labels works
-	rev := e.replaceIdentityLabels(labels.Map2Labels(map[string]string{"foo": "bar", "zip": "zop"}, "cilium"))
+	rev := e.replaceIdentityLabels(labels.LabelSourceAny, labels.Map2Labels(map[string]string{"foo": "bar", "zip": "zop"}, "cilium"))
 	c.Assert(rev, Not(Equals), 0)
 	c.Assert(string(e.OpLabels.OrchestrationIdentity.SortedList()), Equals, "cilium:foo=bar;cilium:zip=zop;")
 	// Test that nothing changes
-	rev = e.replaceIdentityLabels(labels.Map2Labels(map[string]string{"foo": "bar", "zip": "zop"}, "cilium"))
+	rev = e.replaceIdentityLabels(labels.LabelSourceAny, labels.Map2Labels(map[string]string{"foo": "bar", "zip": "zop"}, "cilium"))
 	c.Assert(rev, Equals, 0)
 	c.Assert(string(e.OpLabels.OrchestrationIdentity.SortedList()), Equals, "cilium:foo=bar;cilium:zip=zop;")
 	// Remove one label, change the source and value of the other.
-	rev = e.replaceIdentityLabels(labels.Map2Labels(map[string]string{"foo": "zop"}, "nginx"))
+	rev = e.replaceIdentityLabels(labels.LabelSourceAny, labels.Map2Labels(map[string]string{"foo": "zop"}, "cilium"))
 	c.Assert(rev, Not(Equals), 0)
-	c.Assert(string(e.OpLabels.OrchestrationIdentity.SortedList()), Equals, "nginx:foo=zop;")
+	c.Assert(string(e.OpLabels.OrchestrationIdentity.SortedList()), Equals, "cilium:foo=zop;")
 
 	// Test that inserting information labels works
-	e.replaceInformationLabels(labels.Map2Labels(map[string]string{"foo": "bar", "zip": "zop"}, "cilium"))
+	e.replaceInformationLabels(labels.LabelSourceAny, labels.Map2Labels(map[string]string{"foo": "bar", "zip": "zop"}, "cilium"))
 	c.Assert(string(e.OpLabels.OrchestrationInfo.SortedList()), Equals, "cilium:foo=bar;cilium:zip=zop;")
-	// Remove one label, change the source and value of the other.
-	e.replaceInformationLabels(labels.Map2Labels(map[string]string{"foo": "zop"}, "nginx"))
-	c.Assert(string(e.OpLabels.OrchestrationInfo.SortedList()), Equals, "nginx:foo=zop;")
+
+	// Test that inserting a new nginx will also keep the previous cilium label
+	e.replaceInformationLabels("nginx", labels.Map2Labels(map[string]string{"foo2": "zop2", "zip": "zop2"}, "nginx"))
+	c.Assert(string(e.OpLabels.OrchestrationInfo.SortedList()), Equals, "cilium:foo=bar;nginx:foo2=zop2;cilium:zip=zop;")
+
+	// Test that we will keep the 'nginx' label because we only want to add
+	// Cilium labels.
+	e.replaceInformationLabels("cilium", labels.Map2Labels(map[string]string{"foo2": "bar2", "zip2": "zop2"}, "cilium"))
+	c.Assert(string(e.OpLabels.OrchestrationInfo.SortedList()), Equals, "nginx:foo2=zop2;cilium:zip2=zop2;")
+
+	// Test that we will keep the 'nginx' label because we only want to update
+	// Cilium labels.
+	e.replaceInformationLabels("cilium", labels.Map2Labels(map[string]string{"foo3": "bar3"}, "cilium"))
+	c.Assert(string(e.OpLabels.OrchestrationInfo.SortedList()), Equals, "nginx:foo2=zop2;cilium:foo3=bar3;")
+
+	// Test that we will not replace labels from other sources if the key is the same.
+	e.replaceInformationLabels(labels.LabelSourceAny, labels.Map2Labels(map[string]string{"foo2": "bar2"}, "cilium"))
+	c.Assert(string(e.OpLabels.OrchestrationInfo.SortedList()), Equals, "nginx:foo2=zop2;")
 }
 
 func (s *EndpointSuite) TestEndpointState(c *C) {
-	e := NewEndpointWithState(s, s, testipcache.NewMockIPCache(), &FakeEndpointProxy{}, testidentity.NewMockIdentityAllocator(nil), 100, StateWaitingForIdentity)
+	e := NewTestEndpointWithState(c, s, s, testipcache.NewMockIPCache(), &FakeEndpointProxy{}, testidentity.NewMockIdentityAllocator(nil), 100, StateWaitingForIdentity)
 	e.unconditionalLock()
 	defer e.unlock()
 
@@ -532,15 +523,35 @@ func (s *EndpointSuite) TestWaitForPolicyRevision(c *C) {
 
 func (s *EndpointSuite) TestProxyID(c *C) {
 	e := &Endpoint{ID: 123, policyRevision: 0}
+	e.UpdateLogger(nil)
 
-	id := e.proxyID(&policy.L4Filter{Port: 8080, Protocol: api.ProtoTCP, Ingress: true})
+	id, port := e.proxyID(&policy.L4Filter{Port: 8080, Protocol: api.ProtoTCP, Ingress: true}, "")
 	c.Assert(id, Not(Equals), "")
-	endpointID, ingress, protocol, port, err := policy.ParseProxyID(id)
+	c.Assert(port, Equals, uint16(8080))
+
+	endpointID, ingress, protocol, port, listener, err := policy.ParseProxyID(id)
 	c.Assert(endpointID, Equals, uint16(123))
 	c.Assert(ingress, Equals, true)
 	c.Assert(protocol, Equals, "TCP")
 	c.Assert(port, Equals, uint16(8080))
+	c.Assert(listener, Equals, "")
 	c.Assert(err, IsNil)
+
+	id, port = e.proxyID(&policy.L4Filter{Port: 8080, Protocol: api.ProtoTCP, Ingress: true, L7Parser: policy.ParserTypeCRD}, "test-listener")
+	c.Assert(id, Not(Equals), "")
+	c.Assert(port, Equals, uint16(8080))
+	endpointID, ingress, protocol, port, listener, err = policy.ParseProxyID(id)
+	c.Assert(endpointID, Equals, uint16(123))
+	c.Assert(ingress, Equals, true)
+	c.Assert(protocol, Equals, "TCP")
+	c.Assert(port, Equals, uint16(8080))
+	c.Assert(listener, Equals, "test-listener")
+	c.Assert(err, IsNil)
+
+	// Undefined named port
+	id, port = e.proxyID(&policy.L4Filter{PortName: "foobar", Protocol: api.ProtoTCP, Ingress: true}, "")
+	c.Assert(id, Equals, "")
+	c.Assert(port, Equals, uint16(0))
 }
 
 func TestEndpoint_GetK8sPodLabels(t *testing.T) {
@@ -641,23 +652,23 @@ func (s *EndpointSuite) TestEndpointEventQueueDeadlockUponStop(c *C) {
 	// Need to modify global configuration (hooray!), change back when test is
 	// done.
 	oldQueueSize := option.Config.EndpointQueueSize
-	oldDryMode := option.Config.DryMode
 	option.Config.EndpointQueueSize = 1
-	option.Config.DryMode = true
 	defer func() {
 		option.Config.EndpointQueueSize = oldQueueSize
-		option.Config.DryMode = oldDryMode
 	}()
 
 	oldDatapath := s.datapath
 
-	s.datapath = fake.NewDatapath()
+	s.datapath = fakeTypes.NewDatapath()
 
 	defer func() {
 		s.datapath = oldDatapath
 	}()
 
-	ep := NewEndpointWithState(s, s, testipcache.NewMockIPCache(), &FakeEndpointProxy{}, testidentity.NewMockIdentityAllocator(nil), 12345, StateReady)
+	ep := NewTestEndpointWithState(c, s, s, testipcache.NewMockIPCache(), &FakeEndpointProxy{}, testidentity.NewMockIdentityAllocator(nil), 12345, StateReady)
+
+	ep.properties[PropertyFakeEndpoint] = true
+	ep.properties[PropertySkipBPFPolicy] = true
 
 	// In case deadlock occurs, provide a timeout of 3 (number of events) *
 	// deadlockTimeout + 1 seconds to ensure that we are actually testing for
@@ -728,7 +739,7 @@ func (s *EndpointSuite) TestEndpointEventQueueDeadlockUponStop(c *C) {
 }
 
 func BenchmarkEndpointGetModel(b *testing.B) {
-	e := NewEndpointWithState(&suite, &suite, testipcache.NewMockIPCache(), &FakeEndpointProxy{}, testidentity.NewMockIdentityAllocator(nil), 123, StateWaitingForIdentity)
+	e := NewTestEndpointWithState(b, &suite, &suite, testipcache.NewMockIPCache(), &FakeEndpointProxy{}, testidentity.NewMockIdentityAllocator(nil), 123, StateWaitingForIdentity)
 
 	for i := 0; i < 256; i++ {
 		e.LogStatusOK(BPF, "Hello World!")

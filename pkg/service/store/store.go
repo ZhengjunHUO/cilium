@@ -5,13 +5,16 @@ package store
 
 import (
 	"encoding/json"
+	"net/netip"
 	"path"
 
+	cmtypes "github.com/cilium/cilium/pkg/clustermesh/types"
 	"github.com/cilium/cilium/pkg/kvstore"
 	"github.com/cilium/cilium/pkg/kvstore/store"
 	"github.com/cilium/cilium/pkg/loadbalancer"
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/logging/logfields"
+	"github.com/cilium/cilium/pkg/option"
 )
 
 var (
@@ -104,14 +107,42 @@ func (s *ClusterService) Marshal() ([]byte, error) {
 }
 
 // Unmarshal parses the JSON byte slice and updates the global service receiver
-func (s *ClusterService) Unmarshal(data []byte) error {
+func (s *ClusterService) Unmarshal(_ string, data []byte) error {
 	newService := NewClusterService("", "")
 
 	if err := json.Unmarshal(data, &newService); err != nil {
 		return err
 	}
 
+	if err := newService.validate(); err != nil {
+		return err
+	}
+
 	*s = newService
+
+	return nil
+}
+
+func (s *ClusterService) validate() error {
+	// Skip the ClusterID check if it matches the local one, as we assume that
+	// it has already been validated, and to allow it to be zero.
+	if s.ClusterID != option.Config.ClusterID {
+		if err := cmtypes.ValidateClusterID(s.ClusterID); err != nil {
+			return err
+		}
+	}
+
+	for address := range s.Frontends {
+		if _, err := netip.ParseAddr(address); err != nil {
+			return err
+		}
+	}
+
+	for address := range s.Backends {
+		if _, err := netip.ParseAddr(address); err != nil {
+			return err
+		}
+	}
 
 	return nil
 }
@@ -162,20 +193,14 @@ func (c *clusterServiceObserver) OnDelete(key store.NamedKey) {
 	}
 }
 
-// Configuration is the required configuration for the service store
-type Configuration interface {
-	// LocalClusterName must return the name of the local cluster
-	LocalClusterName() string
-}
-
 // JoinClusterServices starts a controller for syncing services from the kvstore
-func JoinClusterServices(merger ServiceMerger, cfg Configuration) {
+func JoinClusterServices(merger ServiceMerger, clusterName string) {
 	swg := lock.NewStoppableWaitGroup()
 
 	log.Info("Enumerating cluster services")
 	// JoinSharedStore performs initial sync of services
 	_, err := store.JoinSharedStore(store.Configuration{
-		Prefix: path.Join(ServiceStorePrefix, cfg.LocalClusterName()),
+		Prefix: path.Join(ServiceStorePrefix, clusterName),
 		KeyCreator: func() store.Key {
 			return &ClusterService{}
 		},

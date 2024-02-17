@@ -12,17 +12,19 @@ import (
 	"testing"
 	"time"
 
+	. "github.com/cilium/checkmate"
+	"github.com/spf13/afero"
 	"github.com/vishvananda/netlink"
-	. "gopkg.in/check.v1"
 
 	"github.com/cilium/ebpf/rlimit"
 
 	"github.com/cilium/cilium/pkg/datapath/linux/config"
+	"github.com/cilium/cilium/pkg/datapath/linux/sysctl"
 	"github.com/cilium/cilium/pkg/datapath/loader/metrics"
 	"github.com/cilium/cilium/pkg/elf"
 	"github.com/cilium/cilium/pkg/maps/callsmap"
-	"github.com/cilium/cilium/pkg/maps/ctmap"
 	"github.com/cilium/cilium/pkg/maps/policymap"
+	"github.com/cilium/cilium/pkg/node"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/testutils"
 )
@@ -37,10 +39,9 @@ var (
 	contextTimeout = 10 * time.Second
 	benchTimeout   = 5*time.Minute + 5*time.Second
 
-	dirInfo *directoryInfo
-	ep      = testutils.NewTestEndpoint()
-	hostEp  = testutils.NewTestHostEndpoint()
-	bpfDir  = filepath.Join("..", "..", "..", "bpf")
+	ep     = testutils.NewTestEndpoint()
+	hostEp = testutils.NewTestHostEndpoint()
+	bpfDir = filepath.Join("..", "..", "..", "bpf")
 )
 
 // SetTestIncludes allows test files to configure additional include flags.
@@ -53,29 +54,17 @@ func Test(t *testing.T) {
 }
 
 func (s *LoaderTestSuite) SetUpSuite(c *C) {
-	testutils.PrivilegedCheck(c)
+	testutils.PrivilegedTest(c)
 
-	tmpDir, err := os.MkdirTemp("/tmp/", "cilium_")
-	if err != nil {
-		c.Fatalf("Failed to create temporary directory: %s", err)
-	}
-	dirInfo = getDirs(tmpDir)
+	node.SetTestLocalNodeStore()
 
 	cleanup, err := prepareEnv(&ep)
 	if err != nil {
 		SetTestIncludes(nil)
-		os.RemoveAll(tmpDir)
 		c.Fatalf("Failed to prepare environment: %s", err)
 	}
 
-	s.teardown = func() error {
-		if err := cleanup(); err != nil {
-			return err
-		}
-		return os.RemoveAll(tmpDir)
-	}
-
-	ctmap.InitMapInfo(option.CTMapEntriesGlobalTCPDefault, option.CTMapEntriesGlobalAnyDefault, true, true, true)
+	s.teardown = cleanup
 
 	SetTestIncludes([]string{
 		fmt.Sprintf("-I%s", bpfDir),
@@ -101,6 +90,7 @@ func (s *LoaderTestSuite) TearDownSuite(c *C) {
 			c.Fatal(err)
 		}
 	}
+	node.UnsetTestLocalNodeStore()
 }
 
 func (s *LoaderTestSuite) TearDownTest(c *C) {
@@ -135,12 +125,12 @@ func prepareEnv(ep *testutils.TestEndpoint) (func() error, error) {
 	return cleanupFn, nil
 }
 
-func getDirs(tmpDir string) *directoryInfo {
+func getDirs(tb testing.TB) *directoryInfo {
 	return &directoryInfo{
 		Library: bpfDir,
 		Runtime: bpfDir,
 		State:   bpfDir,
-		Output:  tmpDir,
+		Output:  tb.TempDir(),
 	}
 }
 
@@ -149,8 +139,8 @@ func (s *LoaderTestSuite) testCompileAndLoad(c *C, ep *testutils.TestEndpoint) {
 	defer cancel()
 	stats := &metrics.SpanStat{}
 
-	l := &Loader{}
-	err := l.compileAndLoad(ctx, ep, dirInfo, stats)
+	l := newLoader(sysctl.NewDirectSysctl(afero.NewOsFs(), "/proc"))
+	err := l.compileAndLoad(ctx, ep, getDirs(c), stats)
 	c.Assert(err, IsNil)
 }
 
@@ -184,6 +174,7 @@ func (s *LoaderTestSuite) TestReload(c *C) {
 	ctx, cancel := context.WithTimeout(context.Background(), contextTimeout)
 	defer cancel()
 
+	dirInfo := getDirs(c)
 	err := compileDatapath(ctx, dirInfo, false, log)
 	c.Assert(err, IsNil)
 
@@ -216,12 +207,12 @@ func (s *LoaderTestSuite) testCompileFailure(c *C, ep *testutils.TestEndpoint) {
 		}
 	}()
 
-	l := &Loader{}
+	l := newLoader(sysctl.NewDirectSysctl(afero.NewOsFs(), "/proc"))
 	timeout := time.Now().Add(contextTimeout)
 	var err error
 	stats := &metrics.SpanStat{}
 	for err == nil && time.Now().Before(timeout) {
-		err = l.compileAndLoad(ctx, ep, dirInfo, stats)
+		err = l.compileAndLoad(ctx, ep, getDirs(c), stats)
 	}
 	c.Assert(err, NotNil)
 }
@@ -243,6 +234,9 @@ func BenchmarkCompileOnly(b *testing.B) {
 	ctx, cancel := context.WithTimeout(context.Background(), benchTimeout)
 	defer cancel()
 
+	dirInfo := getDirs(b)
+	option.Config.Debug = true
+
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		if err := compileDatapath(ctx, dirInfo, false, log); err != nil {
@@ -257,7 +251,8 @@ func BenchmarkCompileAndLoad(b *testing.B) {
 	ctx, cancel := context.WithTimeout(context.Background(), benchTimeout)
 	defer cancel()
 
-	l := &Loader{}
+	l := newLoader(sysctl.NewDirectSysctl(afero.NewOsFs(), "/proc"))
+	dirInfo := getDirs(b)
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -272,6 +267,8 @@ func BenchmarkCompileAndLoad(b *testing.B) {
 func BenchmarkReplaceDatapath(b *testing.B) {
 	ctx, cancel := context.WithTimeout(context.Background(), benchTimeout)
 	defer cancel()
+
+	dirInfo := getDirs(b)
 
 	if err := compileDatapath(ctx, dirInfo, false, log); err != nil {
 		b.Fatal(err)
@@ -332,7 +329,7 @@ func BenchmarkCompileOrLoad(b *testing.B) {
 	}
 	defer os.RemoveAll(epDir)
 
-	l := &Loader{}
+	l := newLoader(sysctl.NewDirectSysctl(afero.NewOsFs(), "/proc"))
 	l.templateCache = newObjectCache(&config.HeaderfileWriter{}, nil, tmpDir)
 	if err := l.CompileOrLoad(ctx, &ep, nil); err != nil {
 		log.Warningf("Failure in %s: %s", tmpDir, err)

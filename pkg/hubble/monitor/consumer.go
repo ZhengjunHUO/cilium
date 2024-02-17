@@ -5,7 +5,6 @@ package monitor
 
 import (
 	"strings"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
@@ -17,6 +16,7 @@ import (
 	"github.com/cilium/cilium/pkg/logging"
 	monitorConsumer "github.com/cilium/cilium/pkg/monitor/agent/consumer"
 	nodeTypes "github.com/cilium/cilium/pkg/node/types"
+	"github.com/cilium/cilium/pkg/time"
 )
 
 // Observer is the receiver of MonitorEvents
@@ -69,7 +69,6 @@ func (c *consumer) sendNumLostEvents() {
 		// We now now safely reset the counter, as at this point have
 		// successfully notified the observer about the amount of events
 		// that were lost since the previous LostEvent message
-		c.observer.GetLogger().Debugf("hubble events queue received a LostEvent message: %d messages were lost", c.numEventsLost)
 		c.numEventsLost = 0
 	default:
 		// We do not need to bump the numEventsLost counter here, as we will

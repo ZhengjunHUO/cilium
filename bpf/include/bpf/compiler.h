@@ -53,10 +53,6 @@
 # define __stringify(X)		#X
 #endif
 
-#ifndef __fetch
-# define __fetch(X)		(__u32)(__u64)(&(X))
-#endif
-
 #ifndef __aligned
 # define __aligned(X)		__attribute__((aligned(X)))
 #endif
@@ -117,6 +113,10 @@ static __always_inline void bpf_barrier(void)
 				   __WRITE_ONCE(X, __val);	\
 				   bpf_barrier();		\
 				   __val; })
+#endif
+
+#ifndef fallthrough
+# define fallthrough		__attribute__((fallthrough))
 #endif
 
 #endif /* __BPF_COMPILER_H_ */

@@ -1,17 +1,22 @@
-{{- if and .Values.auth.mTLS.spire.enabled .Values.auth.mTLS.spire.install.enabled -}}
+{{- if and .Values.authentication.mutual.spire.enabled .Values.authentication.mutual.spire.install.enabled -}}
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
   name: spire-agent
-  namespace: {{ .Values.auth.mTLS.spire.install.namespace }}
-  {{- with .Values.auth.mTLS.spire.install.server.annotations }}
+  namespace: {{ .Values.authentication.mutual.spire.install.namespace }}
+  {{- if or .Values.authentication.mutual.spire.install.server.annotations .Values.authentication.mutual.spire.annotations }}
   annotations:
-    {{- toYaml . | nindent 8 }}
+    {{- with .Values.authentication.mutual.spire.annotations }}
+      {{- toYaml . | nindent 4 }}
+    {{- end }}
+    {{- with .Values.authentication.mutual.spire.install.server.annotations }}
+      {{- toYaml . | nindent 4 }}
+    {{- end }}
   {{- end }}
   labels:
     app: spire-agent
-  {{- with .Values.auth.mTLS.spire.install.server.labels }}
-    {{- toYaml . | nindent 8 }}
+  {{- with .Values.authentication.mutual.spire.install.agent.labels }}
+    {{- toYaml . | nindent 4 }}
   {{- end }}
 spec:
   selector:
@@ -19,17 +24,25 @@ spec:
       app: spire-agent
   template:
     metadata:
-      namespace: {{ .Values.auth.mTLS.spire.install.namespace }}
+      namespace: {{ .Values.authentication.mutual.spire.install.namespace }}
       labels:
         app: spire-agent
+        {{- with .Values.authentication.mutual.spire.install.agent.labels }}
+          {{- toYaml . | nindent 8 }}
+        {{- end }}
     spec:
       hostPID: true
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
-      serviceAccountName: {{ .Values.auth.mTLS.spire.install.agent.serviceAccount.name }}
+      serviceAccountName: {{ .Values.authentication.mutual.spire.install.agent.serviceAccount.name }}
+      {{- with .Values.authentication.mutual.spire.install.agent.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       initContainers:
         - name: init
-          image: docker.io/library/busybox:1.35.0@sha256:223ae047b1065bd069aac01ae3ac8088b3ca4a527827e283b85112f29385fb1b
+          image: {{ include "cilium.image" .Values.authentication.mutual.spire.install.initImage | quote }}
+          imagePullPolicy: {{ .Values.authentication.mutual.spire.install.initImage.pullPolicy }}
           command:
             - /bin/sh
             - -c
@@ -37,8 +50,17 @@ spec:
               {{- tpl (.Files.Get "files/spire/wait-for-spire.bash") . | nindent 14 }}
       containers:
         - name: spire-agent
-          image: {{ .Values.auth.mTLS.spire.install.agent.image }}
+          {{- if eq (typeOf .Values.authentication.mutual.spire.install.agent.image) "string" }}
+          image: {{ .Values.authentication.mutual.spire.install.agent.image }}
+          {{- else }}
+          image: {{ include "cilium.image" .Values.authentication.mutual.spire.install.agent.image | quote }}
+          imagePullPolicy: {{ .Values.authentication.mutual.spire.install.agent.image.pullPolicy }}
+          {{- end }}
           args: ["-config", "/run/spire/config/agent.conf"]
+          {{- with .Values.authentication.mutual.spire.install.agent.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           volumeMounts:
             - name: spire-config
               mountPath: /run/spire/config
@@ -50,10 +72,15 @@ spec:
               readOnly: false
             - name: spire-agent
               mountPath: /var/run/secrets/tokens
+          env:
+            - name: MY_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
           livenessProbe:
             httpGet:
               path: /live
-              port: 8080
+              port: 4251
             failureThreshold: 2
             initialDelaySeconds: 15
             periodSeconds: 60
@@ -61,9 +88,23 @@ spec:
           readinessProbe:
             httpGet:
               path: /ready
-              port: 8080
+              port: 4251
             initialDelaySeconds: 5
             periodSeconds: 5
+      {{- with .Values.authentication.mutual.spire.install.agent.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.authentication.mutual.spire.install.agent.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      tolerations:
+        {{- with .Values.authentication.mutual.spire.install.agent.tolerations }}
+          {{- toYaml . | trim | nindent 8 }}
+        {{- end }}
+        - key:  {{ .Values.agentNotReadyTaintKey | default "node.cilium.io/agent-not-ready" }}
+          effect: NoSchedule
       volumes:
         - name: spire-config
           configMap:

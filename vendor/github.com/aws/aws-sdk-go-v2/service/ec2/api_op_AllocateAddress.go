@@ -4,6 +4,7 @@ package ec2
 
 import (
 	"context"
+	"fmt"
 	awsmiddleware "github.com/aws/aws-sdk-go-v2/aws/middleware"
 	"github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
@@ -19,25 +20,16 @@ import (
 // Services or from an address pool created from a public IPv4 address range that
 // you have brought to Amazon Web Services for use with your Amazon Web Services
 // resources using bring your own IP addresses (BYOIP). For more information, see
-// Bring Your Own IP Addresses (BYOIP)
-// (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-byoip.html) in the
-// Amazon Elastic Compute Cloud User Guide. [EC2-VPC] If you release an Elastic IP
+// Bring Your Own IP Addresses (BYOIP) (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-byoip.html)
+// in the Amazon Elastic Compute Cloud User Guide. If you release an Elastic IP
 // address, you might be able to recover it. You cannot recover an Elastic IP
 // address that you released after it is allocated to another Amazon Web Services
-// account. You cannot recover an Elastic IP address for EC2-Classic. To attempt to
-// recover an Elastic IP address that you released, specify it in this operation.
-// An Elastic IP address is for use either in the EC2-Classic platform or in a VPC.
-// By default, you can allocate 5 Elastic IP addresses for EC2-Classic per Region
-// and 5 Elastic IP addresses for EC2-VPC per Region. For more information, see
-// Elastic IP Addresses
-// (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/elastic-ip-addresses-eip.html)
+// account. To attempt to recover an Elastic IP address that you released, specify
+// it in this operation. For more information, see Elastic IP Addresses (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/elastic-ip-addresses-eip.html)
 // in the Amazon Elastic Compute Cloud User Guide. You can allocate a carrier IP
 // address which is a public IP address from a telecommunication carrier, to a
 // network interface which resides in a subnet in a Wavelength Zone (for example an
-// EC2 instance). We are retiring EC2-Classic. We recommend that you migrate from
-// EC2-Classic to a VPC. For more information, see Migrate from EC2-Classic to a
-// VPC (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/vpc-migrate.html) in
-// the Amazon Elastic Compute Cloud User Guide.
+// EC2 instance).
 func (c *Client) AllocateAddress(ctx context.Context, params *AllocateAddressInput, optFns ...func(*Options)) (*AllocateAddressOutput, error) {
 	if params == nil {
 		params = &AllocateAddressInput{}
@@ -55,8 +47,7 @@ func (c *Client) AllocateAddress(ctx context.Context, params *AllocateAddressInp
 
 type AllocateAddressInput struct {
 
-	// [EC2-VPC] The Elastic IP address to recover or an IPv4 address from an address
-	// pool.
+	// The Elastic IP address to recover or an IPv4 address from an address pool.
 	Address *string
 
 	// The ID of a customer-owned address pool. Use this parameter to let Amazon EC2
@@ -64,25 +55,20 @@ type AllocateAddressInput struct {
 	// address from the address pool.
 	CustomerOwnedIpv4Pool *string
 
-	// Indicates whether the Elastic IP address is for use with instances in a VPC or
-	// instances in EC2-Classic. Default: If the Region supports EC2-Classic, the
-	// default is standard. Otherwise, the default is vpc.
+	// The network ( vpc ).
 	Domain types.DomainType
 
 	// Checks whether you have the required permissions for the action, without
 	// actually making the request, and provides an error response. If you have the
-	// required permissions, the error response is DryRunOperation. Otherwise, it is
-	// UnauthorizedOperation.
+	// required permissions, the error response is DryRunOperation . Otherwise, it is
+	// UnauthorizedOperation .
 	DryRun *bool
 
 	// A unique set of Availability Zones, Local Zones, or Wavelength Zones from which
 	// Amazon Web Services advertises IP addresses. Use this parameter to limit the IP
 	// address to this location. IP addresses cannot move between network border
-	// groups. Use DescribeAvailabilityZones
-	// (https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_DescribeAvailabilityZones.html)
-	// to view the network border groups. You cannot use a network border group with
-	// EC2 Classic. If you attempt this operation on EC2 Classic, you receive an
-	// InvalidParameterCombination error.
+	// groups. Use DescribeAvailabilityZones (https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_DescribeAvailabilityZones.html)
+	// to view the network border groups.
 	NetworkBorderGroup *string
 
 	// The ID of an address pool that you own. Use this parameter to let Amazon EC2
@@ -98,12 +84,11 @@ type AllocateAddressInput struct {
 
 type AllocateAddressOutput struct {
 
-	// [EC2-VPC] The ID that Amazon Web Services assigns to represent the allocation of
-	// the Elastic IP address for use with instances in a VPC.
+	// The ID that represents the allocation of the Elastic IP address.
 	AllocationId *string
 
 	// The carrier IP address. This option is only available for network interfaces
-	// which reside in a subnet in a Wavelength Zone (for example an EC2 instance).
+	// that reside in a subnet in a Wavelength Zone.
 	CarrierIp *string
 
 	// The customer-owned IP address.
@@ -112,8 +97,7 @@ type AllocateAddressOutput struct {
 	// The ID of the customer-owned address pool.
 	CustomerOwnedIpv4Pool *string
 
-	// Indicates whether the Elastic IP address is for use with instances in a VPC
-	// (vpc) or instances in EC2-Classic (standard).
+	// The network ( vpc ).
 	Domain types.DomainType
 
 	// The set of Availability Zones, Local Zones, or Wavelength Zones from which
@@ -133,12 +117,22 @@ type AllocateAddressOutput struct {
 }
 
 func (c *Client) addOperationAllocateAddressMiddlewares(stack *middleware.Stack, options Options) (err error) {
+	if err := stack.Serialize.Add(&setOperationInputMiddleware{}, middleware.After); err != nil {
+		return err
+	}
 	err = stack.Serialize.Add(&awsEc2query_serializeOpAllocateAddress{}, middleware.After)
 	if err != nil {
 		return err
 	}
 	err = stack.Deserialize.Add(&awsEc2query_deserializeOpAllocateAddress{}, middleware.After)
 	if err != nil {
+		return err
+	}
+	if err := addProtocolFinalizerMiddlewares(stack, options, "AllocateAddress"); err != nil {
+		return fmt.Errorf("add protocol finalizers: %v", err)
+	}
+
+	if err = addlegacyEndpointContextSetter(stack, options); err != nil {
 		return err
 	}
 	if err = addSetLoggerMiddleware(stack, options); err != nil {
@@ -159,16 +153,13 @@ func (c *Client) addOperationAllocateAddressMiddlewares(stack *middleware.Stack,
 	if err = addRetryMiddlewares(stack, options); err != nil {
 		return err
 	}
-	if err = addHTTPSignerV4Middleware(stack, options); err != nil {
-		return err
-	}
 	if err = awsmiddleware.AddRawResponseToMetadata(stack); err != nil {
 		return err
 	}
 	if err = awsmiddleware.AddRecordResponseTiming(stack); err != nil {
 		return err
 	}
-	if err = addClientUserAgent(stack); err != nil {
+	if err = addClientUserAgent(stack, options); err != nil {
 		return err
 	}
 	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
@@ -177,7 +168,13 @@ func (c *Client) addOperationAllocateAddressMiddlewares(stack *middleware.Stack,
 	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
 		return err
 	}
+	if err = addSetLegacyContextSigningOptionsMiddleware(stack); err != nil {
+		return err
+	}
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opAllocateAddress(options.Region), middleware.Before); err != nil {
+		return err
+	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
@@ -189,6 +186,9 @@ func (c *Client) addOperationAllocateAddressMiddlewares(stack *middleware.Stack,
 	if err = addRequestResponseLogging(stack, options); err != nil {
 		return err
 	}
+	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -196,7 +196,6 @@ func newServiceMetadataMiddleware_opAllocateAddress(region string) *awsmiddlewar
 	return &awsmiddleware.RegisterServiceMetadata{
 		Region:        region,
 		ServiceID:     ServiceID,
-		SigningName:   "ec2",
 		OperationName: "AllocateAddress",
 	}
 }

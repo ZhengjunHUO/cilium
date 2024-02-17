@@ -4,8 +4,6 @@
 package threefour
 
 import (
-	"bytes"
-	"encoding/binary"
 	"fmt"
 	"net/netip"
 	"strings"
@@ -24,6 +22,7 @@ import (
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/monitor"
 	monitorAPI "github.com/cilium/cilium/pkg/monitor/api"
+	"github.com/cilium/cilium/pkg/policy/correlation"
 )
 
 // Parser is a parser for L3/L4 payloads
@@ -97,19 +96,21 @@ func (p *Parser) Decode(data []byte, decoded *pb.Flow) error {
 		return errors.ErrEmptyData
 	}
 
+	eventType := data[0]
+
 	var packetOffset int
-	var eventType uint8
-	eventType = data[0]
 	var dn *monitor.DropNotify
 	var tn *monitor.TraceNotify
 	var pvn *monitor.PolicyVerdictNotify
 	var dbg *monitor.DebugCapture
 	var eventSubType uint8
+	var authType pb.AuthType
+
 	switch eventType {
 	case monitorAPI.MessageTypeDrop:
 		packetOffset = monitor.DropNotifyLen
 		dn = &monitor.DropNotify{}
-		if err := binary.Read(bytes.NewReader(data), byteorder.Native, dn); err != nil {
+		if err := monitor.DecodeDropNotify(data, dn); err != nil {
 			return fmt.Errorf("failed to parse drop: %v", err)
 		}
 		eventSubType = dn.SubType
@@ -131,14 +132,15 @@ func (p *Parser) Decode(data []byte, decoded *pb.Flow) error {
 		packetOffset = (int)(tn.DataOffset())
 	case monitorAPI.MessageTypePolicyVerdict:
 		pvn = &monitor.PolicyVerdictNotify{}
-		if err := binary.Read(bytes.NewReader(data), byteorder.Native, pvn); err != nil {
+		if err := monitor.DecodePolicyVerdictNotify(data, pvn); err != nil {
 			return fmt.Errorf("failed to parse policy verdict: %v", err)
 		}
 		eventSubType = pvn.SubType
 		packetOffset = monitor.PolicyVerdictNotifyLen
+		authType = pb.AuthType(pvn.GetAuthType())
 	case monitorAPI.MessageTypeCapture:
 		dbg = &monitor.DebugCapture{}
-		if err := binary.Read(bytes.NewReader(data), byteorder.Native, dbg); err != nil {
+		if err := monitor.DecodeDebugCapture(data, dbg); err != nil {
 			return fmt.Errorf("failed to parse debug capture: %w", err)
 		}
 		eventSubType = dbg.SubType
@@ -183,8 +185,15 @@ func (p *Parser) Decode(data []byte, decoded *pb.Flow) error {
 	}
 
 	srcLabelID, dstLabelID := decodeSecurityIdentities(dn, tn, pvn)
-	srcEndpoint := p.epResolver.ResolveEndpoint(srcIP, srcLabelID)
-	dstEndpoint := p.epResolver.ResolveEndpoint(dstIP, dstLabelID)
+	datapathContext := common.DatapathContext{
+		SrcIP:                 srcIP,
+		SrcLabelID:            srcLabelID,
+		DstIP:                 dstIP,
+		DstLabelID:            dstLabelID,
+		TraceObservationPoint: decoded.TraceObservationPoint,
+	}
+	srcEndpoint := p.epResolver.ResolveEndpoint(srcIP, srcLabelID, datapathContext)
+	dstEndpoint := p.epResolver.ResolveEndpoint(dstIP, dstLabelID, datapathContext)
 	var sourceService, destinationService *pb.Service
 	if p.serviceGetter != nil {
 		sourceService = p.serviceGetter.GetServiceByAddr(srcIP, srcPort)
@@ -192,6 +201,7 @@ func (p *Parser) Decode(data []byte, decoded *pb.Flow) error {
 	}
 
 	decoded.Verdict = decodeVerdict(dn, tn, pvn)
+	decoded.AuthType = authType
 	decoded.DropReason = decodeDropReason(dn, pvn)
 	decoded.DropReasonDesc = pb.DropReason(decoded.DropReason)
 	decoded.Ethernet = ether
@@ -214,6 +224,10 @@ func (p *Parser) Decode(data []byte, decoded *pb.Flow) error {
 	decoded.Interface = p.decodeNetworkInterface(tn, dbg)
 	decoded.ProxyPort = decodeProxyPort(dbg, tn)
 	decoded.Summary = summary
+
+	if p.endpointGetter != nil {
+		correlation.CorrelatePolicy(p.endpointGetter, decoded)
+	}
 
 	return nil
 }
@@ -395,6 +409,9 @@ func isReply(reason uint8) bool {
 func decodeIsReply(tn *monitor.TraceNotify, pvn *monitor.PolicyVerdictNotify) *wrapperspb.BoolValue {
 	switch {
 	case tn != nil && monitor.TraceReasonIsKnown(tn.Reason):
+		if monitor.TraceReasonIsEncap(tn.Reason) || monitor.TraceReasonIsDecap(tn.Reason) {
+			return nil
+		}
 		// Reason was specified by the datapath, just reuse it.
 		return &wrapperspb.BoolValue{
 			Value: isReply(tn.Reason),

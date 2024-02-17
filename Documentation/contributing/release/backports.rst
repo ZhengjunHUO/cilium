@@ -39,6 +39,8 @@ the release of version ``v1.3.0``:
 - Major bugfixes relevant to the correct operation of Cilium
 - Debug tool improvements
 
+.. _backport_criteria_docs:
+
 Backport Criteria for documentation changes
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -163,9 +165,7 @@ tracked through the following links:
 
 Make sure that the Github labels are up-to-date, as this process will deal with
 all commits from PRs that have the ``needs-backport/X.Y`` label set (for a
-stable release version X.Y). If any PRs contain labels such as
-``backport-pending/X.Y``, ensure that the backport for that PR have been merged
-and if so, change the label to ``backport-done/X.Y``.
+stable release version X.Y).
 
 Creating the Backports Branch
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -173,8 +173,9 @@ Creating the Backports Branch
 #. Check whether there are any `outstanding backport PRs for the target branch
    <https://github.com/cilium/cilium/pulls?q=is%3Aopen+is%3Apr+label%3Akind%2Fbackports>`__.
    If there are already backports for that branch, create a thread in the
-   #launchpad channel in Slack and reach out to the author to coordinate
-   triage, review and merge of the existing PR into the target branch.
+   #launchpad channel in `Cilium Slack`_ and reach out to the author to
+   coordinate triage, review and merge of the existing PR into the target
+   branch.
 
 #. Run ``contrib/backporting/start-backport`` for the release version that
    you intend to backport PRs for. This will pull the latest repository commits
@@ -247,12 +248,12 @@ Creating the Backports Branch
    target branch.
 
 #. For backporting commits that update cilium-builder and cilium-runtime images,
-   the backporter should build new images as described in :ref:`update_cilim_builder_runtime_images`.
+   the backporter builds new images as described in :ref:`update_cilium_builder_runtime_images`.
 
 #. (Optional) If there are any commits or pull requests that are tricky or
-   time-consuming to backport, consider reaching out for help on Slack. If the
-   commit does not cherry-pick cleanly, please mention the necessary changes in
-   the pull request description in the next section.
+   time-consuming to backport, consider reaching out for help on `Cilium
+   Slack`_. If the commit does not cherry-pick cleanly, please mention the
+   necessary changes in the pull request description in the next section.
 
 Creating the Backport Pull Request
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -306,9 +307,9 @@ Via GitHub Web Interface
 
           .. code-block:: RST
 
-                Once this PR is merged, you can update the PR labels via:
+                Once this PR is merged, a GitHub action will update the labels of these PRs:
                 ```upstream-prs
-                $ for pr in AAA BBB ; do contrib/backporting/set-labels.py $pr done VVV; done
+                AAA BBB
                 ```
 
        The ``upstream-prs`` tag `is required
@@ -338,15 +339,11 @@ The comment must not contain any other characters.
 After the Backports are Merged
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-After the backport PR is merged, if the person who merged the PR didn't take
-care of it already, mark all backported PRs with ``backport-done/X.Y`` label
-and clear the ``backport-pending/X.Y`` label(s). If the backport pull request
-description was generated using the scripts above, then the full command is
-listed in the pull request description.
-
-.. code-block:: shell-session
-
-   $ GITHUB_TOKEN=xxx for pr in 12589 12568; do contrib/backporting/set-labels.py $pr done 1.8; done
+After the backport PR is merged, the GH workflow "Call Backport Label Updater"
+should take care of marking all backported PRs with the ``backport-done/X.Y``
+label and clear the ``backport-pending/X.Y`` label(s).
+Verify that the workflow succeeded by looking `here
+<https://github.com/cilium/cilium/actions/workflows/call-backport-label-updater.yaml>`_.
 
 Backporting Guide for Others
 ----------------------------
@@ -366,13 +363,3 @@ be notified and asked to approve the backport commits. Confirm that:
 
 #. All the commits from the original PR have been indeed backported.
 #. In case of conflicts, the resulting changes look good.
-
-Merger
-~~~~~~
-
-When merging a backport PR, set the labels of the backported PRs to
-``done``. Typically, backport PRs include a line on how do that. E.g.,:
-
-.. code-block:: shell-session
-
-    $ GITHUB_TOKEN=xxx for pr in 12894 12621 12973 12977 12952; do contrib/backporting/set-labels.py $pr done 1.8; done

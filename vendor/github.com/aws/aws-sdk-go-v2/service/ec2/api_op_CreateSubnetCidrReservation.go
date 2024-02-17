@@ -4,6 +4,7 @@ package ec2
 
 import (
 	"context"
+	"fmt"
 	awsmiddleware "github.com/aws/aws-sdk-go-v2/aws/middleware"
 	"github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
@@ -11,10 +12,11 @@ import (
 	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
-// Creates a subnet CIDR reservation. For information about subnet CIDR
-// reservations, see Subnet CIDR reservations
-// (https://docs.aws.amazon.com/vpc/latest/userguide/subnet-cidr-reservation.html)
-// in the Amazon Virtual Private Cloud User Guide.
+// Creates a subnet CIDR reservation. For more information, see Subnet CIDR
+// reservations (https://docs.aws.amazon.com/vpc/latest/userguide/subnet-cidr-reservation.html)
+// in the Amazon Virtual Private Cloud User Guide and Assign prefixes to network
+// interfaces (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-prefix-eni.html)
+// in the Amazon Elastic Compute Cloud User Guide.
 func (c *Client) CreateSubnetCidrReservation(ctx context.Context, params *CreateSubnetCidrReservationInput, optFns ...func(*Options)) (*CreateSubnetCidrReservationOutput, error) {
 	if params == nil {
 		params = &CreateSubnetCidrReservationInput{}
@@ -37,17 +39,11 @@ type CreateSubnetCidrReservationInput struct {
 	// This member is required.
 	Cidr *string
 
-	// The type of reservation. The following are valid values:
-	//
-	// * prefix: The Amazon
-	// EC2 Prefix Delegation feature assigns the IP addresses to network interfaces
-	// that are associated with an instance. For information about Prefix Delegation,
-	// see Prefix Delegation for Amazon EC2 network interfaces
-	// (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-prefix-delegation.html)
-	// in the Amazon Elastic Compute Cloud User Guide.
-	//
-	// * explicit: You manually assign
-	// the IP addresses to resources that reside in your subnet.
+	// The type of reservation. The reservation type determines how the reserved IP
+	// addresses are assigned to resources.
+	//   - prefix - Amazon Web Services assigns the reserved IP addresses to network
+	//   interfaces.
+	//   - explicit - You assign the reserved IP addresses to network interfaces.
 	//
 	// This member is required.
 	ReservationType types.SubnetCidrReservationType
@@ -62,8 +58,8 @@ type CreateSubnetCidrReservationInput struct {
 
 	// Checks whether you have the required permissions for the action, without
 	// actually making the request, and provides an error response. If you have the
-	// required permissions, the error response is DryRunOperation. Otherwise, it is
-	// UnauthorizedOperation.
+	// required permissions, the error response is DryRunOperation . Otherwise, it is
+	// UnauthorizedOperation .
 	DryRun *bool
 
 	// The tags to assign to the subnet CIDR reservation.
@@ -84,12 +80,22 @@ type CreateSubnetCidrReservationOutput struct {
 }
 
 func (c *Client) addOperationCreateSubnetCidrReservationMiddlewares(stack *middleware.Stack, options Options) (err error) {
+	if err := stack.Serialize.Add(&setOperationInputMiddleware{}, middleware.After); err != nil {
+		return err
+	}
 	err = stack.Serialize.Add(&awsEc2query_serializeOpCreateSubnetCidrReservation{}, middleware.After)
 	if err != nil {
 		return err
 	}
 	err = stack.Deserialize.Add(&awsEc2query_deserializeOpCreateSubnetCidrReservation{}, middleware.After)
 	if err != nil {
+		return err
+	}
+	if err := addProtocolFinalizerMiddlewares(stack, options, "CreateSubnetCidrReservation"); err != nil {
+		return fmt.Errorf("add protocol finalizers: %v", err)
+	}
+
+	if err = addlegacyEndpointContextSetter(stack, options); err != nil {
 		return err
 	}
 	if err = addSetLoggerMiddleware(stack, options); err != nil {
@@ -110,16 +116,13 @@ func (c *Client) addOperationCreateSubnetCidrReservationMiddlewares(stack *middl
 	if err = addRetryMiddlewares(stack, options); err != nil {
 		return err
 	}
-	if err = addHTTPSignerV4Middleware(stack, options); err != nil {
-		return err
-	}
 	if err = awsmiddleware.AddRawResponseToMetadata(stack); err != nil {
 		return err
 	}
 	if err = awsmiddleware.AddRecordResponseTiming(stack); err != nil {
 		return err
 	}
-	if err = addClientUserAgent(stack); err != nil {
+	if err = addClientUserAgent(stack, options); err != nil {
 		return err
 	}
 	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
@@ -128,10 +131,16 @@ func (c *Client) addOperationCreateSubnetCidrReservationMiddlewares(stack *middl
 	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
 		return err
 	}
+	if err = addSetLegacyContextSigningOptionsMiddleware(stack); err != nil {
+		return err
+	}
 	if err = addOpCreateSubnetCidrReservationValidationMiddleware(stack); err != nil {
 		return err
 	}
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opCreateSubnetCidrReservation(options.Region), middleware.Before); err != nil {
+		return err
+	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
@@ -143,6 +152,9 @@ func (c *Client) addOperationCreateSubnetCidrReservationMiddlewares(stack *middl
 	if err = addRequestResponseLogging(stack, options); err != nil {
 		return err
 	}
+	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -150,7 +162,6 @@ func newServiceMetadataMiddleware_opCreateSubnetCidrReservation(region string) *
 	return &awsmiddleware.RegisterServiceMetadata{
 		Region:        region,
 		ServiceID:     ServiceID,
-		SigningName:   "ec2",
 		OperationName: "CreateSubnetCidrReservation",
 	}
 }

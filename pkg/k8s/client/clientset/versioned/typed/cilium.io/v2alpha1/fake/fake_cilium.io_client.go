@@ -15,6 +15,26 @@ type FakeCiliumV2alpha1 struct {
 	*testing.Fake
 }
 
+func (c *FakeCiliumV2alpha1) CiliumBGPAdvertisements() v2alpha1.CiliumBGPAdvertisementInterface {
+	return &FakeCiliumBGPAdvertisements{c}
+}
+
+func (c *FakeCiliumV2alpha1) CiliumBGPClusterConfigs() v2alpha1.CiliumBGPClusterConfigInterface {
+	return &FakeCiliumBGPClusterConfigs{c}
+}
+
+func (c *FakeCiliumV2alpha1) CiliumBGPNodeConfigs() v2alpha1.CiliumBGPNodeConfigInterface {
+	return &FakeCiliumBGPNodeConfigs{c}
+}
+
+func (c *FakeCiliumV2alpha1) CiliumBGPNodeConfigOverrides() v2alpha1.CiliumBGPNodeConfigOverrideInterface {
+	return &FakeCiliumBGPNodeConfigOverrides{c}
+}
+
+func (c *FakeCiliumV2alpha1) CiliumBGPPeerConfigs() v2alpha1.CiliumBGPPeerConfigInterface {
+	return &FakeCiliumBGPPeerConfigs{c}
+}
+
 func (c *FakeCiliumV2alpha1) CiliumBGPPeeringPolicies() v2alpha1.CiliumBGPPeeringPolicyInterface {
 	return &FakeCiliumBGPPeeringPolicies{c}
 }
@@ -27,12 +47,20 @@ func (c *FakeCiliumV2alpha1) CiliumEndpointSlices() v2alpha1.CiliumEndpointSlice
 	return &FakeCiliumEndpointSlices{c}
 }
 
+func (c *FakeCiliumV2alpha1) CiliumL2AnnouncementPolicies() v2alpha1.CiliumL2AnnouncementPolicyInterface {
+	return &FakeCiliumL2AnnouncementPolicies{c}
+}
+
 func (c *FakeCiliumV2alpha1) CiliumLoadBalancerIPPools() v2alpha1.CiliumLoadBalancerIPPoolInterface {
 	return &FakeCiliumLoadBalancerIPPools{c}
 }
 
 func (c *FakeCiliumV2alpha1) CiliumNodeConfigs(namespace string) v2alpha1.CiliumNodeConfigInterface {
 	return &FakeCiliumNodeConfigs{c, namespace}
+}
+
+func (c *FakeCiliumV2alpha1) CiliumPodIPPools() v2alpha1.CiliumPodIPPoolInterface {
+	return &FakeCiliumPodIPPools{c}
 }
 
 // RESTClient returns a RESTClient that is used to communicate

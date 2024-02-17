@@ -7,23 +7,22 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/netip"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/cilium/cilium/pkg/ipam/allocator/clusterpool/cidralloc"
 
-	. "gopkg.in/check.v1"
+	. "github.com/cilium/checkmate"
 	k8sErrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	"github.com/cilium/cilium/pkg/checker"
 	"github.com/cilium/cilium/pkg/controller"
-	ipamOption "github.com/cilium/cilium/pkg/ipam/option"
 	ipamTypes "github.com/cilium/cilium/pkg/ipam/types"
 	v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
-	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/trigger"
 )
 
@@ -59,19 +58,6 @@ func mustNewTrigger(f func(), minInterval time.Duration) *trigger.Trigger {
 		panic(err)
 	}
 	return t
-}
-
-var defaultIPAMModes = []string{ipamOption.IPAMClusterPool, ipamOption.IPAMClusterPoolV2}
-
-func runWithIPAMModes(ipamModes []string, testFunc func(mode string)) {
-	oldIPAMMode := option.Config.IPAM
-	defer func() {
-		option.Config.IPAM = oldIPAMMode
-	}()
-	for _, ipamMode := range ipamModes {
-		option.Config.IPAM = ipamMode
-		testFunc(ipamMode)
-	}
 }
 
 type mockCIDRAllocator struct {
@@ -129,6 +115,14 @@ func (d *mockCIDRAllocator) InRange(cidr *net.IPNet) bool {
 	panic("d.InRange should not have been called!")
 }
 
+func (d *mockCIDRAllocator) IsClusterCIDR(cidr netip.Prefix) bool {
+	return false
+}
+
+func (d *mockCIDRAllocator) Prefix() netip.Prefix {
+	return netip.MustParsePrefix("10.0.0.0/24")
+}
+
 type k8sNodeMock struct {
 	OnUpdate       func(oldNode, newNode *v2.CiliumNode) (*v2.CiliumNode, error)
 	OnUpdateStatus func(oldNode, newNode *v2.CiliumNode) (*v2.CiliumNode, error)
@@ -165,324 +159,8 @@ func (k *k8sNodeMock) Create(n *v2.CiliumNode) (*v2.CiliumNode, error) {
 	panic("d.Create should not be called!")
 }
 
-func (s *PodCIDRSuite) TestNodesPodCIDRManager_Create(c *C) {
-	var reSyncCalls int32
-	type fields struct {
-		k8sReSyncController *controller.Manager
-		k8sReSync           *trigger.Trigger
-		canAllocateNodes    bool
-		v4ClusterCIDRs      []cidralloc.CIDRAllocator
-		v6ClusterCIDRs      []cidralloc.CIDRAllocator
-		nodes               map[string]*nodeCIDRs
-		ciliumNodesToK8s    map[string]*ciliumNodeK8sOp
-	}
-	type args struct {
-		node *v2.CiliumNode
-	}
-	tests := []struct {
-		testSetup   func() *fields
-		testPostRun func(fields *fields)
-		name        string
-		fields      *fields
-		args        args
-		want        bool
-	}{
-		{
-			name: "test-1 - should allocate a v4 addr",
-			want: true,
-			testSetup: func() *fields {
-				atomic.StoreInt32(&reSyncCalls, 0)
-				return &fields{
-					canAllocateNodes: true,
-					v4ClusterCIDRs: []cidralloc.CIDRAllocator{
-						&mockCIDRAllocator{
-							OnAllocateNext: func() (ipNet *net.IPNet, err error) {
-								return mustNewCIDRs("10.10.0.0/24")[0], nil
-							},
-							OnIsFull: func() bool {
-								return false
-							},
-						},
-					},
-					nodes:            map[string]*nodeCIDRs{},
-					ciliumNodesToK8s: map[string]*ciliumNodeK8sOp{},
-					k8sReSync: mustNewTrigger(func() {
-						atomic.AddInt32(&reSyncCalls, 1)
-						return
-					}, time.Millisecond),
-				}
-			},
-			testPostRun: func(fields *fields) {
-				time.Sleep(2 * time.Millisecond)
-				c.Assert(fields.nodes, checker.DeepEquals, map[string]*nodeCIDRs{
-					"node-1": {
-						v4PodCIDRs: mustNewCIDRs("10.10.0.0/24"),
-					},
-				})
-				c.Assert(fields.ciliumNodesToK8s, checker.DeepEquals, map[string]*ciliumNodeK8sOp{
-					"node-1": {
-						ciliumNode: &v2.CiliumNode{
-							ObjectMeta: metav1.ObjectMeta{
-								Name: "node-1",
-							},
-							Spec: v2.NodeSpec{
-								IPAM: ipamTypes.IPAMSpec{
-									PodCIDRs: []string{
-										"10.10.0.0/24",
-									},
-								},
-							},
-						},
-						op: k8sOpCreate,
-					},
-				})
-				c.Assert(atomic.LoadInt32(&reSyncCalls), Equals, int32(1))
-			},
-			args: args{
-				node: &v2.CiliumNode{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "node-1",
-					},
-				},
-			},
-		},
-		{
-			name: "test-2 - failed to allocate a v4 addr",
-			want: true,
-			testSetup: func() *fields {
-				atomic.StoreInt32(&reSyncCalls, 0)
-				return &fields{
-					canAllocateNodes: true,
-					v4ClusterCIDRs: []cidralloc.CIDRAllocator{
-						&mockCIDRAllocator{
-							OnAllocateNext: func() (ipNet *net.IPNet, err error) {
-								return nil, fmt.Errorf("Allocator full!")
-							},
-							OnIsFull: func() bool {
-								return false
-							},
-						},
-					},
-					nodes:            map[string]*nodeCIDRs{},
-					ciliumNodesToK8s: map[string]*ciliumNodeK8sOp{},
-					k8sReSync: mustNewTrigger(func() {
-						atomic.AddInt32(&reSyncCalls, 1)
-						return
-					}, time.Millisecond),
-				}
-			},
-			testPostRun: func(fields *fields) {
-				time.Sleep(2 * time.Millisecond)
-				c.Assert(fields.nodes, checker.DeepEquals, map[string]*nodeCIDRs{})
-				c.Assert(fields.ciliumNodesToK8s, checker.DeepEquals, map[string]*ciliumNodeK8sOp{
-					"node-1": {
-						ciliumNode: &v2.CiliumNode{
-							ObjectMeta: metav1.ObjectMeta{
-								Name: "node-1",
-							},
-							Status: v2.NodeStatus{
-								IPAM: ipamTypes.IPAMStatus{
-									OperatorStatus: ipamTypes.OperatorStatus{
-										Error: "Allocator full!",
-									},
-								},
-							},
-						},
-						op: k8sOpCreate,
-					},
-				})
-				c.Assert(atomic.LoadInt32(&reSyncCalls), Equals, int32(1))
-			},
-			args: args{
-				node: &v2.CiliumNode{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "node-1",
-					},
-				},
-			},
-		},
-		{
-			name: "test-3 - node is already allocated with the requested pod CIDRs",
-			want: true,
-			testSetup: func() *fields {
-				return &fields{
-					canAllocateNodes: true,
-					v4ClusterCIDRs: []cidralloc.CIDRAllocator{
-						&mockCIDRAllocator{},
-					},
-					nodes: map[string]*nodeCIDRs{
-						"node-1": {
-							v4PodCIDRs: mustNewCIDRs("10.10.0.0/24"),
-						},
-					},
-				}
-			},
-			testPostRun: func(fields *fields) {
-				c.Assert(fields.nodes, checker.DeepEquals, map[string]*nodeCIDRs{
-					"node-1": {
-						v4PodCIDRs: mustNewCIDRs("10.10.0.0/24"),
-					},
-				})
-			},
-			args: args{
-				node: &v2.CiliumNode{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "node-1",
-					},
-					Spec: v2.NodeSpec{
-						IPAM: ipamTypes.IPAMSpec{
-							PodCIDRs: []string{
-								"10.10.0.0/24",
-							},
-						},
-					},
-				},
-			},
-		},
-		{
-			name: "test-4 - node is requesting pod CIDRs, it's already locally allocated but the spec is not updated",
-			want: true,
-			testSetup: func() *fields {
-				atomic.StoreInt32(&reSyncCalls, 0)
-				return &fields{
-					canAllocateNodes: true,
-					nodes: map[string]*nodeCIDRs{
-						"node-1": {
-							v4PodCIDRs: mustNewCIDRs("10.10.0.0/24"),
-						},
-					},
-					ciliumNodesToK8s: map[string]*ciliumNodeK8sOp{},
-					k8sReSync: mustNewTrigger(func() {
-						atomic.AddInt32(&reSyncCalls, 1)
-						return
-					}, time.Millisecond),
-				}
-			},
-			testPostRun: func(fields *fields) {
-				time.Sleep(2 * time.Millisecond)
-				c.Assert(fields.nodes, checker.DeepEquals, map[string]*nodeCIDRs{
-					"node-1": {
-						v4PodCIDRs: mustNewCIDRs("10.10.0.0/24"),
-					},
-				})
-				c.Assert(fields.ciliumNodesToK8s, checker.DeepEquals, map[string]*ciliumNodeK8sOp{
-					"node-1": {
-						ciliumNode: &v2.CiliumNode{
-							ObjectMeta: metav1.ObjectMeta{
-								Name: "node-1",
-							},
-							Spec: v2.NodeSpec{
-								IPAM: ipamTypes.IPAMSpec{
-									PodCIDRs: []string{
-										"10.10.0.0/24",
-									},
-								},
-							},
-						},
-						op: k8sOpCreate,
-					},
-				})
-				c.Assert(atomic.LoadInt32(&reSyncCalls), Equals, int32(1))
-			},
-			args: args{
-				node: &v2.CiliumNode{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "node-1",
-					},
-				},
-			},
-		},
-		{
-			name: "test-5 - node requires a new CIDR but the first allocator is full",
-			want: true,
-			testSetup: func() *fields {
-				atomic.StoreInt32(&reSyncCalls, 0)
-				return &fields{
-					canAllocateNodes: true,
-					v4ClusterCIDRs: []cidralloc.CIDRAllocator{
-						&mockCIDRAllocator{
-							OnIsFull: func() bool {
-								return true
-							},
-						},
-						&mockCIDRAllocator{
-							OnAllocateNext: func() (ipNet *net.IPNet, err error) {
-								return mustNewCIDRs("10.10.0.0/24")[0], nil
-							},
-							OnIsFull: func() bool {
-								return false
-							},
-						},
-					},
-					nodes:            map[string]*nodeCIDRs{},
-					ciliumNodesToK8s: map[string]*ciliumNodeK8sOp{},
-					k8sReSync: mustNewTrigger(func() {
-						atomic.AddInt32(&reSyncCalls, 1)
-						return
-					}, time.Millisecond),
-				}
-			},
-			testPostRun: func(fields *fields) {
-				time.Sleep(2 * time.Millisecond)
-				c.Assert(fields.nodes, checker.DeepEquals, map[string]*nodeCIDRs{
-					"node-1": {
-						v4PodCIDRs: mustNewCIDRs("10.10.0.0/24"),
-					},
-				})
-				c.Assert(fields.ciliumNodesToK8s, checker.DeepEquals, map[string]*ciliumNodeK8sOp{
-					"node-1": {
-						ciliumNode: &v2.CiliumNode{
-							ObjectMeta: metav1.ObjectMeta{
-								Name: "node-1",
-							},
-							Spec: v2.NodeSpec{
-								IPAM: ipamTypes.IPAMSpec{
-									PodCIDRs: []string{
-										"10.10.0.0/24",
-									},
-								},
-							},
-						},
-						op: k8sOpCreate,
-					},
-				})
-				c.Assert(atomic.LoadInt32(&reSyncCalls), Equals, int32(1))
-			},
-			args: args{
-				node: &v2.CiliumNode{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "node-1",
-					},
-				},
-			},
-		},
-	}
-
-	runWithIPAMModes(defaultIPAMModes, func(ipamMode string) {
-		for _, tt := range tests {
-			c.Logf("Running %q (ipam: %s)", tt.name, ipamMode)
-			tt.fields = tt.testSetup()
-			n := &NodesPodCIDRManager{
-				k8sReSyncController: tt.fields.k8sReSyncController,
-				k8sReSync:           tt.fields.k8sReSync,
-				canAllocatePodCIDRs: tt.fields.canAllocateNodes,
-				v4CIDRAllocators:    tt.fields.v4ClusterCIDRs,
-				v6CIDRAllocators:    tt.fields.v6ClusterCIDRs,
-				nodes:               tt.fields.nodes,
-				ciliumNodesToK8s:    tt.fields.ciliumNodesToK8s,
-			}
-			got := n.Create(tt.args.node)
-			c.Assert(got, checker.Equals, tt.want, Commentf("Test Name: %s", tt.name))
-
-			if tt.testPostRun != nil {
-				tt.testPostRun(tt.fields)
-			}
-		}
-	})
-}
-
 func (s *PodCIDRSuite) TestNodesPodCIDRManager_Delete(c *C) {
-	var reSyncCalls int32
+	var reSyncCalls atomic.Int32
 	type fields struct {
 		k8sReSyncController *controller.Manager
 		k8sReSync           *trigger.Trigger
@@ -505,8 +183,7 @@ func (s *PodCIDRSuite) TestNodesPodCIDRManager_Delete(c *C) {
 		{
 			name: "test-1 - should release the v4 CIDR",
 			testSetup: func() *fields {
-				atomic.StoreInt32(&reSyncCalls, 0)
-				atomic.StoreInt32(&reSyncCalls, 0)
+				reSyncCalls.Store(0)
 				return &fields{
 					canAllocateNodes: true,
 					v4ClusterCIDRs: []cidralloc.CIDRAllocator{
@@ -528,8 +205,7 @@ func (s *PodCIDRSuite) TestNodesPodCIDRManager_Delete(c *C) {
 					},
 					ciliumNodesToK8s: map[string]*ciliumNodeK8sOp{},
 					k8sReSync: mustNewTrigger(func() {
-						atomic.AddInt32(&reSyncCalls, 1)
-						return
+						reSyncCalls.Add(1)
 					}, time.Millisecond),
 				}
 			},
@@ -541,7 +217,7 @@ func (s *PodCIDRSuite) TestNodesPodCIDRManager_Delete(c *C) {
 						op: k8sOpDelete,
 					},
 				})
-				c.Assert(atomic.LoadInt32(&reSyncCalls), Equals, int32(1))
+				c.Assert(reSyncCalls.Load(), Equals, int32(1))
 			},
 			args: args{
 				node: &v2.CiliumNode{
@@ -554,7 +230,7 @@ func (s *PodCIDRSuite) TestNodesPodCIDRManager_Delete(c *C) {
 		{
 			name: "test-2 - should be a no op since the node is not allocated",
 			testSetup: func() *fields {
-				atomic.StoreInt32(&reSyncCalls, 0)
+				reSyncCalls.Store(0)
 				return &fields{
 					canAllocateNodes: true,
 					ciliumNodesToK8s: map[string]*ciliumNodeK8sOp{},
@@ -562,7 +238,7 @@ func (s *PodCIDRSuite) TestNodesPodCIDRManager_Delete(c *C) {
 			},
 			testPostRun: func(fields *fields) {
 				c.Assert(fields.ciliumNodesToK8s, checker.DeepEquals, map[string]*ciliumNodeK8sOp{})
-				c.Assert(atomic.LoadInt32(&reSyncCalls), Equals, int32(0))
+				c.Assert(reSyncCalls.Load(), Equals, int32(0))
 			},
 			args: args{
 				node: &v2.CiliumNode{
@@ -574,30 +250,27 @@ func (s *PodCIDRSuite) TestNodesPodCIDRManager_Delete(c *C) {
 		},
 	}
 
-	runWithIPAMModes(defaultIPAMModes, func(ipamMode string) {
-		for _, tt := range tests {
-			c.Logf("Running %q (ipam: %s)", tt.name, ipamMode)
-			tt.fields = tt.testSetup()
-			n := &NodesPodCIDRManager{
-				k8sReSyncController: tt.fields.k8sReSyncController,
-				k8sReSync:           tt.fields.k8sReSync,
-				canAllocatePodCIDRs: tt.fields.canAllocateNodes,
-				v4CIDRAllocators:    tt.fields.v4ClusterCIDRs,
-				v6CIDRAllocators:    tt.fields.v6ClusterCIDRs,
-				nodes:               tt.fields.nodes,
-				ciliumNodesToK8s:    tt.fields.ciliumNodesToK8s,
-			}
-			n.Delete(tt.args.node)
-
-			if tt.testPostRun != nil {
-				tt.testPostRun(tt.fields)
-			}
+	for _, tt := range tests {
+		tt.fields = tt.testSetup()
+		n := &NodesPodCIDRManager{
+			k8sReSyncController: tt.fields.k8sReSyncController,
+			k8sReSync:           tt.fields.k8sReSync,
+			canAllocatePodCIDRs: tt.fields.canAllocateNodes,
+			v4CIDRAllocators:    tt.fields.v4ClusterCIDRs,
+			v6CIDRAllocators:    tt.fields.v6ClusterCIDRs,
+			nodes:               tt.fields.nodes,
+			ciliumNodesToK8s:    tt.fields.ciliumNodesToK8s,
 		}
-	})
+		n.Delete(tt.args.node)
+
+		if tt.testPostRun != nil {
+			tt.testPostRun(tt.fields)
+		}
+	}
 }
 
 func (s *PodCIDRSuite) TestNodesPodCIDRManager_Resync(c *C) {
-	var reSyncCalls int32
+	var reSyncCalls atomic.Int32
 	type fields struct {
 		k8sReSync *trigger.Trigger
 	}
@@ -612,14 +285,13 @@ func (s *PodCIDRSuite) TestNodesPodCIDRManager_Resync(c *C) {
 			testSetup: func() *fields {
 				return &fields{
 					k8sReSync: mustNewTrigger(func() {
-						atomic.AddInt32(&reSyncCalls, 1)
-						return
+						reSyncCalls.Add(1)
 					}, time.Millisecond),
 				}
 			},
 			testPostRun: func(fields *fields) {
 				time.Sleep(2 * time.Millisecond)
-				c.Assert(atomic.LoadInt32(&reSyncCalls), Equals, int32(1))
+				c.Assert(reSyncCalls.Load(), Equals, int32(1))
 			},
 		},
 	}
@@ -637,7 +309,7 @@ func (s *PodCIDRSuite) TestNodesPodCIDRManager_Resync(c *C) {
 	}
 }
 
-func (s *PodCIDRSuite) TestNodesPodCIDRManager_Update(c *C) {
+func (s *PodCIDRSuite) TestNodesPodCIDRManager_Upsert(c *C) {
 	type fields struct {
 		k8sReSyncController *controller.Manager
 		k8sReSync           *trigger.Trigger
@@ -656,11 +328,9 @@ func (s *PodCIDRSuite) TestNodesPodCIDRManager_Update(c *C) {
 		name        string
 		fields      *fields
 		args        args
-		want        bool
 	}{
 		{
 			name: "test-1 - should allocate a v4 addr",
-			want: true,
 			testSetup: func() *fields {
 				return &fields{
 					canAllocateNodes: true,
@@ -677,7 +347,6 @@ func (s *PodCIDRSuite) TestNodesPodCIDRManager_Update(c *C) {
 					nodes:            map[string]*nodeCIDRs{},
 					ciliumNodesToK8s: map[string]*ciliumNodeK8sOp{},
 					k8sReSync: mustNewTrigger(func() {
-						return
 					}, time.Second),
 				}
 			},
@@ -717,7 +386,6 @@ func (s *PodCIDRSuite) TestNodesPodCIDRManager_Update(c *C) {
 		},
 		{
 			name: "test-2 - failed to allocate a v4 addr",
-			want: true,
 			testSetup: func() *fields {
 				return &fields{
 					canAllocateNodes: true,
@@ -734,7 +402,6 @@ func (s *PodCIDRSuite) TestNodesPodCIDRManager_Update(c *C) {
 					nodes:            map[string]*nodeCIDRs{},
 					ciliumNodesToK8s: map[string]*ciliumNodeK8sOp{},
 					k8sReSync: mustNewTrigger(func() {
-						return
 					}, time.Second),
 				}
 			},
@@ -770,7 +437,6 @@ func (s *PodCIDRSuite) TestNodesPodCIDRManager_Update(c *C) {
 		},
 		{
 			name: "test-3 - node is already allocated with the requested pod CIDRs",
-			want: true,
 			testSetup: func() *fields {
 				return &fields{
 					canAllocateNodes: true,
@@ -816,7 +482,6 @@ func (s *PodCIDRSuite) TestNodesPodCIDRManager_Update(c *C) {
 		},
 		{
 			name: "test-4 - node is requesting pod CIDRs, it's already allocated locally but the spec is not updated",
-			want: true,
 			testSetup: func() *fields {
 				return &fields{
 					canAllocateNodes: true,
@@ -827,7 +492,6 @@ func (s *PodCIDRSuite) TestNodesPodCIDRManager_Update(c *C) {
 					},
 					ciliumNodesToK8s: map[string]*ciliumNodeK8sOp{},
 					k8sReSync: mustNewTrigger(func() {
-						return
 					}, time.Second),
 				}
 			},
@@ -867,27 +531,23 @@ func (s *PodCIDRSuite) TestNodesPodCIDRManager_Update(c *C) {
 		},
 	}
 
-	runWithIPAMModes(defaultIPAMModes, func(ipamMode string) {
-		for _, tt := range tests {
-			c.Logf("Running %q (ipam: %s)", tt.name, ipamMode)
-			tt.fields = tt.testSetup()
-			n := &NodesPodCIDRManager{
-				k8sReSyncController: tt.fields.k8sReSyncController,
-				k8sReSync:           tt.fields.k8sReSync,
-				canAllocatePodCIDRs: tt.fields.canAllocateNodes,
-				v4CIDRAllocators:    tt.fields.v4ClusterCIDRs,
-				v6CIDRAllocators:    tt.fields.v6ClusterCIDRs,
-				nodes:               tt.fields.nodes,
-				ciliumNodesToK8s:    tt.fields.ciliumNodesToK8s,
-			}
-			got := n.Update(tt.args.node)
-			c.Assert(got, checker.Equals, tt.want, Commentf("Test Name: %s", tt.name))
-
-			if tt.testPostRun != nil {
-				tt.testPostRun(tt.fields)
-			}
+	for _, tt := range tests {
+		tt.fields = tt.testSetup()
+		n := &NodesPodCIDRManager{
+			k8sReSyncController: tt.fields.k8sReSyncController,
+			k8sReSync:           tt.fields.k8sReSync,
+			canAllocatePodCIDRs: tt.fields.canAllocateNodes,
+			v4CIDRAllocators:    tt.fields.v4ClusterCIDRs,
+			v6CIDRAllocators:    tt.fields.v6ClusterCIDRs,
+			nodes:               tt.fields.nodes,
+			ciliumNodesToK8s:    tt.fields.ciliumNodesToK8s,
 		}
-	})
+		n.Upsert(tt.args.node)
+
+		if tt.testPostRun != nil {
+			tt.testPostRun(tt.fields)
+		}
+	}
 }
 
 func (s *PodCIDRSuite) TestNodesPodCIDRManager_allocateIPNets(c *C) {

@@ -13,6 +13,10 @@ type Datapath interface {
 	// Node must return the handler for node events
 	Node() NodeHandler
 
+	NodeIDs() NodeIDHandler
+
+	NodeNeighbors() NodeNeighbors
+
 	// LocalNodeAddressing must return the node addressing implementation
 	// of the local node
 	LocalNodeAddressing() NodeAddressing
@@ -21,11 +25,11 @@ type Datapath interface {
 	// for loading, reloading, and compiling datapath programs.
 	Loader() Loader
 
-	// WireguardAgent returns the Wireguard agent for the local node
+	// WireguardAgent returns the WireGuard agent for the local node
 	WireguardAgent() WireguardAgent
 
 	// LBMap returns the load-balancer map
 	LBMap() LBMap
 
-	Procfs() string
+	BandwidthManager() BandwidthManager
 }

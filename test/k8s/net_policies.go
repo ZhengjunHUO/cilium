@@ -63,7 +63,7 @@ var _ = SkipDescribeIf(func() bool {
 	})
 
 	AfterFailed(func() {
-		kubectl.CiliumReport("cilium service list", "cilium endpoint list")
+		kubectl.CiliumReport("cilium-dbg service list", "cilium-dbg endpoint list")
 	})
 
 	AfterAll(func() {
@@ -110,7 +110,7 @@ var _ = SkipDescribeIf(func() bool {
 
 		BeforeEach(func() {
 			kubectl.CiliumExecMustSucceed(context.TODO(),
-				ciliumPod, fmt.Sprintf("cilium config %s=%s",
+				ciliumPod, fmt.Sprintf("cilium-dbg config %s=%s",
 					helpers.PolicyEnforcement, helpers.PolicyEnforcementDefault))
 
 			err := kubectl.CiliumEndpointWaitReady()
@@ -124,32 +124,6 @@ var _ = SkipDescribeIf(func() bool {
 		AfterEach(func() {
 			cmd := fmt.Sprintf("%s delete --all cnp,ccnp,netpol -n %s", helpers.KubectlCmd, namespaceForTest)
 			_ = kubectl.Exec(cmd)
-		})
-
-		It("Invalid Policy report status correctly", func() {
-			manifest := helpers.ManifestGet(kubectl.BasePath(), "invalid_cnp.yaml")
-			cnpName := "foo"
-			kubectl.Apply(helpers.ApplyOptions{FilePath: manifest, Namespace: namespaceForTest}).ExpectSuccess("Cannot apply policy manifest")
-
-			body := func() bool {
-				cnp := kubectl.GetCNP(namespaceForTest, cnpName)
-				if cnp != nil && len(cnp.Status.Nodes) > 0 {
-					for _, node := range cnp.Status.Nodes {
-						if node.Error == "" {
-							return false
-						}
-					}
-					return true
-				}
-				return false
-			}
-
-			err := helpers.WithTimeout(
-				body,
-				fmt.Sprintf("CNP %q does not report the status correctly after timeout", cnpName),
-				&helpers.TimeoutConfig{Timeout: 100 * time.Second})
-
-			Expect(err).To(BeNil(), "CNP status for invalid policy did not update correctly")
 		})
 
 		// Tests involving the L7 proxy do not work when built with -race, see issue #13757.
@@ -199,7 +173,7 @@ var _ = SkipDescribeIf(func() bool {
 				app1PodIP = app1PodModel.Status.PodIP
 				//var app1Ep *models.Endpoint
 				var endpoints []*models.Endpoint
-				err = kubectl.ExecPodCmd(helpers.CiliumNamespace, ciliumPod, "cilium endpoint list -o json").Unmarshal(&endpoints)
+				err = kubectl.ExecPodCmd(helpers.CiliumNamespace, ciliumPod, "cilium-dbg endpoint list -o json").Unmarshal(&endpoints)
 				Expect(err).To(BeNil())
 				for _, ep := range endpoints {
 					if ep.Status.Networking.Addressing[0].IPV4 == app1PodIP {
@@ -394,6 +368,9 @@ var _ = SkipDescribeIf(func() bool {
 			By("Cleaning up after the test")
 			cmd := fmt.Sprintf("%s delete --all cnp,ccnp,netpol -n %s", helpers.KubectlCmd, testNamespace)
 			_ = kubectl.Exec(cmd)
+
+			By("Checking for pending maps")
+			kubectl.CiliumExecMustSucceedOnAll(context.Background(), "sh -c '! ls /sys/fs/bpf/tc/globals/*:pending'")
 		})
 
 		SkipContextIf(helpers.DoesNotExistNodeWithoutCilium, "validates ingress CIDR-dependent L4", func() {
@@ -410,13 +387,17 @@ var _ = SkipDescribeIf(func() bool {
 			)
 
 			BeforeAll(func() {
-				RedeployCiliumWithMerge(kubectl, ciliumFilename, daemonCfg,
-					map[string]string{
-						"routingMode":          "native",
-						"autoDirectNodeRoutes": "true",
+				opts := map[string]string{
+					"routingMode":          "native",
+					"autoDirectNodeRoutes": "true",
 
-						"hostFirewall.enabled": "true",
-					})
+					"hostFirewall.enabled": "true",
+				}
+				if helpers.RunsWithKubeProxyReplacement() {
+					// BPF IPv6 masquerade not currently supported with host firewall - GH-26074
+					opts["enableIPv6Masquerade"] = "false"
+				}
+				RedeployCiliumWithMerge(kubectl, ciliumFilename, daemonCfg, opts)
 
 				By("Retrieving backend pod and outside node IP addresses")
 				outsideNodeName, outsideIP = kubectl.GetNodeInfo(kubectl.GetFirstNodeWithoutCiliumLabel())
@@ -492,7 +473,7 @@ var _ = SkipDescribeIf(func() bool {
 			})
 
 			It("connectivity is blocked after denying ingress", func() {
-				By("Running cilium monitor in the background")
+				By("Running cilium-dbg monitor in the background")
 				ciliumPod, err := kubectl.GetCiliumPodOnNodeByName(hostNodeName)
 				Expect(ciliumPod).ToNot(BeEmpty())
 				Expect(err).ToNot(HaveOccurred())
@@ -524,7 +505,7 @@ var _ = SkipDescribeIf(func() bool {
 					"cnp-default-deny-ingress.yaml")
 				importPolicy(kubectl, testNamespace, cnpDenyIngress, "default-deny-ingress")
 
-				By("Running cilium monitor in the background")
+				By("Running cilium-dbg monitor in the background")
 				ciliumPod, err := kubectl.GetCiliumPodOnNodeByName(hostNodeName)
 				Expect(ciliumPod).ToNot(BeEmpty())
 				Expect(err).ToNot(HaveOccurred())
@@ -581,7 +562,7 @@ var _ = SkipDescribeIf(func() bool {
 				})
 
 				It("Connectivity to hostns is blocked after denying ingress", func() {
-					By("Running cilium monitor in the background")
+					By("Running cilium-dbg monitor in the background")
 					ciliumPod, err := kubectl.GetCiliumPodOnNodeByName(hostNodeName)
 					Expect(ciliumPod).ToNot(BeEmpty())
 					Expect(err).ToNot(HaveOccurred())
@@ -611,7 +592,7 @@ var _ = SkipDescribeIf(func() bool {
 					ccnpDenyHostIngress := helpers.ManifestGet(kubectl.BasePath(), "ccnp-default-deny-host-ingress.yaml")
 					importPolicy(kubectl, testNamespace, ccnpDenyHostIngress, "default-deny-host-ingress")
 
-					By("Running cilium monitor in the background")
+					By("Running cilium-dbg monitor in the background")
 					ciliumPod, err := kubectl.GetCiliumPodOnNodeByName(hostNodeName)
 					Expect(ciliumPod).ToNot(BeEmpty())
 					Expect(err).ToNot(HaveOccurred())
@@ -695,10 +676,12 @@ var _ = SkipDescribeIf(func() bool {
 				// Masquerade function should be disabled
 				// because the request will fail if the reply packet's source address is rewritten
 				// when sending a request directly to the Pod from outside the cluster.
-				By("Reconfiguring Cilium to disable ipv4 masquerade")
+				By("Reconfiguring Cilium to disable masquerade")
 				RedeployCiliumWithMerge(kubectl, ciliumFilename, daemonCfg,
 					map[string]string{
 						"enableIPv4Masquerade": "false",
+						"enableIPv6Masquerade": "false",
+						"bpf.masquerade":       "false",
 					})
 
 			})
@@ -776,6 +759,8 @@ var _ = SkipDescribeIf(func() bool {
 						map[string]string{
 							"remoteNodeIdentity":   "false",
 							"enableIPv4Masquerade": "false",
+							"enableIPv6Masquerade": "false",
+							"bpf.masquerade":       "false",
 						})
 				})
 
@@ -796,6 +781,8 @@ var _ = SkipDescribeIf(func() bool {
 						map[string]string{
 							"remoteNodeIdentity":   "true",
 							"enableIPv4Masquerade": "false",
+							"enableIPv6Masquerade": "false",
+							"bpf.masquerade":       "false",
 						})
 				})
 
@@ -1453,7 +1440,7 @@ var _ = SkipDescribeIf(helpers.DoesNotRunOn54OrLaterKernel,
 		})
 
 		AfterFailed(func() {
-			kubectl.CiliumReport("cilium service list", "cilium endpoint list")
+			kubectl.CiliumReport("cilium-dbg service list", "cilium-dbg endpoint list")
 		})
 
 		AfterEach(func() {
@@ -1496,7 +1483,7 @@ var _ = SkipDescribeIf(helpers.DoesNotRunOn54OrLaterKernel,
 					// https://github.com/cilium/cilium/issues/16197.
 					"routingMode":          "native",
 					"autoDirectNodeRoutes": "true",
-					"kubeProxyReplacement": "strict",
+					"kubeProxyReplacement": "true",
 				})
 
 				By("Deploying demo local daemonset")

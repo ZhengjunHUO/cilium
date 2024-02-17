@@ -10,7 +10,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/asaskevich/govalidator"
 	. "github.com/onsi/gomega"
 	"google.golang.org/protobuf/encoding/protojson"
 
@@ -71,7 +70,7 @@ var _ = Describe("K8sAgentHubbleTest", func() {
 				Expect(err).To(BeNil())
 
 				// Extract annotation from endpoint model of pod. It does not have the l4proto, so we insert it manually.
-				cmd := fmt.Sprintf("cilium endpoint get pod-name:%s"+
+				cmd := fmt.Sprintf("cilium-dbg endpoint get pod-name:%s"+
 					" -o jsonpath='{range [*].status.policy.proxy-statistics[*]}<{.location}/{.port}/%s/{.protocol}>{\"\\n\"}{end}'",
 					podName, strings.ToLower(l4proto))
 				err = kubectl.CiliumExecUntilMatch(ciliumPod, cmd, expectedProxyState)
@@ -139,7 +138,7 @@ var _ = Describe("K8sAgentHubbleTest", func() {
 			ExpectHubbleRelayReady(kubectl, hubbleRelayNamespace)
 			hubbleRelayIP, hubbleRelayPort, err := kubectl.GetServiceHostPort(hubbleRelayNamespace, hubbleRelayService)
 			Expect(err).Should(BeNil(), "Cannot get service %s", hubbleRelayService)
-			Expect(govalidator.IsIP(hubbleRelayIP)).Should(BeTrue(), "hubbleRelayIP is not an IP")
+			Expect(net.ParseIP(hubbleRelayIP) != nil).Should(BeTrue(), "hubbleRelayIP is not an IP")
 			hubbleRelayAddress = net.JoinHostPort(hubbleRelayIP, strconv.Itoa(hubbleRelayPort))
 
 			namespaceForTest = helpers.GenerateNamespaceForTest("")
@@ -159,7 +158,7 @@ var _ = Describe("K8sAgentHubbleTest", func() {
 		})
 
 		AfterFailed(func() {
-			kubectl.CiliumReport("cilium endpoint list")
+			kubectl.CiliumReport("cilium-dbg endpoint list")
 		})
 
 		JustAfterEach(func() {

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 SNAP_COMMON=${SNAP_COMMON:-"/var/snap/microk8s/common"}
 KUBELET_CONF="/var/snap/microk8s/current/args/kubelet"
@@ -70,7 +70,7 @@ EOF
 }
 
 function check_pod_labels {
-    static_pod_labels="$(cilium endpoint list -o json \
+    static_pod_labels="$(cilium-dbg endpoint list -o json \
         | jq '.[].status.labels."security-relevant"
               | select(any(.[]; contains("k8s"))|not)
               | select(any(.[]; contains("health"))|not)')"
@@ -90,7 +90,7 @@ apiserver start
 # Initial logging status
 log "Gathering initial state from cilium"
 log "$(cilium status)"
-log "$(cilium endpoint list)"
+log "$(cilium-dbg endpoint list)"
 
 log "Running test..."
 if ! check_pod_labels; then

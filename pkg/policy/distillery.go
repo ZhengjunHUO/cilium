@@ -55,7 +55,10 @@ func (cache *PolicyCache) lookupOrCreate(identity *identityPkg.Identity, create 
 	cache.Lock()
 	defer cache.Unlock()
 	cip, ok := cache.policies[identity.ID]
-	if create && !ok {
+	if !ok {
+		if !create {
+			return nil
+		}
 		cip = newCachedSelectorPolicy(identity, cache.repo.GetSelectorCache())
 		cache.policies[identity.ID] = cip
 	}
@@ -153,6 +156,42 @@ func (cache *PolicyCache) UpdatePolicy(identity *identityPkg.Identity) error {
 	return err
 }
 
+// GetAuthTypes returns the AuthTypes required by the policy between the localID and remoteID, if
+// any, otherwise returns nil.
+func (cache *PolicyCache) GetAuthTypes(localID, remoteID identityPkg.NumericIdentity) AuthTypes {
+	cache.Lock()
+	cip, ok := cache.policies[localID]
+	cache.Unlock()
+	if !ok {
+		return nil // No policy for localID (no endpoint with localID)
+	}
+
+	// SelectorPolicy is const after it has been created, so no locking needed to access it
+	selPolicy := cip.getPolicy()
+
+	var resTypes AuthTypes
+	for cs, authTypes := range selPolicy.L4Policy.AuthMap {
+		missing := false
+		for authType := range authTypes {
+			if _, exists := resTypes[authType]; !exists {
+				missing = true
+				break
+			}
+		}
+		// Only check if 'cs' selects 'remoteID' if one of the authTypes is still missing
+		// from the result
+		if missing && cs.Selects(remoteID) {
+			if resTypes == nil {
+				resTypes = make(AuthTypes, 1)
+			}
+			for authType := range authTypes {
+				resTypes[authType] = struct{}{}
+			}
+		}
+	}
+	return resTypes
+}
+
 // cachedSelectorPolicy is a wrapper around a selectorPolicy (stored in the
 // 'policy' field). It is always nested directly in the owning policyCache,
 // and is protected against concurrent writes via the policyCache mutex.
@@ -167,7 +206,7 @@ func newCachedSelectorPolicy(identity *identityPkg.Identity, selectorCache *Sele
 	cip := &cachedSelectorPolicy{
 		identity: identity,
 	}
-	cip.setPolicy(newSelectorPolicy(0, selectorCache))
+	cip.setPolicy(newSelectorPolicy(selectorCache))
 	return cip
 }
 

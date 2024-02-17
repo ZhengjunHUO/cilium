@@ -4,19 +4,19 @@ package ec2
 
 import (
 	"context"
+	"fmt"
 	awsmiddleware "github.com/aws/aws-sdk-go-v2/aws/middleware"
 	"github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/smithy-go/middleware"
 	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
-// Disables EBS encryption by default for your account in the current Region. After
-// you disable encryption by default, you can still create encrypted volumes by
-// enabling encryption when you create each volume. Disabling encryption by default
-// does not change the encryption status of your existing volumes. For more
-// information, see Amazon EBS encryption
-// (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/EBSEncryption.html) in the
-// Amazon Elastic Compute Cloud User Guide.
+// Disables EBS encryption by default for your account in the current Region.
+// After you disable encryption by default, you can still create encrypted volumes
+// by enabling encryption when you create each volume. Disabling encryption by
+// default does not change the encryption status of your existing volumes. For more
+// information, see Amazon EBS encryption (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/EBSEncryption.html)
+// in the Amazon Elastic Compute Cloud User Guide.
 func (c *Client) DisableEbsEncryptionByDefault(ctx context.Context, params *DisableEbsEncryptionByDefaultInput, optFns ...func(*Options)) (*DisableEbsEncryptionByDefaultOutput, error) {
 	if params == nil {
 		params = &DisableEbsEncryptionByDefaultInput{}
@@ -36,8 +36,8 @@ type DisableEbsEncryptionByDefaultInput struct {
 
 	// Checks whether you have the required permissions for the action, without
 	// actually making the request, and provides an error response. If you have the
-	// required permissions, the error response is DryRunOperation. Otherwise, it is
-	// UnauthorizedOperation.
+	// required permissions, the error response is DryRunOperation . Otherwise, it is
+	// UnauthorizedOperation .
 	DryRun *bool
 
 	noSmithyDocumentSerde
@@ -55,12 +55,22 @@ type DisableEbsEncryptionByDefaultOutput struct {
 }
 
 func (c *Client) addOperationDisableEbsEncryptionByDefaultMiddlewares(stack *middleware.Stack, options Options) (err error) {
+	if err := stack.Serialize.Add(&setOperationInputMiddleware{}, middleware.After); err != nil {
+		return err
+	}
 	err = stack.Serialize.Add(&awsEc2query_serializeOpDisableEbsEncryptionByDefault{}, middleware.After)
 	if err != nil {
 		return err
 	}
 	err = stack.Deserialize.Add(&awsEc2query_deserializeOpDisableEbsEncryptionByDefault{}, middleware.After)
 	if err != nil {
+		return err
+	}
+	if err := addProtocolFinalizerMiddlewares(stack, options, "DisableEbsEncryptionByDefault"); err != nil {
+		return fmt.Errorf("add protocol finalizers: %v", err)
+	}
+
+	if err = addlegacyEndpointContextSetter(stack, options); err != nil {
 		return err
 	}
 	if err = addSetLoggerMiddleware(stack, options); err != nil {
@@ -81,16 +91,13 @@ func (c *Client) addOperationDisableEbsEncryptionByDefaultMiddlewares(stack *mid
 	if err = addRetryMiddlewares(stack, options); err != nil {
 		return err
 	}
-	if err = addHTTPSignerV4Middleware(stack, options); err != nil {
-		return err
-	}
 	if err = awsmiddleware.AddRawResponseToMetadata(stack); err != nil {
 		return err
 	}
 	if err = awsmiddleware.AddRecordResponseTiming(stack); err != nil {
 		return err
 	}
-	if err = addClientUserAgent(stack); err != nil {
+	if err = addClientUserAgent(stack, options); err != nil {
 		return err
 	}
 	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
@@ -99,7 +106,13 @@ func (c *Client) addOperationDisableEbsEncryptionByDefaultMiddlewares(stack *mid
 	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
 		return err
 	}
+	if err = addSetLegacyContextSigningOptionsMiddleware(stack); err != nil {
+		return err
+	}
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opDisableEbsEncryptionByDefault(options.Region), middleware.Before); err != nil {
+		return err
+	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
@@ -111,6 +124,9 @@ func (c *Client) addOperationDisableEbsEncryptionByDefaultMiddlewares(stack *mid
 	if err = addRequestResponseLogging(stack, options); err != nil {
 		return err
 	}
+	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -118,7 +134,6 @@ func newServiceMetadataMiddleware_opDisableEbsEncryptionByDefault(region string)
 	return &awsmiddleware.RegisterServiceMetadata{
 		Region:        region,
 		ServiceID:     ServiceID,
-		SigningName:   "ec2",
 		OperationName: "DisableEbsEncryptionByDefault",
 	}
 }

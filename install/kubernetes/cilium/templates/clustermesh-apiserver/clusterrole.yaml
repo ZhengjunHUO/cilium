@@ -5,7 +5,12 @@ metadata:
   name: clustermesh-apiserver
   labels:
     app.kubernetes.io/part-of: cilium
+  {{- with .Values.clustermesh.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 rules:
+{{- if .Values.externalWorkloads.enabled }}
 - apiGroups:
   - cilium.io
   resources:
@@ -29,11 +34,14 @@ rules:
   - ciliumendpoints/status
   verbs:
   - patch
+{{- end }}
 - apiGroups:
   - cilium.io
   resources:
   - ciliumidentities
+{{- if .Values.externalWorkloads.enabled }}
   - ciliumexternalworkloads
+{{- end }}
   - ciliumendpoints
   - ciliumnodes
   verbs:

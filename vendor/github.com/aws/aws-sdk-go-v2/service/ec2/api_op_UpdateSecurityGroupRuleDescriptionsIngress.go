@@ -4,6 +4,7 @@ package ec2
 
 import (
 	"context"
+	"fmt"
 	awsmiddleware "github.com/aws/aws-sdk-go-v2/aws/middleware"
 	"github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
@@ -34,8 +35,8 @@ type UpdateSecurityGroupRuleDescriptionsIngressInput struct {
 
 	// Checks whether you have the required permissions for the action, without
 	// actually making the request, and provides an error response. If you have the
-	// required permissions, the error response is DryRunOperation. Otherwise, it is
-	// UnauthorizedOperation.
+	// required permissions, the error response is DryRunOperation . Otherwise, it is
+	// UnauthorizedOperation .
 	DryRun *bool
 
 	// The ID of the security group. You must specify either the security group ID or
@@ -43,17 +44,17 @@ type UpdateSecurityGroupRuleDescriptionsIngressInput struct {
 	// you must specify the security group ID.
 	GroupId *string
 
-	// [EC2-Classic, default VPC] The name of the security group. You must specify
-	// either the security group ID or the security group name in the request. For
-	// security groups in a nondefault VPC, you must specify the security group ID.
+	// [Default VPC] The name of the security group. You must specify either the
+	// security group ID or the security group name. For security groups in a
+	// nondefault VPC, you must specify the security group ID.
 	GroupName *string
 
 	// The IP permissions for the security group rule. You must specify either IP
 	// permissions or a description.
 	IpPermissions []types.IpPermission
 
-	// [VPC only] The description for the ingress security group rules. You must
-	// specify either a description or IP permissions.
+	// The description for the ingress security group rules. You must specify either a
+	// description or IP permissions.
 	SecurityGroupRuleDescriptions []types.SecurityGroupRuleDescription
 
 	noSmithyDocumentSerde
@@ -71,12 +72,22 @@ type UpdateSecurityGroupRuleDescriptionsIngressOutput struct {
 }
 
 func (c *Client) addOperationUpdateSecurityGroupRuleDescriptionsIngressMiddlewares(stack *middleware.Stack, options Options) (err error) {
+	if err := stack.Serialize.Add(&setOperationInputMiddleware{}, middleware.After); err != nil {
+		return err
+	}
 	err = stack.Serialize.Add(&awsEc2query_serializeOpUpdateSecurityGroupRuleDescriptionsIngress{}, middleware.After)
 	if err != nil {
 		return err
 	}
 	err = stack.Deserialize.Add(&awsEc2query_deserializeOpUpdateSecurityGroupRuleDescriptionsIngress{}, middleware.After)
 	if err != nil {
+		return err
+	}
+	if err := addProtocolFinalizerMiddlewares(stack, options, "UpdateSecurityGroupRuleDescriptionsIngress"); err != nil {
+		return fmt.Errorf("add protocol finalizers: %v", err)
+	}
+
+	if err = addlegacyEndpointContextSetter(stack, options); err != nil {
 		return err
 	}
 	if err = addSetLoggerMiddleware(stack, options); err != nil {
@@ -97,16 +108,13 @@ func (c *Client) addOperationUpdateSecurityGroupRuleDescriptionsIngressMiddlewar
 	if err = addRetryMiddlewares(stack, options); err != nil {
 		return err
 	}
-	if err = addHTTPSignerV4Middleware(stack, options); err != nil {
-		return err
-	}
 	if err = awsmiddleware.AddRawResponseToMetadata(stack); err != nil {
 		return err
 	}
 	if err = awsmiddleware.AddRecordResponseTiming(stack); err != nil {
 		return err
 	}
-	if err = addClientUserAgent(stack); err != nil {
+	if err = addClientUserAgent(stack, options); err != nil {
 		return err
 	}
 	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
@@ -115,7 +123,13 @@ func (c *Client) addOperationUpdateSecurityGroupRuleDescriptionsIngressMiddlewar
 	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
 		return err
 	}
+	if err = addSetLegacyContextSigningOptionsMiddleware(stack); err != nil {
+		return err
+	}
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opUpdateSecurityGroupRuleDescriptionsIngress(options.Region), middleware.Before); err != nil {
+		return err
+	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
@@ -127,6 +141,9 @@ func (c *Client) addOperationUpdateSecurityGroupRuleDescriptionsIngressMiddlewar
 	if err = addRequestResponseLogging(stack, options); err != nil {
 		return err
 	}
+	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -134,7 +151,6 @@ func newServiceMetadataMiddleware_opUpdateSecurityGroupRuleDescriptionsIngress(r
 	return &awsmiddleware.RegisterServiceMetadata{
 		Region:        region,
 		ServiceID:     ServiceID,
-		SigningName:   "ec2",
 		OperationName: "UpdateSecurityGroupRuleDescriptionsIngress",
 	}
 }

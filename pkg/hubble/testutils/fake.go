@@ -67,6 +67,7 @@ type FakeObserverClient struct {
 	OnGetAgentEvents func(ctx context.Context, in *observerpb.GetAgentEventsRequest, opts ...grpc.CallOption) (observerpb.Observer_GetAgentEventsClient, error)
 	OnGetDebugEvents func(ctx context.Context, in *observerpb.GetDebugEventsRequest, opts ...grpc.CallOption) (observerpb.Observer_GetDebugEventsClient, error)
 	OnGetNodes       func(ctx context.Context, in *observerpb.GetNodesRequest, opts ...grpc.CallOption) (*observerpb.GetNodesResponse, error)
+	OnGetNamespaces  func(ctx context.Context, in *observerpb.GetNamespacesRequest, opts ...grpc.CallOption) (*observerpb.GetNamespacesResponse, error)
 	OnServerStatus   func(ctx context.Context, in *observerpb.ServerStatusRequest, opts ...grpc.CallOption) (*observerpb.ServerStatusResponse, error)
 }
 
@@ -100,6 +101,14 @@ func (c *FakeObserverClient) GetNodes(ctx context.Context, in *observerpb.GetNod
 		return c.OnGetNodes(ctx, in, opts...)
 	}
 	panic("OnGetNodes not set")
+}
+
+// GetNamespaces implements observerpb.ObserverClient.GetNamespaces.
+func (c *FakeObserverClient) GetNamespaces(ctx context.Context, in *observerpb.GetNamespacesRequest, opts ...grpc.CallOption) (*observerpb.GetNamespacesResponse, error) {
+	if c.OnGetNamespaces != nil {
+		return c.OnGetNamespaces(ctx, in, opts...)
+	}
+	panic("OnGetNamespaces not set")
 }
 
 // ServerStatus implements observerpb.ObserverClient.ServerStatus.
@@ -192,28 +201,18 @@ func (b FakePeerClientBuilder) Client(target string) (peerTypes.Client, error) {
 	panic("OnClient not set")
 }
 
-// FakePeerListReporter is used for unit tests and implements the
+// FakePeerLister is used for unit tests and implements the
 // relay/observer.PeerListReporter interface.
-type FakePeerListReporter struct {
-	OnList          func() []poolTypes.Peer
-	OnReportOffline func(name string)
+type FakePeerLister struct {
+	OnList func() []poolTypes.Peer
 }
 
 // List implements relay/observer.PeerListReporter.List.
-func (r *FakePeerListReporter) List() []poolTypes.Peer {
+func (r *FakePeerLister) List() []poolTypes.Peer {
 	if r.OnList != nil {
 		return r.OnList()
 	}
 	panic("OnList not set")
-}
-
-// ReportOffline implements relay/observer.PeerListReporter.ReportOffline.
-func (r *FakePeerListReporter) ReportOffline(name string) {
-	if r.OnReportOffline != nil {
-		r.OnReportOffline(name)
-		return
-	}
-	panic("OnReportOffline not set")
 }
 
 // FakeClientConn is used for unit tests and implements the

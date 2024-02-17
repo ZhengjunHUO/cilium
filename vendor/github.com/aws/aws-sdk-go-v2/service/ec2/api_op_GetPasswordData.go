@@ -19,18 +19,16 @@ import (
 // Retrieves the encrypted administrator password for a running Windows instance.
 // The Windows password is generated at boot by the EC2Config service or EC2Launch
 // scripts (Windows Server 2016 and later). This usually only happens the first
-// time an instance is launched. For more information, see EC2Config
-// (https://docs.aws.amazon.com/AWSEC2/latest/WindowsGuide/UsingConfig_WinAMI.html)
-// and EC2Launch
-// (https://docs.aws.amazon.com/AWSEC2/latest/WindowsGuide/ec2launch.html) in the
-// Amazon EC2 User Guide. For the EC2Config service, the password is not generated
-// for rebundled AMIs unless Ec2SetPassword is enabled before bundling. The
-// password is encrypted using the key pair that you specified when you launched
-// the instance. You must provide the corresponding key pair file. When you launch
-// an instance, password generation and encryption may take a few minutes. If you
-// try to retrieve the password before it's available, the output returns an empty
-// string. We recommend that you wait up to 15 minutes after launching an instance
-// before trying to retrieve the generated password.
+// time an instance is launched. For more information, see EC2Config (https://docs.aws.amazon.com/AWSEC2/latest/WindowsGuide/UsingConfig_WinAMI.html)
+// and EC2Launch (https://docs.aws.amazon.com/AWSEC2/latest/WindowsGuide/ec2launch.html)
+// in the Amazon EC2 User Guide. For the EC2Config service, the password is not
+// generated for rebundled AMIs unless Ec2SetPassword is enabled before bundling.
+// The password is encrypted using the key pair that you specified when you
+// launched the instance. You must provide the corresponding key pair file. When
+// you launch an instance, password generation and encryption may take a few
+// minutes. If you try to retrieve the password before it's available, the output
+// returns an empty string. We recommend that you wait up to 15 minutes after
+// launching an instance before trying to retrieve the generated password.
 func (c *Client) GetPasswordData(ctx context.Context, params *GetPasswordDataInput, optFns ...func(*Options)) (*GetPasswordDataOutput, error) {
 	if params == nil {
 		params = &GetPasswordDataInput{}
@@ -55,8 +53,8 @@ type GetPasswordDataInput struct {
 
 	// Checks whether you have the required permissions for the action, without
 	// actually making the request, and provides an error response. If you have the
-	// required permissions, the error response is DryRunOperation. Otherwise, it is
-	// UnauthorizedOperation.
+	// required permissions, the error response is DryRunOperation . Otherwise, it is
+	// UnauthorizedOperation .
 	DryRun *bool
 
 	noSmithyDocumentSerde
@@ -81,12 +79,22 @@ type GetPasswordDataOutput struct {
 }
 
 func (c *Client) addOperationGetPasswordDataMiddlewares(stack *middleware.Stack, options Options) (err error) {
+	if err := stack.Serialize.Add(&setOperationInputMiddleware{}, middleware.After); err != nil {
+		return err
+	}
 	err = stack.Serialize.Add(&awsEc2query_serializeOpGetPasswordData{}, middleware.After)
 	if err != nil {
 		return err
 	}
 	err = stack.Deserialize.Add(&awsEc2query_deserializeOpGetPasswordData{}, middleware.After)
 	if err != nil {
+		return err
+	}
+	if err := addProtocolFinalizerMiddlewares(stack, options, "GetPasswordData"); err != nil {
+		return fmt.Errorf("add protocol finalizers: %v", err)
+	}
+
+	if err = addlegacyEndpointContextSetter(stack, options); err != nil {
 		return err
 	}
 	if err = addSetLoggerMiddleware(stack, options); err != nil {
@@ -107,16 +115,13 @@ func (c *Client) addOperationGetPasswordDataMiddlewares(stack *middleware.Stack,
 	if err = addRetryMiddlewares(stack, options); err != nil {
 		return err
 	}
-	if err = addHTTPSignerV4Middleware(stack, options); err != nil {
-		return err
-	}
 	if err = awsmiddleware.AddRawResponseToMetadata(stack); err != nil {
 		return err
 	}
 	if err = awsmiddleware.AddRecordResponseTiming(stack); err != nil {
 		return err
 	}
-	if err = addClientUserAgent(stack); err != nil {
+	if err = addClientUserAgent(stack, options); err != nil {
 		return err
 	}
 	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
@@ -125,10 +130,16 @@ func (c *Client) addOperationGetPasswordDataMiddlewares(stack *middleware.Stack,
 	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
 		return err
 	}
+	if err = addSetLegacyContextSigningOptionsMiddleware(stack); err != nil {
+		return err
+	}
 	if err = addOpGetPasswordDataValidationMiddleware(stack); err != nil {
 		return err
 	}
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opGetPasswordData(options.Region), middleware.Before); err != nil {
+		return err
+	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
@@ -138,6 +149,9 @@ func (c *Client) addOperationGetPasswordDataMiddlewares(stack *middleware.Stack,
 		return err
 	}
 	if err = addRequestResponseLogging(stack, options); err != nil {
+		return err
+	}
+	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
 		return err
 	}
 	return nil
@@ -165,9 +179,10 @@ type PasswordDataAvailableWaiterOptions struct {
 	// that MinDelay must resolve to a value lesser than or equal to the MaxDelay.
 	MinDelay time.Duration
 
-	// MaxDelay is the maximum amount of time to delay between retries. If unset or set
-	// to zero, PasswordDataAvailableWaiter will use default max delay of 120 seconds.
-	// Note that MaxDelay must resolve to value greater than or equal to the MinDelay.
+	// MaxDelay is the maximum amount of time to delay between retries. If unset or
+	// set to zero, PasswordDataAvailableWaiter will use default max delay of 120
+	// seconds. Note that MaxDelay must resolve to value greater than or equal to the
+	// MinDelay.
 	MaxDelay time.Duration
 
 	// LogWaitAttempts is used to enable logging for waiter retry attempts
@@ -320,7 +335,6 @@ func newServiceMetadataMiddleware_opGetPasswordData(region string) *awsmiddlewar
 	return &awsmiddleware.RegisterServiceMetadata{
 		Region:        region,
 		ServiceID:     ServiceID,
-		SigningName:   "ec2",
 		OperationName: "GetPasswordData",
 	}
 }

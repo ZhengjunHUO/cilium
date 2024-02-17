@@ -4,6 +4,7 @@ package ec2
 
 import (
 	"context"
+	"fmt"
 	awsmiddleware "github.com/aws/aws-sdk-go-v2/aws/middleware"
 	"github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
@@ -15,18 +16,17 @@ import (
 // role, or root user. For example, you can view the resource types that are
 // enabled for longer IDs. This request only returns information about resource
 // types whose ID formats can be modified; it does not return information about
-// other resource types. For more information, see Resource IDs
-// (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/resource-ids.html) in the
-// Amazon Elastic Compute Cloud User Guide. The following resource types support
-// longer IDs: bundle | conversion-task | customer-gateway | dhcp-options |
-// elastic-ip-allocation | elastic-ip-association | export-task | flow-log | image
-// | import-task | instance | internet-gateway | network-acl |
+// other resource types. For more information, see Resource IDs (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/resource-ids.html)
+// in the Amazon Elastic Compute Cloud User Guide. The following resource types
+// support longer IDs: bundle | conversion-task | customer-gateway | dhcp-options
+// | elastic-ip-allocation | elastic-ip-association | export-task | flow-log |
+// image | import-task | instance | internet-gateway | network-acl |
 // network-acl-association | network-interface | network-interface-attachment |
 // prefix-list | reservation | route-table | route-table-association |
 // security-group | snapshot | subnet | subnet-cidr-block-association | volume |
 // vpc | vpc-cidr-block-association | vpc-endpoint | vpc-peering-connection |
-// vpn-connection | vpn-gateway. These settings apply to the principal specified in
-// the request. They do not apply to the principal that makes the request.
+// vpn-connection | vpn-gateway . These settings apply to the principal specified
+// in the request. They do not apply to the principal that makes the request.
 func (c *Client) DescribeIdentityIdFormat(ctx context.Context, params *DescribeIdentityIdFormatInput, optFns ...func(*Options)) (*DescribeIdentityIdFormatOutput, error) {
 	if params == nil {
 		params = &DescribeIdentityIdFormatInput{}
@@ -74,12 +74,22 @@ type DescribeIdentityIdFormatOutput struct {
 }
 
 func (c *Client) addOperationDescribeIdentityIdFormatMiddlewares(stack *middleware.Stack, options Options) (err error) {
+	if err := stack.Serialize.Add(&setOperationInputMiddleware{}, middleware.After); err != nil {
+		return err
+	}
 	err = stack.Serialize.Add(&awsEc2query_serializeOpDescribeIdentityIdFormat{}, middleware.After)
 	if err != nil {
 		return err
 	}
 	err = stack.Deserialize.Add(&awsEc2query_deserializeOpDescribeIdentityIdFormat{}, middleware.After)
 	if err != nil {
+		return err
+	}
+	if err := addProtocolFinalizerMiddlewares(stack, options, "DescribeIdentityIdFormat"); err != nil {
+		return fmt.Errorf("add protocol finalizers: %v", err)
+	}
+
+	if err = addlegacyEndpointContextSetter(stack, options); err != nil {
 		return err
 	}
 	if err = addSetLoggerMiddleware(stack, options); err != nil {
@@ -100,16 +110,13 @@ func (c *Client) addOperationDescribeIdentityIdFormatMiddlewares(stack *middlewa
 	if err = addRetryMiddlewares(stack, options); err != nil {
 		return err
 	}
-	if err = addHTTPSignerV4Middleware(stack, options); err != nil {
-		return err
-	}
 	if err = awsmiddleware.AddRawResponseToMetadata(stack); err != nil {
 		return err
 	}
 	if err = awsmiddleware.AddRecordResponseTiming(stack); err != nil {
 		return err
 	}
-	if err = addClientUserAgent(stack); err != nil {
+	if err = addClientUserAgent(stack, options); err != nil {
 		return err
 	}
 	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
@@ -118,10 +125,16 @@ func (c *Client) addOperationDescribeIdentityIdFormatMiddlewares(stack *middlewa
 	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
 		return err
 	}
+	if err = addSetLegacyContextSigningOptionsMiddleware(stack); err != nil {
+		return err
+	}
 	if err = addOpDescribeIdentityIdFormatValidationMiddleware(stack); err != nil {
 		return err
 	}
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opDescribeIdentityIdFormat(options.Region), middleware.Before); err != nil {
+		return err
+	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
@@ -133,6 +146,9 @@ func (c *Client) addOperationDescribeIdentityIdFormatMiddlewares(stack *middlewa
 	if err = addRequestResponseLogging(stack, options); err != nil {
 		return err
 	}
+	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -140,7 +156,6 @@ func newServiceMetadataMiddleware_opDescribeIdentityIdFormat(region string) *aws
 	return &awsmiddleware.RegisterServiceMetadata{
 		Region:        region,
 		ServiceID:     ServiceID,
-		SigningName:   "ec2",
 		OperationName: "DescribeIdentityIdFormat",
 	}
 }

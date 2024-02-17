@@ -4,154 +4,263 @@
 package auth
 
 import (
+	"context"
+	"errors"
 	"net"
 	"testing"
+	"time"
 
+	"github.com/cilium/ebpf"
+	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
+	"golang.org/x/exp/maps"
 
-	"github.com/cilium/cilium/api/v1/flow"
+	"github.com/cilium/cilium/api/v1/models"
 	"github.com/cilium/cilium/pkg/auth/certs"
-	"github.com/cilium/cilium/pkg/monitor"
-	monitorAPI "github.com/cilium/cilium/pkg/monitor/api"
+	"github.com/cilium/cilium/pkg/identity"
 	"github.com/cilium/cilium/pkg/policy"
 )
 
 func Test_newAuthManager_clashingAuthHandlers(t *testing.T) {
 	authHandlers := []authHandler{
-		&nullAuthHandler{},
-		&nullAuthHandler{},
+		&alwaysFailAuthHandler{},
+		&alwaysFailAuthHandler{},
 	}
 
-	am, err := newAuthManager(authHandlers, nil, nil)
-	assert.ErrorContains(t, err, "multiple handlers for auth type: null")
+	am, err := newAuthManager(logrus.New(), authHandlers, nil, nil, time.Second)
+	assert.ErrorContains(t, err, "multiple handlers for auth type: test-always-fail")
 	assert.Nil(t, am)
 }
 
 func Test_newAuthManager(t *testing.T) {
 	authHandlers := []authHandler{
-		&nullAuthHandler{},
+		newAlwaysPassAuthHandler(logrus.New()),
 		&fakeAuthHandler{},
 	}
 
-	am, err := newAuthManager(authHandlers, nil, nil)
+	am, err := newAuthManager(logrus.New(), authHandlers, nil, nil, time.Second)
 	assert.NoError(t, err)
 	assert.NotNil(t, am)
 
 	assert.Len(t, am.authHandlers, 2)
 }
 
-func Test_authManager_authRequired(t *testing.T) {
-	type args struct {
-		dn *monitor.DropNotify
-		ci *monitor.ConnectionInfo
-	}
+func Test_authManager_authenticate(t *testing.T) {
 	tests := []struct {
 		name              string
-		args              args
+		args              authKey
 		wantErr           assert.ErrorAssertionFunc
 		wantAuthenticated bool
+		wantEntries       int
 	}{
 		{
 			name: "missing handler for auth type",
-			args: args{
-				dn: testDropNotify(0, true),
-				ci: testConnInfo("10.244.1.1", "10.244.2.1"),
+			args: authKey{
+				localIdentity:  1000,
+				remoteIdentity: 2000,
+				remoteNodeID:   2,
+				authType:       1,
 			},
-			wantErr: assertErrorString("unknown requested auth type: none"),
+			wantErr:     assertErrorString("unknown requested auth type: spire"),
+			wantEntries: 0,
 		},
 		{
-			name: "missing node IP for source IP in case of ingress policy",
-			args: args{
-				dn: testDropNotify(1, true),
-				ci: testConnInfo("10.244.1.2", "10.244.2.1"),
+			name: "missing node IP for node ID",
+			args: authKey{
+				localIdentity:  1000,
+				remoteIdentity: 2000,
+				remoteNodeID:   1,
+				authType:       2,
 			},
-			wantErr: assertErrorString("failed to gather auth request information: failed to get host IP of connection source IP 10.244.1.2"),
-		},
-		{
-			name: "missing node IP for destination IP in case of egress policy",
-			args: args{
-				dn: testDropNotify(1, false),
-				ci: testConnInfo("10.244.1.1", "10.244.2.2"),
-			},
-			wantErr: assertErrorString("failed to gather auth request information: failed to get host IP of connection destination IP 10.244.2.2"),
+			wantErr:     assertErrorString("remote node IP not available for node ID 1"),
+			wantEntries: 0,
 		},
 		{
 			name: "successful auth",
-			args: args{
-				dn: testDropNotify(1, true),
-				ci: testConnInfo("10.244.1.1", "10.244.2.1"),
+			args: authKey{
+				localIdentity:  1000,
+				remoteIdentity: 2000,
+				remoteNodeID:   2,
+				authType:       100,
 			},
-			wantErr:           assert.NoError,
-			wantAuthenticated: true,
-		},
-		{
-			name: "successful auth with lookup of cilium host IP v4 with /32 when getting host IP",
-			args: args{
-				dn: testDropNotify(1, true),
-				ci: testConnInfo("10.244.1.170", "10.244.2.1"),
-			},
-			wantErr:           assert.NoError,
-			wantAuthenticated: true,
-		},
-		{
-			name: "successful auth with lookup of cilium host IP v6 with /128 when getting host IP",
-			args: args{
-				dn: testDropNotify(1, true),
-				ci: testConnInfo("ff00::101", "10.244.2.1"),
-			},
-			wantErr:           assert.NoError,
-			wantAuthenticated: true,
+			wantErr:     assert.NoError,
+			wantEntries: 1,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			dpAuth := &fakeDatapathAuthenticator{}
+			authMap := &fakeAuthMap{
+				entries: map[authKey]authInfo{},
+			}
 			am, err := newAuthManager(
-				[]authHandler{&nullAuthHandler{}},
-				dpAuth,
-				newFakeIPCache(map[string]string{
-					"10.244.1.1":      "172.18.0.2",
-					"10.244.2.1":      "172.18.0.3",
-					"10.244.1.170/32": "172.18.0.3",
-					"ff00::101/128":   "172.18.0.3",
+				logrus.New(),
+				[]authHandler{&alwaysFailAuthHandler{}, newAlwaysPassAuthHandler(logrus.New())},
+				authMap,
+				newFakeNodeIDHandler(map[uint16]string{
+					2: "172.18.0.2",
+					3: "172.18.0.3",
 				}),
+				time.Second,
 			)
+
 			assert.NoError(t, err)
 
-			err = am.authRequired(tt.args.dn, tt.args.ci)
+			err = am.authenticate(tt.args)
 			tt.wantErr(t, err)
 
-			assert.Equal(t, tt.wantAuthenticated, dpAuth.authenticated)
+			assert.Len(t, authMap.entries, tt.wantEntries)
 		})
 	}
 }
 
-// Fake IPCache
-type fakeIPCache struct {
-	ipHostMappings map[string]net.IP
-}
+func Test_authManager_handleAuthRequest(t *testing.T) {
+	authHandlers := []authHandler{newAlwaysPassAuthHandler(logrus.New())}
 
-func newFakeIPCache(mappings map[string]string) *fakeIPCache {
-	m := map[string]net.IP{}
-	for ip, hostIP := range mappings {
-		m[ip] = net.ParseIP(hostIP)
+	am, err := newAuthManager(logrus.New(), authHandlers, nil, nil, time.Second)
+	assert.NoError(t, err)
+	assert.NotNil(t, am)
+
+	handleAuthCalled := false
+	am.handleAuthenticationFunc = func(_ *AuthManager, k authKey, reAuth bool) {
+		handleAuthCalled = true
+		assert.False(t, reAuth)
+		assert.Equal(t, authKey{localIdentity: 1000, remoteIdentity: 2000, remoteNodeID: 0, authType: 100}, k)
 	}
 
-	return &fakeIPCache{
-		ipHostMappings: m,
+	err = am.handleAuthRequest(context.Background(), signalAuthKey{LocalIdentity: 1000, RemoteIdentity: 2000, RemoteNodeID: 0, AuthType: 100, Pad: 0})
+	assert.NoError(t, err)
+	assert.True(t, handleAuthCalled)
+}
+
+func Test_authManager_handleAuthRequest_reservedRemoteIdentity(t *testing.T) {
+	authHandlers := []authHandler{newAlwaysPassAuthHandler(logrus.New())}
+
+	am, err := newAuthManager(logrus.New(), authHandlers, nil, nil, time.Second)
+	assert.NoError(t, err)
+	assert.NotNil(t, am)
+
+	handleAuthCalled := false
+	am.handleAuthenticationFunc = func(_ *AuthManager, k authKey, reAuth bool) {
+		handleAuthCalled = true
+	}
+
+	err = am.handleAuthRequest(context.Background(), signalAuthKey{LocalIdentity: 100, RemoteIdentity: identity.ReservedIdentityWorldIPv6.Uint32(), RemoteNodeID: 0, AuthType: 100, Pad: 0})
+	assert.NoError(t, err)
+	assert.False(t, handleAuthCalled)
+}
+
+func Test_authManager_handleAuthRequest_reservedLocalIdentity(t *testing.T) {
+	authHandlers := []authHandler{newAlwaysPassAuthHandler(logrus.New())}
+
+	am, err := newAuthManager(logrus.New(), authHandlers, nil, nil, time.Second)
+	assert.NoError(t, err)
+	assert.NotNil(t, am)
+
+	handleAuthCalled := false
+	am.handleAuthenticationFunc = func(_ *AuthManager, k authKey, reAuth bool) {
+		handleAuthCalled = true
+	}
+
+	err = am.handleAuthRequest(context.Background(), signalAuthKey{LocalIdentity: identity.ReservedIdentityWorldIPv6.Uint32(), RemoteIdentity: 100, RemoteNodeID: 0, AuthType: 100, Pad: 0})
+	assert.NoError(t, err)
+	assert.False(t, handleAuthCalled)
+}
+
+func Test_authManager_handleCertificateRotationEvent_Error(t *testing.T) {
+	authHandlers := []authHandler{newAlwaysPassAuthHandler(logrus.New())}
+	aMap := &fakeAuthMap{
+		failGet: true,
+	}
+
+	am, err := newAuthManager(logrus.New(), authHandlers, aMap, nil, time.Second)
+	assert.NoError(t, err)
+	assert.NotNil(t, am)
+
+	err = am.handleCertificateRotationEvent(context.Background(), certs.CertificateRotationEvent{Identity: identity.NumericIdentity(10)})
+	assert.ErrorContains(t, err, "failed to get all auth map entries: failed to list entries")
+}
+
+func Test_authManager_handleCertificateRotationEvent(t *testing.T) {
+	authHandlers := []authHandler{newAlwaysPassAuthHandler(logrus.New())}
+	aMap := &fakeAuthMap{
+		entries: map[authKey]authInfo{
+			{localIdentity: 1000, remoteIdentity: 2000, remoteNodeID: 1, authType: 100}: {expiration: time.Now()},
+			{localIdentity: 2000, remoteIdentity: 3000, remoteNodeID: 1, authType: 100}: {expiration: time.Now()},
+			{localIdentity: 3000, remoteIdentity: 4000, remoteNodeID: 1, authType: 100}: {expiration: time.Now()},
+		},
+	}
+
+	am, err := newAuthManager(logrus.New(), authHandlers, aMap, nil, time.Second)
+	assert.NoError(t, err)
+	assert.NotNil(t, am)
+
+	handleAuthCalled := false
+	am.handleAuthenticationFunc = func(_ *AuthManager, k authKey, reAuth bool) {
+		handleAuthCalled = true
+		assert.True(t, reAuth)
+		assert.True(t, k.localIdentity == 2000 || k.remoteIdentity == 2000)
+	}
+
+	err = am.handleCertificateRotationEvent(context.Background(), certs.CertificateRotationEvent{Identity: identity.NumericIdentity(2000)})
+	assert.NoError(t, err)
+	assert.True(t, handleAuthCalled)
+}
+
+func Test_authManager_handleCertificateDeletionEvent(t *testing.T) {
+	authHandlers := []authHandler{newAlwaysPassAuthHandler(logrus.New())}
+	aMap := &fakeAuthMap{
+		entries: map[authKey]authInfo{
+			{localIdentity: 1000, remoteIdentity: 2000, remoteNodeID: 1000, authType: 100}: {expiration: time.Now()},
+			{localIdentity: 2000, remoteIdentity: 3000, remoteNodeID: 1000, authType: 100}: {expiration: time.Now()},
+			{localIdentity: 3000, remoteIdentity: 4000, remoteNodeID: 1000, authType: 100}: {expiration: time.Now()},
+		},
+	}
+
+	am, err := newAuthManager(logrus.New(), authHandlers, aMap, nil, time.Second)
+	assert.NoError(t, err)
+	assert.NotNil(t, am)
+
+	err = am.handleCertificateRotationEvent(context.Background(), certs.CertificateRotationEvent{
+		Identity: identity.NumericIdentity(2000),
+		Deleted:  true,
+	})
+	assert.NoError(t, err)
+	assert.Len(t, aMap.entries, 1)
+}
+
+// Fake NodeIDHandler
+type fakeNodeIDHandler struct {
+	nodeIdMappings map[uint16]string
+}
+
+func (r *fakeNodeIDHandler) DumpNodeIDs() []*models.NodeID {
+	return []*models.NodeID{}
+}
+
+func (r *fakeNodeIDHandler) RestoreNodeIDs() {
+}
+
+func newFakeNodeIDHandler(mappings map[uint16]string) *fakeNodeIDHandler {
+	return &fakeNodeIDHandler{
+		nodeIdMappings: mappings,
 	}
 }
 
-func (r *fakeIPCache) GetHostIP(ip string) net.IP {
-	return r.ipHostMappings[ip]
+func (r *fakeNodeIDHandler) GetNodeIP(id uint16) string {
+	return r.nodeIdMappings[id]
 }
 
-func (r *fakeIPCache) AllocateNodeID(net.IP) uint16 {
-	return 0
+func (r *fakeNodeIDHandler) GetNodeID(nodeIP net.IP) (uint16, bool) {
+	for id, ip := range r.nodeIdMappings {
+		if ip == nodeIP.String() {
+			return id, true
+		}
+	}
+
+	return 0, false
 }
 
 // Fake AuthHandler
-
 type fakeAuthHandler struct {
 }
 
@@ -168,37 +277,81 @@ func (r *fakeAuthHandler) subscribeToRotatedIdentities() <-chan certs.Certificat
 	return nil
 }
 
-// Fake DatapathAuthenticator
-type fakeDatapathAuthenticator struct {
-	authenticated bool
-}
-
-func (r *fakeDatapathAuthenticator) markAuthenticated(result *authResult) error {
-	r.authenticated = true
+func (r *fakeAuthHandler) certProviderStatus() *models.Status {
 	return nil
 }
-func testConnInfo(srcIP string, dstIP string) *monitor.ConnectionInfo {
-	return &monitor.ConnectionInfo{
-		SrcIP: net.ParseIP(srcIP),
-		DstIP: net.ParseIP(dstIP),
-	}
+
+// Fake AuthMap
+type fakeAuthMap struct {
+	entries    map[authKey]authInfo
+	failDelete bool
+	failGet    bool
 }
 
-func testDropNotify(authType int8, ingress bool) *monitor.DropNotify {
-	var dstID uint32
-	if ingress {
-		dstID = 1
+func (r *fakeAuthMap) Delete(key authKey) error {
+	if r.failDelete {
+		return errors.New("failed to delete entry")
 	}
 
-	return &monitor.DropNotify{
-		Type:     monitorAPI.MessageTypeDrop,
-		SubType:  uint8(flow.DropReason_AUTH_REQUIRED),
-		Source:   1,
-		SrcLabel: 1,
-		DstLabel: 2,
-		DstID:    dstID,
-		ExtError: authType, // Auth Type
+	if _, ok := r.entries[key]; !ok {
+		return ebpf.ErrKeyNotExist
 	}
+
+	delete(r.entries, key)
+	return nil
+}
+
+func (r *fakeAuthMap) DeleteIf(predicate func(key authKey, info authInfo) bool) error {
+	if r.failDelete {
+		return errors.New("failed to delete entry")
+	}
+
+	maps.DeleteFunc(r.entries, predicate)
+
+	return nil
+}
+
+func (r *fakeAuthMap) All() (map[authKey]authInfo, error) {
+	if r.failGet {
+		return nil, errors.New("failed to list entries")
+	}
+
+	return r.entries, nil
+}
+
+func (r *fakeAuthMap) GetCacheInfo(key authKey) (authInfoCache, error) {
+	v, err := r.Get(key)
+
+	return authInfoCache{
+		authInfo: v,
+	}, err
+}
+
+func (r *fakeAuthMap) Get(key authKey) (authInfo, error) {
+	if r.failGet {
+		return authInfo{}, errors.New("failed to get entry")
+	}
+
+	v, ok := r.entries[key]
+	if !ok {
+		return authInfo{}, errors.New("authinfo not available")
+	}
+
+	return v, nil
+}
+
+func (r *fakeAuthMap) Update(key authKey, info authInfo) error {
+	r.entries[authKey{
+		localIdentity:  key.localIdentity,
+		remoteIdentity: key.remoteIdentity,
+		remoteNodeID:   key.remoteNodeID,
+		authType:       key.authType,
+	}] = authInfo{expiration: info.expiration}
+	return nil
+}
+
+func (r *fakeAuthMap) MaxEntries() uint32 {
+	return 1 << 8
 }
 
 func assertErrorString(errString string) assert.ErrorAssertionFunc {

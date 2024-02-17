@@ -1,10 +1,9 @@
-
 ---
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.7.0
+    controller-gen.kubebuilder.io/version: v0.14.0
   creationTimestamp: null
   name: ciliumloadbalancerippools.cilium.io
 spec:
@@ -27,10 +26,10 @@ spec:
     - jsonPath: .spec.disabled
       name: Disabled
       type: boolean
-    - jsonPath: .status.conditions[?(@.type=="io.cilium/conflict")].status
+    - jsonPath: .status.conditions[?(@.type=="cilium.io/PoolConflict")].status
       name: Conflicting
       type: string
-    - jsonPath: .status.conditions[?(@.type=="io.cilium/ips-available")].message
+    - jsonPath: .status.conditions[?(@.type=="cilium.io/IPsAvailable")].message
       name: IPs Available
       type: string
     - jsonPath: .metadata.creationTimestamp
@@ -59,20 +58,47 @@ spec:
             description: Spec is a human readable description for a BGP load balancer
               ip pool.
             properties:
-              cidrs:
-                description: CiliumLoadBalancerIPPoolCIDRBlock is a list of CIDRs
-                  comprising this IP Pool
+              allowFirstLastIPs:
+                description: AllowFirstLastIPs, if set to `yes` means that the first
+                  and last IPs of each CIDR will be allocatable. If `no` or undefined,
+                  these IPs will be reserved. This field is ignored for /{31,32} and
+                  /{127,128} CIDRs since reserving the first and last IPs would make
+                  the CIDRs unusable.
+                enum:
+                - "Yes"
+                - "No"
+                type: string
+              blocks:
+                description: Blocks is a list of CIDRs comprising this IP Pool
                 items:
-                  description: CiliumLoadBalancerIPPoolCIDRBlock describes a single
-                    CIDR block.
+                  description: CiliumLoadBalancerIPPoolIPBlock describes a single
+                    IP block.
                   properties:
                     cidr:
                       format: cidr
                       type: string
-                  required:
-                  - cidr
+                    start:
+                      type: string
+                    stop:
+                      type: string
                   type: object
-                minItems: 1
+                type: array
+              cidrs:
+                description: 'Cidrs is a list of CIDRs comprising this IP Pool Deprecated:
+                  please use the `blocks` field instead. This field will be removed
+                  in a future release. https://github.com/cilium/cilium/issues/28590'
+                items:
+                  description: CiliumLoadBalancerIPPoolIPBlock describes a single
+                    IP block.
+                  properties:
+                    cidr:
+                      format: cidr
+                      type: string
+                    start:
+                      type: string
+                    stop:
+                      type: string
+                  type: object
                 type: array
               disabled:
                 default: false
@@ -134,8 +160,6 @@ spec:
                       are ANDed.
                     type: object
                 type: object
-            required:
-            - cidrs
             type: object
           status:
             description: "Status is the status of the IP Pool. \n It might be possible
@@ -150,14 +174,12 @@ spec:
                   description: "Condition contains details for one aspect of the current
                     state of this API Resource. --- This struct is intended for direct
                     use as an array at the field path .status.conditions.  For example,
-                    \n \ttype FooStatus struct{ \t    // Represents the observations
-                    of a foo's current state. \t    // Known .status.conditions.type
-                    are: \"Available\", \"Progressing\", and \"Degraded\" \t    //
-                    +patchMergeKey=type \t    // +patchStrategy=merge \t    // +listType=map
-                    \t    // +listMapKey=type \t    Conditions []metav1.Condition
+                    \n type FooStatus struct{ // Represents the observations of a
+                    foo's current state. // Known .status.conditions.type are: \"Available\",
+                    \"Progressing\", and \"Degraded\" // +patchMergeKey=type // +patchStrategy=merge
+                    // +listType=map // +listMapKey=type Conditions []metav1.Condition
                     `json:\"conditions,omitempty\" patchStrategy:\"merge\" patchMergeKey:\"type\"
-                    protobuf:\"bytes,1,rep,name=conditions\"` \n \t    // other fields
-                    \t}"
+                    protobuf:\"bytes,1,rep,name=conditions\"` \n // other fields }"
                   properties:
                     lastTransitionTime:
                       description: lastTransitionTime is the last time the condition

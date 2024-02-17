@@ -9,8 +9,8 @@ import (
 	"os"
 	"testing"
 
+	. "github.com/cilium/checkmate"
 	"github.com/vishvananda/netlink"
-	. "gopkg.in/check.v1"
 
 	"github.com/cilium/ebpf/rlimit"
 
@@ -26,7 +26,7 @@ type IPSecSuitePrivileged struct{}
 var _ = Suite(&IPSecSuitePrivileged{})
 
 func (s *IPSecSuitePrivileged) SetUpSuite(c *C) {
-	testutils.PrivilegedCheck(c)
+	testutils.PrivilegedTest(c)
 }
 
 var (
@@ -42,7 +42,7 @@ func (p *IPSecSuitePrivileged) SetUpTest(c *C) {
 }
 
 func (p *IPSecSuitePrivileged) TearDownTest(c *C) {
-	DeleteXfrm()
+	_ = DeleteXfrm()
 }
 
 func (p *IPSecSuitePrivileged) TestLoadKeysNoFile(c *C) {
@@ -52,7 +52,7 @@ func (p *IPSecSuitePrivileged) TestLoadKeysNoFile(c *C) {
 
 func (p *IPSecSuitePrivileged) TestInvalidLoadKeys(c *C) {
 	keys := bytes.NewReader(invalidKeysDat)
-	_, _, err := loadIPSecKeys(keys)
+	_, _, err := LoadIPSecKeys(keys)
 	c.Assert(err, NotNil)
 
 	_, local, err := net.ParseCIDR("1.1.3.4/16")
@@ -66,11 +66,43 @@ func (p *IPSecSuitePrivileged) TestInvalidLoadKeys(c *C) {
 
 func (p *IPSecSuitePrivileged) TestLoadKeys(c *C) {
 	keys := bytes.NewReader(keysDat)
-	_, _, err := loadIPSecKeys(keys)
+	_, spi, err := LoadIPSecKeys(keys)
+	c.Assert(err, IsNil)
+	err = SetIPSecSPI(spi)
 	c.Assert(err, IsNil)
 	keys = bytes.NewReader(keysAeadDat)
-	_, _, err = loadIPSecKeys(keys)
+	_, spi, err = LoadIPSecKeys(keys)
 	c.Assert(err, IsNil)
+	err = SetIPSecSPI(spi)
+	c.Assert(err, IsNil)
+}
+
+func (p *IPSecSuitePrivileged) TestParseSPI(c *C) {
+	testCases := []struct {
+		input    string
+		expSPI   uint8
+		expOff   int
+		expError bool
+	}{
+		{"254", 0, 0, true},
+		{"15", 15, 0, false},
+		{"abc", 1, -1, false},
+		{"0", 0, 0, true},
+	}
+	for _, tc := range testCases {
+		spi, off, err := parseSPI(tc.input)
+		if spi != tc.expSPI {
+			c.Fatalf("For input %q, expected SPI %d, but got %d", tc.input, tc.expSPI, spi)
+		}
+		if off != tc.expOff {
+			c.Fatalf("For input %q, expected base offset %d, but got %d", tc.input, tc.expOff, off)
+		}
+		if tc.expError {
+			c.Assert(err, NotNil)
+		} else {
+			c.Assert(err, IsNil)
+		}
+	}
 }
 
 func (p *IPSecSuitePrivileged) TestUpsertIPSecEquals(c *C) {

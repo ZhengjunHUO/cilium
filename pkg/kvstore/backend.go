@@ -5,9 +5,10 @@ package kvstore
 
 import (
 	"context"
-	"time"
 
 	"google.golang.org/grpc"
+
+	"github.com/cilium/cilium/pkg/time"
 )
 
 type backendOption struct {
@@ -23,6 +24,8 @@ type backendOption struct {
 
 type backendOptions map[string]*backendOption
 
+type ClusterSizeDependantIntervalFunc func(baseInterval time.Duration) time.Duration
+
 // ExtraOptions represents any options that can not be represented in a textual
 // format and need to be set programmatically.
 type ExtraOptions struct {
@@ -30,7 +33,7 @@ type ExtraOptions struct {
 
 	// ClusterSizeDependantInterval defines the function to calculate
 	// intervals based on cluster size
-	ClusterSizeDependantInterval func(baseInterval time.Duration) time.Duration
+	ClusterSizeDependantInterval ClusterSizeDependantIntervalFunc
 
 	// NoLockQuorumCheck disables the lock acquisition quorum check
 	NoLockQuorumCheck bool
@@ -146,27 +149,18 @@ type BackendOperations interface {
 	// GetIfLocked returns value of key if the client is still holding the given lock.
 	GetIfLocked(ctx context.Context, key string, lock KVLocker) ([]byte, error)
 
-	// GetPrefix returns the first key which matches the prefix and its value
-	GetPrefix(ctx context.Context, prefix string) (string, []byte, error)
-
-	// GetPrefixIfLocked returns the first key which matches the prefix and its value if the client is still holding the given lock.
-	GetPrefixIfLocked(ctx context.Context, prefix string, lock KVLocker) (string, []byte, error)
-
-	// Set sets value of key
-	Set(ctx context.Context, key string, value []byte) error
-
-	// Delete deletes a key
+	// Delete deletes a key. It does not return an error if the key does not exist.
 	Delete(ctx context.Context, key string) error
 
-	// DeleteIfLocked deletes a key if the client is still holding the given lock.
+	// DeleteIfLocked deletes a key if the client is still holding the given lock. It does not return an error if the key does not exist.
 	DeleteIfLocked(ctx context.Context, key string, lock KVLocker) error
 
 	DeletePrefix(ctx context.Context, path string) error
 
-	// Update atomically creates a key or fails if it already exists
+	// Update creates or updates a key.
 	Update(ctx context.Context, key string, value []byte, lease bool) error
 
-	// UpdateIfLocked atomically creates a key or fails if it already exists if the client is still holding the given lock.
+	// UpdateIfLocked updates a key if the client is still holding the given lock.
 	UpdateIfLocked(ctx context.Context, key string, value []byte, lease bool, lock KVLocker) error
 
 	// UpdateIfDifferent updates a key if the value is different
@@ -181,25 +175,14 @@ type BackendOperations interface {
 	// CreateOnlyIfLocked atomically creates a key if the client is still holding the given lock or fails if it already exists
 	CreateOnlyIfLocked(ctx context.Context, key string, value []byte, lease bool, lock KVLocker) (bool, error)
 
-	// CreateIfExists creates a key with the value only if key condKey exists
-	CreateIfExists(ctx context.Context, condKey, key string, value []byte, lease bool) error
-
 	// ListPrefix returns a list of keys matching the prefix
 	ListPrefix(ctx context.Context, prefix string) (KeyValuePairs, error)
 
 	// ListPrefixIfLocked returns a list of keys matching the prefix only if the client is still holding the given lock.
 	ListPrefixIfLocked(ctx context.Context, prefix string, lock KVLocker) (KeyValuePairs, error)
 
-	// Watch starts watching for changes in a prefix. If list is true, the
-	// current keys matching the prefix will be listed and reported as new
-	// keys first.
-	Watch(ctx context.Context, w *Watcher)
-
 	// Close closes the kvstore client
 	Close(ctx context.Context)
-
-	// GetCapabilities returns the capabilities of the backend
-	GetCapabilities() Capabilities
 
 	// Encodes a binary slice into a character set that the backend
 	// supports
@@ -210,11 +193,15 @@ type BackendOperations interface {
 
 	// ListAndWatch creates a new watcher which will watch the specified
 	// prefix for changes. Before doing this, it will list the current keys
-	// matching the prefix and report them as new keys. Name can be set to
-	// anything and is used for logging messages. The Events channel is
+	// matching the prefix and report them as new keys. The Events channel is
 	// created with the specified sizes. Upon every change observed, a
 	// KeyValueEvent will be sent to the Events channel
-	ListAndWatch(ctx context.Context, name, prefix string, chanSize int) *Watcher
+	ListAndWatch(ctx context.Context, prefix string, chanSize int) *Watcher
+
+	// RegisterLeaseExpiredObserver registers a function which is executed when
+	// the lease associated with a key having the given prefix is detected as expired.
+	// If the function is nil, the previous observer (if any) is unregistered.
+	RegisterLeaseExpiredObserver(prefix string, fn func(key string))
 
 	BackendOperationsUserMgmt
 }

@@ -12,10 +12,10 @@ Layer 3 Examples
 The layer 3 policy establishes the base connectivity rules regarding which endpoints
 can talk to each other. Layer 3 policies can be specified using the following methods:
 
-* `Labels based`: This is used to describe the relationship if both endpoints
-  are managed by Cilium and are thus assigned labels. The big advantage of this
-  method is that IP addresses are not encoded into the policies and the policy is
-  completely decoupled from the addressing.
+* `Endpoints based`: This is used to describe the relationship if both
+  endpoints are managed by Cilium and are thus assigned labels. The
+  advantage of this method is that IP addresses are not encoded into the
+  policies and the policy is completely decoupled from the addressing.
 
 * `Services based`: This is an intermediate form between Labels and CIDR and
   makes use of the services concept in the orchestration system. A good example
@@ -39,14 +39,14 @@ can talk to each other. Layer 3 policies can be specified using the following me
   above. DNS information is acquired by routing DNS traffic via a proxy.
   DNS TTLs are respected.
 
-.. _Labels based:
+.. _Endpoints based:
 
-Labels Based
-------------
+Endpoints Based
+---------------
 
-Label-based L3 policy is used to establish policy between endpoints inside the
-cluster managed by Cilium. Label-based L3 policies are defined by using an
-`EndpointSelector` inside a rule to choose what kind of traffic that can be
+Endpoints-based L3 policy is used to establish rules between endpoints inside
+the cluster managed by Cilium. Endpoints-based L3 policies are defined by using
+an `EndpointSelector` inside a rule to select what kind of traffic can be
 received (on ingress), or sent (on egress). An empty `EndpointSelector` allows
 all traffic. The examples below demonstrate this in further detail.
 
@@ -253,21 +253,22 @@ accessible from endpoints that have both labels ``env=prod`` and
 Services based
 --------------
 
+.. note::
+
+	Services based rules rules will only take effect on Kubernetes services
+        without a selector.
+
 Traffic from pods to services running in your cluster can be allowed via
 ``toServices`` statements in Egress rules. Currently Kubernetes
 `Services without a Selector
 <https://kubernetes.io/docs/concepts/services-networking/service/#services-without-selectors>`_
 are supported when defined by their name and namespace or label selector.
-For services backed by pods, use `labels based` rules on the backend pod labels.
+For services backed by pods, use `Endpoints Based` rules on the backend pod
+labels.
 
 This example shows how to allow all endpoints with the label ``id=app2``
 to talk to all endpoints of kubernetes service ``myservice`` in kubernetes
 namespace ``default``.
-
-.. note::
-
-	These rules will only take effect on Kubernetes services without a
-	selector.
 
 .. only:: html
 
@@ -284,8 +285,8 @@ namespace ``default``.
         .. literalinclude:: ../../../examples/policies/l3/service/service.json
 
 This example shows how to allow all endpoints with the label ``id=app2``
-to talk to all endpoints of all kubernetes headless services which
-have ``head:none`` set as the label.
+to talk to all endpoints of all kubernetes services without selectors which
+have ``external:yes`` set as the label.
 
 .. only:: html
 
@@ -304,8 +305,8 @@ have ``head:none`` set as the label.
 Limitations
 ~~~~~~~~~~~
 
-``toServices`` statements cannot be combined with ``toPorts`` statements in the
-same rule.
+``toServices`` statements must not be combined with ``toPorts`` statements in the
+same rule. If a rule combines both these statements, the policy is rejected.
 
 .. _Entities based:
 
@@ -329,6 +330,10 @@ kube-apiserver
     The kube-apiserver entity represents the kube-apiserver in a Kubernetes
     cluster. This entity represents both deployments of the kube-apiserver:
     within the cluster and outside of the cluster.
+ingress
+    The ingress entity represents the Cilium Envoy instance that handles ingress
+    L7 traffic. Be aware that this also applies for pod-to-pod traffic within
+    the same cluster when using ingress endpoints (also known as *hairpinning*).
 cluster
     Cluster is the logical group of all network endpoints inside of the local
     cluster. This includes all Cilium-managed endpoints of the local cluster,
@@ -355,10 +360,6 @@ world
 all
     The all entity represents the combination of all known clusters as well
     world and whitelists all communication.
-
-.. versionadded:: future
-   Allowing users to define custom entities is on the roadmap but has not been
-   implemented yet (see :gh-issue:`3553`).
 
 Access to/from local host
 ~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -447,6 +448,7 @@ will apply to traffic where one side of the connection is:
 * A network endpoint outside the cluster
 * The host network namespace where the pod is running.
 * Within the cluster prefix but the IP's networking is not provided by Cilium.
+* (:ref:`optional <cidr_select_nodes>`) Node IPs within the cluster
 
 Conversely, CIDR rules do not apply to traffic where both sides of the
 connection are either managed by Cilium or use an IP belonging to a node in the
@@ -502,6 +504,30 @@ but not CIDR prefix ``10.96.0.0/12``
 
         .. literalinclude:: ../../../examples/policies/l3/cidr/cidr.json
 
+.. _cidr_select_nodes:
+
+Selecting nodes with CIDR / ipBlock
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. include:: ../../beta.rst
+
+By default, CIDR-based selectors do not match in-cluster entities (pods or nodes).
+Optionally, you can direct the policy engine to select nodes by CIDR / ipBlock.
+This requires you to configure Cilium with ``--policy-cidr-match-mode=nodes`` or
+the equivalent Helm value ``policyCIDRMatchMode: nodes``. It is safe to toggle this
+option on a running cluster, and toggling the option affects neither upgrades nor downgrades.
+
+When ``--policy-cidr-match-mode=nodes`` is specified, every agent allocates a
+distinct local :ref:`security identity <arch_id_security>` for all other nodes.
+This slightly increases memory usage -- approximately 1MB for every 1000 nodes
+in the cluster.
+
+This is particularly relevant to self-hosted clusters -- that is, clusters where
+the apiserver is hosted on in-cluster nodes. Because CIDR-based selectors ignore
+nodes by default, you must ordinarily use the ``kube-apiserver`` :ref:`entity <Entities based>`
+as part of a CiliumNetworkPolicy. Setting ``--policy-cidr-match-mode=nodes`` permits
+selecting the apiserver via an ``ipBlock`` peer in a KubernetesNetworkPolicy.
+
 .. _DNS based:
 
 DNS based
@@ -514,27 +540,32 @@ provided in DNS responses are allowed by Cilium in a similar manner to IPs in
 or are not know a priori, or when DNS is more convenient. To enforce policy on
 DNS requests themselves, see `Layer 7 Examples`_.
 
-IP information is captured from DNS responses per-Endpoint via a `DNS Proxy`_.
+.. note::
+
+	In order to associate domain names with IP addresses, Cilium intercepts
+	DNS responses per-Endpoint using a `DNS Proxy`_. This requires Cilium
+	to be configured with ``--enable-l7-proxy=true`` and an L7 policy allowing
+	DNS requests. For more details, see :ref:`DNS Obtaining Data`.
+
 An L3 `CIDR based`_ rule is generated for every ``toFQDNs``
 rule and applies to the same endpoints. The IP information is selected for
 insertion by ``matchName`` or ``matchPattern`` rules, and is collected from all
 DNS responses seen by Cilium on the node. Multiple selectors may be included in
-a single egress rule. See :ref:`DNS Obtaining Data` for information on
-collecting this IP data.
+a single egress rule.
 
 .. note:: The DNS Proxy is provided in each Cilium agent.
    As a result, DNS requests targeted by policies depend on the availability
    of the Cilium agent pod.
-   This includes DNS policies as well as :ref:`proxy_visibility` annotations.
+   This includes DNS policies (:ref:`proxy_visibility`).
 
 ``toFQDNs`` egress rules cannot contain any other L3 rules, such as
-``toEndpoints`` (under `Labels Based`_) and ``toCIDRs`` (under `CIDR Based`_).
+``toEndpoints`` (under `Endpoints Based`_) and ``toCIDRs`` (under `CIDR Based`_).
 They may contain L4/L7 rules, such as ``toPorts`` (see `Layer 4 Examples`_)
 with, optionally, ``HTTP`` and ``Kafka`` sections (see `Layer 7 Examples`_).
 
 .. note:: DNS based rules are intended for external connections and behave
           similarly to `CIDR based`_ rules. See `Services based`_ and
-          `Labels based`_ for cluster-internal traffic.
+          `Endpoints based`_ for cluster-internal traffic.
 
 IPs to be allowed are selected via:
 
@@ -821,11 +852,10 @@ latter rule will have no effect.
 .. note:: Layer 7 rules are not currently supported in `HostPolicies`, i.e.,
           policies that use :ref:`NodeSelector`.
 
-.. note:: Layer 7 policies --and pod annotations-- result in traffic being
-   proxied through an Envoy instance provided in each Cilium agent pod.
-   As a result, L7 traffic targeted by policies depend on the availability
-   of the Cilium agent pod.
-   This includes L7 policies as well as :ref:`proxy_visibility` annotations.
+.. note:: Layer 7 policies will proxy traffic through a node-local :ref:`envoy`
+          instance, which will either be deployed as a DaemonSet or embedded in the agent pod.
+          When Envoy is embedded in the agent pod, Layer 7 traffic targeted by policies
+          will therefore depend on the availability of the Cilium agent pod.
 
 HTTP
 ----
@@ -855,10 +885,10 @@ Headers
 Allow GET /public
 ~~~~~~~~~~~~~~~~~
 
-The following example allows ``GET`` requests to the URL ``/public`` to be
-allowed to endpoints with the labels ``env:prod``, but requests to any other
-URL, or using another method, will be rejected. Requests on ports other than
-port 80 will be dropped.
+The following example allows ``GET`` requests to the URL ``/public`` from the
+endpoints with the labels ``env=prod`` to endpoints with the labels 
+``app=service``, but requests to any other URL, or using another method, will
+be rejected. Requests on ports other than port 80 will be dropped.
 
 .. only:: html
 
@@ -1210,13 +1240,6 @@ denying an URL and ``toFQDNs``, i.e., specifically denying traffic to a specific
 domain name.
 
 
-Known issues
-------------
-
-There is currently a known issue (:gh-issue:`24502`) that makes the ``kube-apiserver``
-entity unreliable. Until this is resolved, it is recommended to grant access to the apiserver
-by CIDR or by the special ``world`` entity.
-
 Previous limitations and known issues
 -------------------------------------
 
@@ -1278,10 +1301,10 @@ is labeled correctly in your environment. In the example configuration, you can
 run ``kubectl get nodes -o wide|grep type=ingress-worker`` to verify labels
 match the policy.
 
-You can verify the policy was applied by running ``kubectl exec -n $CILIUM_NAMESPACE cilium-xxxx -- cilium policy get``
+You can verify the policy was applied by running ``kubectl exec -n $CILIUM_NAMESPACE cilium-xxxx -- cilium-dbg policy get``
 for the Cilium agent pod. Verify that the host is selected by the policy using
-``cilium endpoint list`` and look for the endpoint with ``reserved:host`` as the
+``cilium-dbg endpoint list`` and look for the endpoint with ``reserved:host`` as the
 label and ensure that policy is enabled in the selected direction. Ensure the
 traffic is arriving on the device visible on the ``NodePort`` field of the
-``cilium status list`` output. Use ``cilium monitor`` with ``--related-to`` and
+``cilium-dbg status list`` output. Use ``cilium-dbg monitor`` with ``--related-to`` and
 the endpoint ID of the ``reserved:host`` endpoint to view traffic.

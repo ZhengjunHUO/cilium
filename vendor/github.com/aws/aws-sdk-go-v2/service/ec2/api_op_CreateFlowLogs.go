@@ -4,6 +4,7 @@ package ec2
 
 import (
 	"context"
+	"fmt"
 	awsmiddleware "github.com/aws/aws-sdk-go-v2/aws/middleware"
 	"github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
@@ -15,16 +16,14 @@ import (
 // specific network interface, subnet, or VPC. Flow log data for a monitored
 // network interface is recorded as flow log records, which are log events
 // consisting of fields that describe the traffic flow. For more information, see
-// Flow log records
-// (https://docs.aws.amazon.com/vpc/latest/userguide/flow-logs.html#flow-log-records)
+// Flow log records (https://docs.aws.amazon.com/vpc/latest/userguide/flow-logs.html#flow-log-records)
 // in the Amazon Virtual Private Cloud User Guide. When publishing to CloudWatch
 // Logs, flow log records are published to a log group, and each network interface
 // has a unique log stream in the log group. When publishing to Amazon S3, flow log
 // records for all of the monitored network interfaces are published to a single
 // log file object that is stored in the specified bucket. For more information,
-// see VPC Flow Logs
-// (https://docs.aws.amazon.com/vpc/latest/userguide/flow-logs.html) in the Amazon
-// Virtual Private Cloud User Guide.
+// see VPC Flow Logs (https://docs.aws.amazon.com/vpc/latest/userguide/flow-logs.html)
+// in the Amazon Virtual Private Cloud User Guide.
 func (c *Client) CreateFlowLogs(ctx context.Context, params *CreateFlowLogsInput, optFns ...func(*Options)) (*CreateFlowLogsOutput, error) {
 	if params == nil {
 		params = &CreateFlowLogsInput{}
@@ -42,7 +41,7 @@ func (c *Client) CreateFlowLogs(ctx context.Context, params *CreateFlowLogsInput
 
 type CreateFlowLogsInput struct {
 
-	// The IDs of the resources to monitor. For example, if the resource type is VPC,
+	// The IDs of the resources to monitor. For example, if the resource type is VPC ,
 	// specify the IDs of the VPCs. Constraints: Maximum of 25 for transit gateway
 	// resource types. Maximum of 1000 for the other resource types.
 	//
@@ -55,8 +54,8 @@ type CreateFlowLogsInput struct {
 	ResourceType types.FlowLogsResourceType
 
 	// Unique, case-sensitive identifier that you provide to ensure the idempotency of
-	// the request. For more information, see How to ensure idempotency
-	// (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/Run_Instance_Idempotency.html).
+	// the request. For more information, see How to ensure idempotency (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/Run_Instance_Idempotency.html)
+	// .
 	ClientToken *string
 
 	// The ARN of the IAM role that allows Amazon EC2 to publish flow logs across
@@ -73,26 +72,22 @@ type CreateFlowLogsInput struct {
 
 	// Checks whether you have the required permissions for the action, without
 	// actually making the request, and provides an error response. If you have the
-	// required permissions, the error response is DryRunOperation. Otherwise, it is
-	// UnauthorizedOperation.
+	// required permissions, the error response is DryRunOperation . Otherwise, it is
+	// UnauthorizedOperation .
 	DryRun *bool
 
 	// The destination for the flow log data. The meaning of this parameter depends on
 	// the destination type.
-	//
-	// * If the destination type is cloud-watch-logs, specify
-	// the ARN of a CloudWatch Logs log group. For example:
-	// arn:aws:logs:region:account_id:log-group:my_group Alternatively, use the
-	// LogGroupName parameter.
-	//
-	// * If the destination type is s3, specify the ARN of an
-	// S3 bucket. For example: arn:aws:s3:::my_bucket/my_subfolder/ The subfolder is
-	// optional. Note that you can't use AWSLogs as a subfolder name.
-	//
-	// * If the
-	// destination type is kinesis-data-firehose, specify the ARN of a Kinesis Data
-	// Firehose delivery stream. For example:
-	// arn:aws:firehose:region:account_id:deliverystream:my_stream
+	//   - If the destination type is cloud-watch-logs , specify the ARN of a
+	//   CloudWatch Logs log group. For example:
+	//   arn:aws:logs:region:account_id:log-group:my_group Alternatively, use the
+	//   LogGroupName parameter.
+	//   - If the destination type is s3 , specify the ARN of an S3 bucket. For
+	//   example: arn:aws:s3:::my_bucket/my_subfolder/ The subfolder is optional. Note
+	//   that you can't use AWSLogs as a subfolder name.
+	//   - If the destination type is kinesis-data-firehose , specify the ARN of a
+	//   Kinesis Data Firehose delivery stream. For example:
+	//   arn:aws:firehose:region:account_id:deliverystream:my_stream
 	LogDestination *string
 
 	// The type of destination for the flow log data. Default: cloud-watch-logs
@@ -102,27 +97,23 @@ type CreateFlowLogsInput struct {
 	// which they should appear. If you omit this parameter, the flow log is created
 	// using the default format. If you specify this parameter, you must include at
 	// least one field. For more information about the available fields, see Flow log
-	// records
-	// (https://docs.aws.amazon.com/vpc/latest/userguide/flow-logs.html#flow-log-records)
-	// in the Amazon VPC User Guide or Transit Gateway Flow Log records
-	// (https://docs.aws.amazon.com/vpc/latest/tgw/tgw-flow-logs.html#flow-log-records)
+	// records (https://docs.aws.amazon.com/vpc/latest/userguide/flow-logs.html#flow-log-records)
+	// in the Amazon VPC User Guide or Transit Gateway Flow Log records (https://docs.aws.amazon.com/vpc/latest/tgw/tgw-flow-logs.html#flow-log-records)
 	// in the Amazon Web Services Transit Gateway Guide. Specify the fields using the
-	// ${field-id} format, separated by spaces. For the CLI, surround this parameter
-	// value with single quotes on Linux or double quotes on Windows.
+	// ${field-id} format, separated by spaces.
 	LogFormat *string
 
 	// The name of a new or existing CloudWatch Logs log group where Amazon EC2
 	// publishes your flow logs. This parameter is valid only if the destination type
-	// is cloud-watch-logs.
+	// is cloud-watch-logs .
 	LogGroupName *string
 
 	// The maximum interval of time during which a flow of packets is captured and
 	// aggregated into a flow log record. The possible values are 60 seconds (1 minute)
 	// or 600 seconds (10 minutes). This parameter must be 60 seconds for transit
 	// gateway resource types. When a network interface is attached to a Nitro-based
-	// instance
-	// (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/instance-types.html#ec2-nitro-instances),
-	// the aggregation interval is always 60 seconds or less, regardless of the value
+	// instance (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/instance-types.html#ec2-nitro-instances)
+	// , the aggregation interval is always 60 seconds or less, regardless of the value
 	// that you specify. Default: 600
 	MaxAggregationInterval *int32
 
@@ -156,12 +147,22 @@ type CreateFlowLogsOutput struct {
 }
 
 func (c *Client) addOperationCreateFlowLogsMiddlewares(stack *middleware.Stack, options Options) (err error) {
+	if err := stack.Serialize.Add(&setOperationInputMiddleware{}, middleware.After); err != nil {
+		return err
+	}
 	err = stack.Serialize.Add(&awsEc2query_serializeOpCreateFlowLogs{}, middleware.After)
 	if err != nil {
 		return err
 	}
 	err = stack.Deserialize.Add(&awsEc2query_deserializeOpCreateFlowLogs{}, middleware.After)
 	if err != nil {
+		return err
+	}
+	if err := addProtocolFinalizerMiddlewares(stack, options, "CreateFlowLogs"); err != nil {
+		return fmt.Errorf("add protocol finalizers: %v", err)
+	}
+
+	if err = addlegacyEndpointContextSetter(stack, options); err != nil {
 		return err
 	}
 	if err = addSetLoggerMiddleware(stack, options); err != nil {
@@ -182,16 +183,13 @@ func (c *Client) addOperationCreateFlowLogsMiddlewares(stack *middleware.Stack, 
 	if err = addRetryMiddlewares(stack, options); err != nil {
 		return err
 	}
-	if err = addHTTPSignerV4Middleware(stack, options); err != nil {
-		return err
-	}
 	if err = awsmiddleware.AddRawResponseToMetadata(stack); err != nil {
 		return err
 	}
 	if err = awsmiddleware.AddRecordResponseTiming(stack); err != nil {
 		return err
 	}
-	if err = addClientUserAgent(stack); err != nil {
+	if err = addClientUserAgent(stack, options); err != nil {
 		return err
 	}
 	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
@@ -200,10 +198,16 @@ func (c *Client) addOperationCreateFlowLogsMiddlewares(stack *middleware.Stack, 
 	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
 		return err
 	}
+	if err = addSetLegacyContextSigningOptionsMiddleware(stack); err != nil {
+		return err
+	}
 	if err = addOpCreateFlowLogsValidationMiddleware(stack); err != nil {
 		return err
 	}
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opCreateFlowLogs(options.Region), middleware.Before); err != nil {
+		return err
+	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
@@ -215,6 +219,9 @@ func (c *Client) addOperationCreateFlowLogsMiddlewares(stack *middleware.Stack, 
 	if err = addRequestResponseLogging(stack, options); err != nil {
 		return err
 	}
+	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -222,7 +229,6 @@ func newServiceMetadataMiddleware_opCreateFlowLogs(region string) *awsmiddleware
 	return &awsmiddleware.RegisterServiceMetadata{
 		Region:        region,
 		ServiceID:     ServiceID,
-		SigningName:   "ec2",
 		OperationName: "CreateFlowLogs",
 	}
 }

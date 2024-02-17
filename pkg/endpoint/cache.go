@@ -4,8 +4,8 @@
 package endpoint
 
 import (
-	"fmt"
 	"net/netip"
+	"strconv"
 
 	"github.com/sirupsen/logrus"
 
@@ -29,21 +29,19 @@ type epInfoCache struct {
 	ifName string
 
 	// For datapath.EndpointConfiguration
-	identity                               identity.NumericIdentity
-	mac                                    mac.MAC
-	ipv4                                   netip.Addr
-	ipv6                                   netip.Addr
-	conntrackLocal                         bool
-	requireARPPassthrough                  bool
-	requireEgressProg                      bool
-	requireRouting                         bool
-	requireEndpointRoute                   bool
-	disableSIPVerification                 bool
-	policyVerdictLogFilter                 uint32
-	cidr4PrefixLengths, cidr6PrefixLengths []int
-	options                                *option.IntOptions
-	lxcMAC                                 mac.MAC
-	ifIndex                                int
+	identity               identity.NumericIdentity
+	mac                    mac.MAC
+	ipv4                   netip.Addr
+	ipv6                   netip.Addr
+	conntrackLocal         bool
+	requireARPPassthrough  bool
+	requireEgressProg      bool
+	requireRouting         bool
+	requireEndpointRoute   bool
+	policyVerdictLogFilter uint32
+	options                *option.IntOptions
+	lxcMAC                 mac.MAC
+	ifIndex                int
 
 	// endpoint is used to get the endpoint's logger.
 	//
@@ -56,8 +54,6 @@ type epInfoCache struct {
 
 // Must be called when endpoint is still locked.
 func (e *Endpoint) createEpInfoCache(epdir string) *epInfoCache {
-	cidr6, cidr4 := e.GetCIDRPrefixLengths()
-
 	ep := &epInfoCache{
 		revision: e.nextPolicyRevision,
 
@@ -73,10 +69,7 @@ func (e *Endpoint) createEpInfoCache(epdir string) *epInfoCache {
 		requireEgressProg:      e.RequireEgressProg(),
 		requireRouting:         e.RequireRouting(),
 		requireEndpointRoute:   e.RequireEndpointRoute(),
-		disableSIPVerification: e.DisableSIPVerification(),
 		policyVerdictLogFilter: e.GetPolicyVerdictLogFilter(),
-		cidr4PrefixLengths:     cidr4,
-		cidr6PrefixLengths:     cidr6,
 		options:                e.Options.DeepCopy(),
 		lxcMAC:                 e.mac,
 		ifIndex:                e.ifIndex,
@@ -107,7 +100,7 @@ func (ep *epInfoCache) GetID() uint64 {
 
 // StringID returns the endpoint's ID in a string.
 func (ep *epInfoCache) StringID() string {
-	return fmt.Sprintf("%d", ep.id)
+	return strconv.FormatUint(ep.id, 10)
 }
 
 // GetIdentity returns the security identity of the endpoint.
@@ -143,10 +136,6 @@ func (ep *epInfoCache) ConntrackLocalLocked() bool {
 	return ep.conntrackLocal
 }
 
-func (ep *epInfoCache) GetCIDRPrefixLengths() ([]int, []int) {
-	return ep.cidr6PrefixLengths, ep.cidr4PrefixLengths
-}
-
 func (ep *epInfoCache) GetOptions() *option.IntOptions {
 	return ep.options
 }
@@ -172,12 +161,6 @@ func (ep *epInfoCache) RequireRouting() bool {
 // RequireEndpointRoute returns if the endpoint wants a per endpoint route
 func (ep *epInfoCache) RequireEndpointRoute() bool {
 	return ep.requireEndpointRoute
-}
-
-// DisableSIPVerification returns true if the endpoint wants to skip
-// srcIP verification
-func (ep *epInfoCache) DisableSIPVerification() bool {
-	return ep.disableSIPVerification
 }
 
 func (ep *epInfoCache) GetPolicyVerdictLogFilter() uint32 {

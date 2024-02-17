@@ -8,7 +8,6 @@ package synced
 import (
 	"context"
 	"errors"
-	"time"
 
 	apiextclientset "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -24,9 +23,9 @@ import (
 	"github.com/cilium/cilium/pkg/k8s/client"
 	"github.com/cilium/cilium/pkg/k8s/informer"
 	slim_metav1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/meta/v1"
-	k8sversion "github.com/cilium/cilium/pkg/k8s/version"
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/option"
+	"github.com/cilium/cilium/pkg/time"
 )
 
 const (
@@ -43,8 +42,8 @@ func agentCRDResourceNames() []string {
 		CRDResourceName(v2.CCNPName),
 		CRDResourceName(v2.CNName),
 		CRDResourceName(v2.CIDName),
-		CRDResourceName(v2alpha1.CNCName),
 		CRDResourceName(v2alpha1.CCGName),
+		CRDResourceName(v2alpha1.CPIPName),
 	}
 
 	if !option.Config.DisableCiliumEndpointCRD {
@@ -66,9 +65,18 @@ func agentCRDResourceNames() []string {
 	}
 	if option.Config.EnableBGPControlPlane {
 		result = append(result, CRDResourceName(v2alpha1.BGPPName))
+		// BGPv2 CRDs
+		result = append(result, CRDResourceName(v2alpha1.BGPCCName))
+		result = append(result, CRDResourceName(v2alpha1.BGPAName))
+		result = append(result, CRDResourceName(v2alpha1.BGPPCName))
+		result = append(result, CRDResourceName(v2alpha1.BGPNCName))
+		result = append(result, CRDResourceName(v2alpha1.BGPNCOName))
 	}
 
-	result = append(result, CRDResourceName(v2alpha1.LBIPPoolName))
+	result = append(result,
+		CRDResourceName(v2alpha1.LBIPPoolName),
+		CRDResourceName(v2alpha1.L2AnnouncementName),
+	)
 
 	return result
 }
@@ -79,12 +87,25 @@ func AgentCRDResourceNames() []string {
 	return agentCRDResourceNames()
 }
 
+// ClusterMeshAPIServerResourceNames returns a list of all CRD resource names the
+// clustermesh-apiserver needs to wait to be registered before initializing any
+// k8s watchers.
+func ClusterMeshAPIServerResourceNames() []string {
+	return []string{
+		CRDResourceName(v2.CNName),
+		CRDResourceName(v2.CIDName),
+		CRDResourceName(v2.CEPName),
+		CRDResourceName(v2.CEWName),
+	}
+}
+
 // AllCiliumCRDResourceNames returns a list of all Cilium CRD resource names
-// that the clustermesh-apiserver or testsuite may register.
+// that the cilium operator or testsuite may register.
 func AllCiliumCRDResourceNames() []string {
 	return append(
 		AgentCRDResourceNames(),
 		CRDResourceName(v2.CEWName),
+		CRDResourceName(v2alpha1.CNCName),
 	)
 }
 
@@ -157,7 +178,7 @@ func SyncCRDs(ctx context.Context, clientset client.Clientset, crdNames []string
 
 	log.Info("Waiting until all Cilium CRDs are available")
 
-	ticker := time.NewTicker(1 * time.Second)
+	ticker := time.NewTicker(50 * time.Millisecond)
 	for {
 		select {
 		case <-ctx.Done():
@@ -184,7 +205,7 @@ func SyncCRDs(ctx context.Context, clientset client.Clientset, crdNames []string
 }
 
 func (s *crdState) add(obj interface{}) {
-	if pom := k8s.ObjToV1PartialObjectMetadata(obj); pom != nil {
+	if pom := k8s.CastInformerEvent[slim_metav1.PartialObjectMetadata](obj); pom != nil {
 		s.Lock()
 		s.m[CRDResourceName(pom.GetName())] = true
 		s.Unlock()
@@ -192,7 +213,7 @@ func (s *crdState) add(obj interface{}) {
 }
 
 func (s *crdState) remove(obj interface{}) {
-	if pom := k8s.ObjToV1PartialObjectMetadata(obj); pom != nil {
+	if pom := k8s.CastInformerEvent[slim_metav1.PartialObjectMetadata](obj); pom != nil {
 		s.Lock()
 		s.m[CRDResourceName(pom.GetName())] = false
 		s.Unlock()
@@ -324,21 +345,10 @@ const (
 // client (v1 or v1beta1) in order to retrieve the CRDs in a
 // backwards-compatible way. This implements the cache.Getter interface.
 func (c *crdGetter) Get() *rest.Request {
-	var req *rest.Request
-
-	if k8sversion.Capabilities().APIExtensionsV1CRD {
-		req = c.api.ApiextensionsV1().
-			RESTClient().
-			Get().
-			Name("customresourcedefinitions")
-	} else {
-		req = c.api.ApiextensionsV1beta1().
-			RESTClient().
-			Get().
-			Name("customresourcedefinitions")
-	}
-
-	return req
+	return c.api.ApiextensionsV1().
+		RESTClient().
+		Get().
+		Name("customresourcedefinitions")
 }
 
 type crdGetter struct {

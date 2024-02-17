@@ -23,6 +23,14 @@ plugin. Due to scalability concerns in particular for multi-queue network
 interfaces, it is not recommended to use the bandwidth CNI plugin which is
 based on TBF (Token Bucket Filter) instead of EDT.
 
+.. note::
+
+   It is strongly recommended to use Bandwidth Manager in combination with
+   :ref:`BPF Host Routing<eBPF_Host_Routing>` as otherwise legacy routing
+   through the upper stack could potentially result in undesired high latency
+   (see `this comparison <https://github.com/cilium/cilium/issues/29083#issuecomment-1831867718>`_
+   for more details).
+
 Cilium's bandwidth manager supports the ``kubernetes.io/egress-bandwidth`` Pod
 annotation which is enforced on egress at the native host networking devices.
 The bandwidth enforcement is supported for direct routing as well as tunneling
@@ -87,7 +95,7 @@ is enforced:
 
 .. code-block:: shell-session
 
-    $ kubectl -n kube-system exec ds/cilium -- cilium status | grep BandwidthManager
+    $ kubectl -n kube-system exec ds/cilium -- cilium-dbg status | grep BandwidthManager
     BandwidthManager:       EDT with BPF [BBR] [eth0]
 
 To verify that egress bandwidth limits are indeed being enforced, one can deploy two
@@ -163,12 +171,12 @@ the ``netperf-server`` Pod):
 
 .. code-block:: shell-session
 
-    $ kubectl exec -it -n kube-system cilium-xxxxxx -- cilium bpf bandwidth list
+    $ kubectl exec -it -n kube-system cilium-xxxxxx -- cilium-dbg bpf bandwidth list
     IDENTITY   EGRESS BANDWIDTH (BitsPerSec)
     491        10M
 
 Each Pod is represented in Cilium as an :ref:`endpoint` which has an identity. The above
-identity can then be correlated with the ``cilium endpoint list`` command.
+identity can then be correlated with the ``cilium-dbg endpoint list`` command.
 
 .. note::
 
@@ -226,7 +234,7 @@ info line:
 
 .. code-block:: shell-session
 
-    $ kubectl -n kube-system exec ds/cilium -- cilium status | grep BandwidthManager
+    $ kubectl -n kube-system exec ds/cilium -- cilium-dbg status | grep BandwidthManager
     BandwidthManager:       EDT with BPF [BBR] [eth0]
 
 Once this setting is enabled, it will use BBR as a default for all newly spawned Pods.

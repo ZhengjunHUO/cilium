@@ -5,6 +5,7 @@ package config
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -12,14 +13,20 @@ import (
 	"strings"
 	"testing"
 
+	. "github.com/cilium/checkmate"
+	"github.com/spf13/afero"
+	"github.com/stretchr/testify/require"
 	"github.com/vishvananda/netlink"
-	. "gopkg.in/check.v1"
 
 	"github.com/cilium/ebpf/rlimit"
 
+	fakeTypes "github.com/cilium/cilium/pkg/datapath/fake/types"
+	dpdef "github.com/cilium/cilium/pkg/datapath/linux/config/defines"
+	"github.com/cilium/cilium/pkg/datapath/linux/sysctl"
 	"github.com/cilium/cilium/pkg/datapath/loader"
 	datapath "github.com/cilium/cilium/pkg/datapath/types"
-	"github.com/cilium/cilium/pkg/maps/ctmap"
+	"github.com/cilium/cilium/pkg/hive"
+	"github.com/cilium/cilium/pkg/hive/cell"
 	"github.com/cilium/cilium/pkg/node"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/testutils"
@@ -34,7 +41,9 @@ func Test(t *testing.T) {
 var (
 	_ = Suite(&ConfigSuite{})
 
-	dummyNodeCfg  = datapath.LocalNodeConfiguration{}
+	dummyNodeCfg = datapath.LocalNodeConfiguration{
+		MtuConfig: &fakeTypes.MTU{},
+	}
 	dummyDevCfg   = testutils.NewTestEndpoint()
 	dummyEPCfg    = testutils.NewTestEndpoint()
 	ipv4DummyAddr = netip.MustParseAddr("192.0.2.3")
@@ -42,22 +51,25 @@ var (
 )
 
 func (s *ConfigSuite) SetUpSuite(c *C) {
-	testutils.PrivilegedCheck(c)
-
-	ctmap.InitMapInfo(option.CTMapEntriesGlobalTCPDefault, option.CTMapEntriesGlobalAnyDefault, true, true, true)
+	testutils.PrivilegedTest(c)
 }
 
-func (s *ConfigSuite) SetUpTest(c *C) {
-	err := rlimit.RemoveMemlock()
-	c.Assert(err, IsNil)
+func setup(tb testing.TB) {
+	tb.Helper()
+
+	require.NoError(tb, rlimit.RemoveMemlock(), "Failed to remove memory limits")
+
+	option.Config.EnableHostLegacyRouting = true // Disable obtaining direct routing device.
+	node.SetTestLocalNodeStore()
 	node.InitDefaultPrefix("")
 	node.SetInternalIPv4Router(ipv4DummyAddr.AsSlice())
 	node.SetIPv4Loopback(ipv4DummyAddr.AsSlice())
+
+	tb.Cleanup(node.UnsetTestLocalNodeStore)
 }
 
-func (s *ConfigSuite) TearDownTest(c *C) {
-	node.SetInternalIPv4Router(nil)
-	node.SetIPv4Loopback(nil)
+func (s *ConfigSuite) SetUpTest(c *C) {
+	setup(c)
 }
 
 type badWriter struct{}
@@ -86,9 +98,24 @@ func writeConfig(c *C, header string, write writeFn) {
 		},
 	}
 	for _, test := range tests {
+		var writer datapath.ConfigWriter
 		c.Logf("  Testing %s configuration: %s", header, test.description)
-		cfg := &HeaderfileWriter{}
-		c.Assert(write(test.output, cfg), test.expResult)
+		h := hive.New(
+			cell.Provide(
+				fakeTypes.NewNodeAddressing,
+				func() datapath.BandwidthManager { return &fakeTypes.BandwidthManager{} },
+				func() sysctl.Sysctl { return sysctl.NewDirectSysctl(afero.NewOsFs(), "/proc") },
+				NewHeaderfileWriter,
+			),
+			cell.Invoke(func(writer_ datapath.ConfigWriter) {
+				writer = writer_
+			}),
+		)
+
+		require.NoError(c, h.Start(context.TODO()))
+		c.Cleanup(func() { require.Nil(c, h.Stop(context.TODO())) })
+
+		c.Assert(write(test.output, writer), test.expResult)
 	}
 }
 
@@ -118,9 +145,9 @@ func (s *ConfigSuite) TestWriteEndpointConfig(c *C) {
 		option.Config.EnableIPv6 = oldEnableIPv6
 	}()
 
-	testRun := func(t *testutils.TestEndpoint) ([]byte, map[string]uint32, map[string]string) {
+	testRun := func(t *testutils.TestEndpoint) ([]byte, map[string]uint64, map[string]string) {
 		cfg := &HeaderfileWriter{}
-		varSub, stringSub := loader.ELFSubstitutions(t)
+		varSub, stringSub := loader.NewLoader(sysctl.NewDirectSysctl(afero.NewOsFs(), "/proc")).ELFSubstitutions(t)
 
 		var buf bytes.Buffer
 		cfg.writeStaticData(&buf, t)
@@ -128,7 +155,7 @@ func (s *ConfigSuite) TestWriteEndpointConfig(c *C) {
 		return buf.Bytes(), varSub, stringSub
 	}
 
-	lxcIPs := []string{"LXC_IP_1", "LXC_IP_2", "LXC_IP_3", "LXC_IP_4"}
+	lxcIPs := []string{"LXC_IP_1", "LXC_IP_2"}
 
 	tests := []struct {
 		description string
@@ -205,15 +232,15 @@ func (s *ConfigSuite) TestWriteStaticData(c *C) {
 	cfg := &HeaderfileWriter{}
 	ep := &dummyEPCfg
 
-	varSub, stringSub := loader.ELFSubstitutions(ep)
+	varSub, stringSub := loader.NewLoader(sysctl.NewDirectSysctl(afero.NewOsFs(), "/proc")).ELFSubstitutions(ep)
 
 	var buf bytes.Buffer
 	cfg.writeStaticData(&buf, ep)
 	b := buf.Bytes()
 	for k := range varSub {
-		for _, suffix := range []string{"_1", "_2", "_3", "_4"} {
+		for _, suffix := range []string{"_1", "_2"} {
 			// Variables with these suffixes are implemented via
-			// multiple 32-bit values. The header define doesn't
+			// multiple 64-bit values. The header define doesn't
 			// include these numbers though, so strip them.
 			if strings.HasSuffix(k, suffix) {
 				k = strings.TrimSuffix(k, suffix)
@@ -232,7 +259,7 @@ func (s *ConfigSuite) TestWriteStaticData(c *C) {
 	}
 }
 
-func assertKeysInsideMap(c *C, m map[string]uint32, keys []string, want bool) {
+func assertKeysInsideMap(c *C, m map[string]uint64, keys []string, want bool) {
 	for _, v := range keys {
 		_, ok := m[v]
 		c.Assert(ok, Equals, want)
@@ -326,4 +353,91 @@ return false;`, main1.Index, main2.Index))
 	m, err = vlanFilterMacros()
 	c.Assert(err, IsNil)
 	c.Assert(m, Equals, "return true")
+}
+
+func TestWriteNodeConfigExtraDefines(t *testing.T) {
+	testutils.PrivilegedTest(t)
+	setup(t)
+
+	var buffer bytes.Buffer
+
+	// Assert that configurations are propagated when all generated extra defines are valid
+	cfg, err := NewHeaderfileWriter(WriterParams{
+		NodeAddressing:   fakeTypes.NewNodeAddressing(),
+		NodeExtraDefines: nil,
+		NodeExtraDefineFns: []dpdef.Fn{
+			func() (dpdef.Map, error) { return dpdef.Map{"FOO": "0x1", "BAR": "0x2"}, nil },
+			func() (dpdef.Map, error) { return dpdef.Map{"BAZ": "0x3"}, nil },
+		},
+		Sysctl: sysctl.NewDirectSysctl(afero.NewOsFs(), "/proc"),
+	})
+	require.NoError(t, err)
+
+	buffer.Reset()
+	require.NoError(t, cfg.WriteNodeConfig(&buffer, &dummyNodeCfg))
+
+	output := buffer.String()
+	require.Contains(t, output, "define FOO 0x1\n")
+	require.Contains(t, output, "define BAR 0x2\n")
+	require.Contains(t, output, "define BAZ 0x3\n")
+
+	// Assert that an error is returned when one extra define function returns an error
+	cfg, err = NewHeaderfileWriter(WriterParams{
+		NodeAddressing:   fakeTypes.NewNodeAddressing(),
+		NodeExtraDefines: nil,
+		NodeExtraDefineFns: []dpdef.Fn{
+			func() (dpdef.Map, error) { return nil, errors.New("failing on purpose") },
+		},
+		BandwidthManager: &fakeTypes.BandwidthManager{},
+		Sysctl:           sysctl.NewDirectSysctl(afero.NewOsFs(), "/proc"),
+	})
+	require.NoError(t, err)
+
+	buffer.Reset()
+	require.Error(t, cfg.WriteNodeConfig(&buffer, &dummyNodeCfg))
+
+	// Assert that an error is returned when one extra define would overwrite an already existing entry
+	cfg, err = NewHeaderfileWriter(WriterParams{
+		NodeAddressing:   fakeTypes.NewNodeAddressing(),
+		NodeExtraDefines: nil,
+		NodeExtraDefineFns: []dpdef.Fn{
+			func() (dpdef.Map, error) { return dpdef.Map{"FOO": "0x1", "BAR": "0x2"}, nil },
+			func() (dpdef.Map, error) { return dpdef.Map{"FOO": "0x3"}, nil },
+		},
+		BandwidthManager: &fakeTypes.BandwidthManager{},
+		Sysctl:           sysctl.NewDirectSysctl(afero.NewOsFs(), "/proc"),
+	})
+	require.NoError(t, err)
+
+	buffer.Reset()
+	require.Error(t, cfg.WriteNodeConfig(&buffer, &dummyNodeCfg))
+}
+
+func TestNewHeaderfileWriter(t *testing.T) {
+	testutils.PrivilegedTest(t)
+	setup(t)
+
+	a := dpdef.Map{"A": "1"}
+	var buffer bytes.Buffer
+
+	_, err := NewHeaderfileWriter(WriterParams{
+		NodeAddressing:     fakeTypes.NewNodeAddressing(),
+		NodeExtraDefines:   []dpdef.Map{a, a},
+		NodeExtraDefineFns: nil,
+		BandwidthManager:   &fakeTypes.BandwidthManager{},
+		Sysctl:             sysctl.NewDirectSysctl(afero.NewOsFs(), "/proc"),
+	})
+
+	require.Error(t, err, "duplicate keys should be rejected")
+
+	cfg, err := NewHeaderfileWriter(WriterParams{
+		NodeAddressing:     fakeTypes.NewNodeAddressing(),
+		NodeExtraDefines:   []dpdef.Map{a},
+		NodeExtraDefineFns: nil,
+		BandwidthManager:   &fakeTypes.BandwidthManager{},
+		Sysctl:             sysctl.NewDirectSysctl(afero.NewOsFs(), "/proc"),
+	})
+	require.NoError(t, err)
+	require.NoError(t, cfg.WriteNodeConfig(&buffer, &dummyNodeCfg))
+	require.Contains(t, buffer.String(), "define A 1\n")
 }

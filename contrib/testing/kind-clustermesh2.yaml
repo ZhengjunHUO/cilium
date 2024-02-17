@@ -4,17 +4,14 @@ cluster:
 debug:
   enabled: true
 image:
-  override: "localhost:5000/cilium/cilium-dev:local"
   pullPolicy: Never
 operator:
   image:
-    override: "localhost:5000/cilium/operator-generic:local"
     pullPolicy: Never
-    suffix: ""
 ipam:
   mode: kubernetes
 ipv6:
-  enabled: false
+  enabled: true
 ipv4:
   enabled: true
 bpf:
@@ -25,3 +22,10 @@ readinessProbe:
   failureThreshold: 9999
 startupProbe:
   failureThreshold: 9999
+clustermesh:
+  useAPIServer: true
+  apiserver:
+    image:
+      pullPolicy: Never
+    service:
+      nodePort: 32380

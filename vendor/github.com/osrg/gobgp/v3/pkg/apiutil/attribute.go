@@ -1082,6 +1082,18 @@ func MarshalNLRI(value bgp.AddrPrefixInterface) (*apb.Any, error) {
 		nlri = &api.EncapsulationNLRI{
 			Address: v.String(),
 		}
+	case *bgp.VPLSNLRI:
+		rd, err := MarshalRD(v.RD())
+		if err != nil {
+			return nil, err
+		}
+		nlri = &api.VPLSNLRI{
+			Rd:             rd,
+			VeId:           uint32(v.VEID),
+			VeBlockOffset:  uint32(v.VEBlockOffset),
+			VeBlockSize:    uint32(v.VEBlockSize),
+			LabelBlockBase: v.LabelBlockBase,
+		}
 	case *bgp.EVPNNLRI:
 		switch r := v.RouteTypeData.(type) {
 		case *bgp.EVPNEthernetAutoDiscoveryRoute:
@@ -1340,6 +1352,12 @@ func MarshalNLRI(value bgp.AddrPrefixInterface) (*apb.Any, error) {
 			if err != nil {
 				return nil, err
 			}
+			var sal uint32
+			var sa string
+			if r.SourceAddressLength > 0 && r.SourceAddress != nil {
+				sal = uint32(r.SourceAddressLength)
+				sa = r.SourceAddress.String()
+			}
 			nlri = &api.MUPType1SessionTransformedRoute{
 				Rd:                    rd,
 				Prefix:                r.Prefix.String(),
@@ -1347,6 +1365,8 @@ func MarshalNLRI(value bgp.AddrPrefixInterface) (*apb.Any, error) {
 				Qfi:                   uint32(r.QFI),
 				EndpointAddressLength: uint32(r.EndpointAddressLength),
 				EndpointAddress:       r.EndpointAddress.String(),
+				SourceAddressLength:   sal,
+				SourceAddress:         sa,
 			}
 		case *bgp.MUPType2SessionTransformedRoute:
 			rd, err := MarshalRD(r.RD)
@@ -1408,6 +1428,19 @@ func UnmarshalNLRI(rf bgp.RouteFamily, an *apb.Any) (bgp.AddrPrefixInterface, er
 			nlri = bgp.NewEncapNLRI(v.Address)
 		case bgp.RF_IPv6_ENCAP:
 			nlri = bgp.NewEncapv6NLRI(v.Address)
+		}
+	case *api.VPLSNLRI:
+		if rf == bgp.RF_VPLS {
+			rd, err := UnmarshalRD(v.Rd)
+			if err != nil {
+				return nil, err
+			}
+			nlri = bgp.NewVPLSNLRI(
+				rd,
+				uint16(v.VeId),
+				uint16(v.VeBlockOffset),
+				uint16(v.VeBlockSize),
+				v.LabelBlockBase)
 		}
 	case *api.EVPNEthernetAutoDiscoveryRoute:
 		if rf == bgp.RF_EVPN {
@@ -1556,7 +1589,15 @@ func UnmarshalNLRI(rf bgp.RouteFamily, an *apb.Any) (bgp.AddrPrefixInterface, er
 		if !ok {
 			return nil, fmt.Errorf("invalid teid: %x", v.Teid)
 		}
-		nlri = bgp.NewMUPType1SessionTransformedRoute(rd, prefix, teid, uint8(v.Qfi), ea)
+		var sa *netip.Addr
+		if v.SourceAddressLength > 0 && v.SourceAddress != "" {
+			a, err := netip.ParseAddr(v.SourceAddress)
+			if err != nil {
+				return nil, err
+			}
+			sa = &a
+		}
+		nlri = bgp.NewMUPType1SessionTransformedRoute(rd, prefix, teid, uint8(v.Qfi), ea, sa)
 	case *api.MUPType2SessionTransformedRoute:
 		rd, err := UnmarshalRD(v.Rd)
 		if err != nil {
@@ -1919,6 +1960,11 @@ func NewExtendedCommunitiesAttributeFromNative(a *bgp.PathAttributeExtendedCommu
 				SegmentId2: uint32(v.SegmentID2),
 				SegmentId4: v.SegmentID4,
 			}
+		case *bgp.VPLSExtended:
+			community = &api.VPLSExtended{
+				ControlFlags: uint32(v.ControlFlags),
+				Mtu:          uint32(v.MTU),
+			}
 		case *bgp.UnknownExtended:
 			community = &api.UnknownExtended{
 				Type:  uint32(v.Type),
@@ -1984,6 +2030,8 @@ func unmarshalExComm(a *api.ExtendedCommunitiesAttribute) (*bgp.PathAttributeExt
 			community = bgp.NewTrafficRemarkExtended(uint8(v.Dscp))
 		case *api.MUPExtended:
 			community = bgp.NewMUPExtended(uint16(v.SegmentId2), v.SegmentId4)
+		case *api.VPLSExtended:
+			community = bgp.NewVPLSExtended(uint8(v.ControlFlags), uint16(v.Mtu))
 		case *api.UnknownExtended:
 			community = bgp.NewUnknownExtended(bgp.ExtendedCommunityAttrType(v.Type), v.Value)
 		}
@@ -2736,8 +2784,8 @@ func UnmarshalPrefixSID(psid *api.PrefixSID) (*bgp.PathAttributePrefixSID, error
 			return nil, fmt.Errorf("unknown or not implemented Prefix SID type: %+v", v)
 		}
 	}
-	// Final Path Attribute Length is 3 bytes of the header and 1 byte Reserved1
-	s.PathAttribute.Length += (3 + 1)
+	// Final Path Attribute Length is 3 bytes of the Path Attribute header longer
+	s.PathAttribute.Length += 3
 	return s, nil
 }
 
@@ -2781,7 +2829,7 @@ func UnmarshalSubTLVs(stlvs map[uint32]*api.SRv6TLV) (uint16, []bgp.PrefixSIDTLV
 				// SRv6 Information Sub TLV length consists 1 byte Resrved2, 16 bytes SID, 1 byte flags, 2 bytes Endpoint Behavior
 				// 1 byte Reserved3 and length of Sub Sub TLVs
 				info.SubTLV.Length = 1 + 16 + 1 + 2 + 1 + sstlvslength
-				// For total Srv6 Information Sub TLV length, adding 3 bytes of the Sub TLV header
+				// For total Prefix SID TLV length, adding 3 bytes of the TLV header + 1 byte of Reserved1
 				l += info.SubTLV.Length + 4
 				p = append(p, info)
 			}

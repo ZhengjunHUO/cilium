@@ -33,32 +33,22 @@ type DescribeVpcEndpointServiceConfigurationsInput struct {
 
 	// Checks whether you have the required permissions for the action, without
 	// actually making the request, and provides an error response. If you have the
-	// required permissions, the error response is DryRunOperation. Otherwise, it is
-	// UnauthorizedOperation.
+	// required permissions, the error response is DryRunOperation . Otherwise, it is
+	// UnauthorizedOperation .
 	DryRun *bool
 
-	// One or more filters.
-	//
-	// * service-name - The name of the service.
-	//
-	// * service-id -
-	// The ID of the service.
-	//
-	// * service-state - The state of the service (Pending |
-	// Available | Deleting | Deleted | Failed).
-	//
-	// * supported-ip-address-types - The IP
-	// address type (ipv4 | ipv6).
-	//
-	// * tag: - The key/value combination of a tag
-	// assigned to the resource. Use the tag key in the filter name and the tag value
-	// as the filter value. For example, to find all resources that have a tag with the
-	// key Owner and the value TeamA, specify tag:Owner for the filter name and TeamA
-	// for the filter value.
-	//
-	// * tag-key - The key of a tag assigned to the resource.
-	// Use this filter to find all resources assigned a tag with a specific key,
-	// regardless of the tag value.
+	// The filters.
+	//   - service-name - The name of the service.
+	//   - service-id - The ID of the service.
+	//   - service-state - The state of the service ( Pending | Available | Deleting |
+	//   Deleted | Failed ).
+	//   - supported-ip-address-types - The IP address type ( ipv4 | ipv6 ).
+	//   - tag : - The key/value combination of a tag assigned to the resource. Use the
+	//   tag key in the filter name and the tag value as the filter value. For example,
+	//   to find all resources that have a tag with the key Owner and the value TeamA ,
+	//   specify tag:Owner for the filter name and TeamA for the filter value.
+	//   - tag-key - The key of a tag assigned to the resource. Use this filter to find
+	//   all resources assigned a tag with a specific key, regardless of the tag value.
 	Filters []types.Filter
 
 	// The maximum number of results to return for the request in a single page. The
@@ -70,7 +60,7 @@ type DescribeVpcEndpointServiceConfigurationsInput struct {
 	// The token to retrieve the next page of results.
 	NextToken *string
 
-	// The IDs of one or more services.
+	// The IDs of the endpoint services.
 	ServiceIds []string
 
 	noSmithyDocumentSerde
@@ -82,7 +72,7 @@ type DescribeVpcEndpointServiceConfigurationsOutput struct {
 	// there are no more results to return.
 	NextToken *string
 
-	// Information about one or more services.
+	// Information about the services.
 	ServiceConfigurations []types.ServiceConfiguration
 
 	// Metadata pertaining to the operation's result.
@@ -92,12 +82,22 @@ type DescribeVpcEndpointServiceConfigurationsOutput struct {
 }
 
 func (c *Client) addOperationDescribeVpcEndpointServiceConfigurationsMiddlewares(stack *middleware.Stack, options Options) (err error) {
+	if err := stack.Serialize.Add(&setOperationInputMiddleware{}, middleware.After); err != nil {
+		return err
+	}
 	err = stack.Serialize.Add(&awsEc2query_serializeOpDescribeVpcEndpointServiceConfigurations{}, middleware.After)
 	if err != nil {
 		return err
 	}
 	err = stack.Deserialize.Add(&awsEc2query_deserializeOpDescribeVpcEndpointServiceConfigurations{}, middleware.After)
 	if err != nil {
+		return err
+	}
+	if err := addProtocolFinalizerMiddlewares(stack, options, "DescribeVpcEndpointServiceConfigurations"); err != nil {
+		return fmt.Errorf("add protocol finalizers: %v", err)
+	}
+
+	if err = addlegacyEndpointContextSetter(stack, options); err != nil {
 		return err
 	}
 	if err = addSetLoggerMiddleware(stack, options); err != nil {
@@ -118,16 +118,13 @@ func (c *Client) addOperationDescribeVpcEndpointServiceConfigurationsMiddlewares
 	if err = addRetryMiddlewares(stack, options); err != nil {
 		return err
 	}
-	if err = addHTTPSignerV4Middleware(stack, options); err != nil {
-		return err
-	}
 	if err = awsmiddleware.AddRawResponseToMetadata(stack); err != nil {
 		return err
 	}
 	if err = awsmiddleware.AddRecordResponseTiming(stack); err != nil {
 		return err
 	}
-	if err = addClientUserAgent(stack); err != nil {
+	if err = addClientUserAgent(stack, options); err != nil {
 		return err
 	}
 	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
@@ -136,7 +133,13 @@ func (c *Client) addOperationDescribeVpcEndpointServiceConfigurationsMiddlewares
 	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
 		return err
 	}
+	if err = addSetLegacyContextSigningOptionsMiddleware(stack); err != nil {
+		return err
+	}
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opDescribeVpcEndpointServiceConfigurations(options.Region), middleware.Before); err != nil {
+		return err
+	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
@@ -146,6 +149,9 @@ func (c *Client) addOperationDescribeVpcEndpointServiceConfigurationsMiddlewares
 		return err
 	}
 	if err = addRequestResponseLogging(stack, options); err != nil {
+		return err
+	}
+	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
 		return err
 	}
 	return nil
@@ -251,7 +257,6 @@ func newServiceMetadataMiddleware_opDescribeVpcEndpointServiceConfigurations(reg
 	return &awsmiddleware.RegisterServiceMetadata{
 		Region:        region,
 		ServiceID:     ServiceID,
-		SigningName:   "ec2",
 		OperationName: "DescribeVpcEndpointServiceConfigurations",
 	}
 }

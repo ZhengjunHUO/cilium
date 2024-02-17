@@ -11,14 +11,18 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cilium/fake"
+	"github.com/google/gopacket/layers"
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/fieldmaskpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
-	"k8s.io/client-go/tools/cache"
 
 	flowpb "github.com/cilium/cilium/api/v1/flow"
 	observerpb "github.com/cilium/cilium/api/v1/observer"
+	hubv1 "github.com/cilium/cilium/pkg/hubble/api/v1"
 	"github.com/cilium/cilium/pkg/hubble/container"
 	"github.com/cilium/cilium/pkg/hubble/observer/observeroption"
 	observerTypes "github.com/cilium/cilium/pkg/hubble/observer/types"
@@ -28,7 +32,10 @@ import (
 	monitorAPI "github.com/cilium/cilium/pkg/monitor/api"
 )
 
-var log *logrus.Logger
+var (
+	log       *logrus.Logger
+	nsManager = NewNamespaceManager()
+)
 
 func init() {
 	log = logrus.New()
@@ -52,7 +59,7 @@ func noopParser(t *testing.T) *parser.Parser {
 
 func TestNewLocalServer(t *testing.T) {
 	pp := noopParser(t)
-	s, err := NewLocalServer(pp, log)
+	s, err := NewLocalServer(pp, nsManager, log)
 	require.NoError(t, err)
 	assert.NotNil(t, s.GetStopped())
 	assert.NotNil(t, s.GetPayloadParser())
@@ -63,13 +70,134 @@ func TestNewLocalServer(t *testing.T) {
 
 func TestLocalObserverServer_ServerStatus(t *testing.T) {
 	pp := noopParser(t)
-	s, err := NewLocalServer(pp, log, observeroption.WithMaxFlows(container.Capacity1))
+	s, err := NewLocalServer(pp, nsManager, log, observeroption.WithMaxFlows(container.Capacity1))
 	require.NoError(t, err)
 	res, err := s.ServerStatus(context.Background(), &observerpb.ServerStatusRequest{})
 	require.NoError(t, err)
 	assert.Equal(t, uint64(0), res.SeenFlows)
 	assert.Equal(t, uint64(0), res.NumFlows)
 	assert.Equal(t, uint64(1), res.MaxFlows)
+	assert.Equal(t, float64(0), res.FlowsRate)
+}
+
+func TestGetFlowRate(t *testing.T) {
+	type event struct {
+		offset int
+		event  interface{}
+	}
+
+	tcs := map[string]struct {
+		ringCap container.Capacity
+		events  []event
+		rate    float64
+	}{
+		"0.5 Flow/s": {
+			events: []event{
+				{offset: 2000},
+				{offset: 4000},
+				{offset: 6000},
+				{offset: 8000},
+				{offset: 10000},
+				{offset: 12000},
+				{offset: 14000},
+				{offset: 16000},
+			},
+			rate: 0.5,
+		},
+		"2 Flow/s": {
+			events: []event{
+				{offset: 500},
+				{offset: 1000},
+				{offset: 1500},
+				{offset: 2000},
+				{offset: 2500},
+				{offset: 3000},
+				{offset: 3500},
+				{offset: 4000},
+			},
+			rate: 2,
+		},
+		"1 Flow/s  Full buffer": {
+			ringCap: container.Capacity7,
+			events: []event{
+				{offset: 1000},
+				{offset: 2000},
+				{offset: 3000},
+				{offset: 4000},
+				{offset: 5000},
+				{offset: 6000},
+				{offset: 7000},
+				{offset: 8000},
+				{offset: 9000},
+				{offset: 10000},
+			},
+			rate: 1,
+		},
+		"0.15 Flow/s  with flows older than 1 min": {
+			events: []event{
+				{offset: 1000},
+				{offset: 2000},
+				{offset: 3000},
+				{offset: 4000},
+				{offset: 5000},
+				{offset: 6000},
+				{offset: 7000},
+				{offset: 8000},
+				{offset: 9000},
+				{offset: 61000},
+			},
+			rate: 0.15,
+		},
+		"1 Flow/s  with non flow events": {
+			events: []event{
+				{offset: 1000},
+				{offset: 2000},
+				{
+					offset: 2500,
+					event:  &flowpb.AgentEvent{},
+				},
+				{offset: 3000},
+				{offset: 4000},
+				{
+					offset: 2500,
+					event:  &flowpb.DebugEvent{},
+				},
+				{offset: 5000},
+				{offset: 6000},
+				{offset: 7000},
+			},
+			rate: 1,
+		},
+	}
+	now := time.Now()
+
+	for name, tc := range tcs {
+		t.Run(name, func(t *testing.T) {
+			var c container.Capacity = container.Capacity63
+			if tc.ringCap != nil {
+				c = tc.ringCap
+			}
+			ring := container.NewRing(c)
+			for i := len(tc.events) - 1; i >= 0; i-- {
+				ev := tc.events[i].event
+				if ev == nil {
+					// Default is flow
+					ev = &flowpb.Flow{}
+				}
+				ring.Write(&hubv1.Event{
+					Timestamp: timestamppb.New(now.Add(-1 * time.Duration(tc.events[i].offset) * time.Millisecond)),
+					Event:     ev,
+				})
+			}
+			// Dummy value so that we can actually read all flows
+			ring.Write(&hubv1.Event{
+				Timestamp: timestamppb.New(now.Add(time.Second)),
+			})
+			rate, err := getFlowRate(ring, now)
+			assert.NoError(t, err)
+			assert.Equal(t, tc.rate, rate)
+		})
+	}
 }
 
 func TestLocalObserverServer_GetFlows(t *testing.T) {
@@ -82,7 +210,7 @@ func TestLocalObserverServer_GetFlows(t *testing.T) {
 		OnSend: func(response *observerpb.GetFlowsResponse) error {
 			assert.Equal(t, response.GetTime(), response.GetFlow().GetTime())
 			assert.Equal(t, response.GetNodeName(), response.GetFlow().GetNodeName())
-			output = append(output, response.GetFlow())
+			output = append(output, proto.Clone(response.GetFlow()).(*flowpb.Flow))
 			i++
 			return nil
 		},
@@ -94,7 +222,7 @@ func TestLocalObserverServer_GetFlows(t *testing.T) {
 	}
 
 	pp := noopParser(t)
-	s, err := NewLocalServer(pp, log,
+	s, err := NewLocalServer(pp, nsManager, log,
 		observeroption.WithMaxFlows(container.Capacity127),
 		observeroption.WithMonitorBuffer(queueSize),
 	)
@@ -106,7 +234,15 @@ func TestLocalObserverServer_GetFlows(t *testing.T) {
 
 	for i := 0; i < numFlows; i++ {
 		tn := monitor.TraceNotifyV0{Type: byte(monitorAPI.MessageTypeTrace)}
-		data := testutils.MustCreateL3L4Payload(tn)
+		macOnly := func(mac string) net.HardwareAddr {
+			m, _ := net.ParseMAC(mac)
+			return m
+		}
+		data := testutils.MustCreateL3L4Payload(tn, &layers.Ethernet{
+			SrcMAC: macOnly(fake.MAC()),
+			DstMAC: macOnly(fake.MAC()),
+		})
+
 		event := &observerTypes.MonitorEvent{
 			Timestamp: time.Unix(int64(i), 0),
 			NodeName:  fmt.Sprintf("node #%03d", i),
@@ -133,7 +269,9 @@ func TestLocalObserverServer_GetFlows(t *testing.T) {
 	// 1, because the last event is inaccessible due to how the ring buffer
 	// works.
 	last10Input := input[numFlows-11 : numFlows-1]
-	assert.Equal(t, last10Input, output)
+	for i := range output {
+		assert.True(t, proto.Equal(last10Input[i], output[i]))
+	}
 
 	// Clear out the output slice, as we're making another request
 	output = nil
@@ -145,7 +283,49 @@ func TestLocalObserverServer_GetFlows(t *testing.T) {
 	assert.Equal(t, req.Number, uint64(i))
 
 	first10Input := input[0:10]
-	assert.Equal(t, first10Input, output)
+	for i := range output {
+		assert.True(t, proto.Equal(first10Input[i], output[i]))
+	}
+
+	// Clear out the output slice, as we're making another request
+	output = nil
+	i = 0
+	// testing getting subset of fields with field mask
+	fmPaths := []string{"trace_observation_point", "ethernet.source"}
+	req = &observerpb.GetFlowsRequest{
+		Number:    uint64(10),
+		FieldMask: &fieldmaskpb.FieldMask{Paths: fmPaths},
+		Experimental: &observerpb.GetFlowsRequest_Experimental{
+			FieldMask: &fieldmaskpb.FieldMask{Paths: fmPaths},
+		},
+	}
+	err = s.GetFlows(req, fakeServer)
+	assert.NoError(t, err)
+	assert.Equal(t, req.Number, uint64(i))
+
+	for i, out := range output {
+		assert.Equal(t, last10Input[i].TraceObservationPoint, out.TraceObservationPoint)
+		assert.Equal(t, last10Input[i].Ethernet.Source, out.Ethernet.Source)
+		assert.Empty(t, out.Ethernet.Destination)
+		assert.Empty(t, out.Verdict)
+		assert.Empty(t, out.Summary)
+		// Keeps original as is
+		assert.NotEmpty(t, last10Input[i].Summary)
+	}
+
+	// Clear out the output slice, as we're making another request
+	output = nil
+	i = 0
+	// testing getting all fields with field mask
+	req = &observerpb.GetFlowsRequest{
+		Number:    uint64(10),
+		FieldMask: &fieldmaskpb.FieldMask{Paths: []string{""}},
+		Experimental: &observerpb.GetFlowsRequest_Experimental{
+			FieldMask: &fieldmaskpb.FieldMask{Paths: []string{""}},
+		},
+	}
+	err = s.GetFlows(req, fakeServer)
+	assert.EqualError(t, err, "invalid fieldmask")
 }
 
 func TestLocalObserverServer_GetAgentEvents(t *testing.T) {
@@ -187,7 +367,7 @@ func TestLocalObserverServer_GetAgentEvents(t *testing.T) {
 	}
 
 	pp := noopParser(t)
-	s, err := NewLocalServer(pp, log,
+	s, err := NewLocalServer(pp, nsManager, log,
 		observeroption.WithMonitorBuffer(queueSize),
 	)
 	require.NoError(t, err)
@@ -238,7 +418,7 @@ func TestLocalObserverServer_GetFlows_Follow_Since(t *testing.T) {
 	}
 
 	pp := noopParser(t)
-	s, err := NewLocalServer(pp, log,
+	s, err := NewLocalServer(pp, nsManager, log,
 		observeroption.WithMaxFlows(container.Capacity127),
 		observeroption.WithMonitorBuffer(queueSize),
 	)
@@ -313,10 +493,6 @@ func (f *fakeCiliumDaemon) DebugEnabled() bool {
 	return true
 }
 
-func (f *fakeCiliumDaemon) GetK8sStore(name string) cache.Store {
-	return nil
-}
-
 func TestHooks(t *testing.T) {
 	numFlows := 10
 	queueSize := 0
@@ -352,7 +528,7 @@ func TestHooks(t *testing.T) {
 	}
 
 	pp := noopParser(t)
-	s, err := NewLocalServer(pp, log,
+	s, err := NewLocalServer(pp, nsManager, log,
 		observeroption.WithMaxFlows(container.Capacity15),
 		observeroption.WithMonitorBuffer(queueSize),
 		observeroption.WithCiliumDaemon(ciliumDaemon),
@@ -411,7 +587,7 @@ func TestLocalObserverServer_OnFlowDelivery(t *testing.T) {
 	}
 
 	pp := noopParser(t)
-	s, err := NewLocalServer(pp, log,
+	s, err := NewLocalServer(pp, nsManager, log,
 		observeroption.WithMaxFlows(container.Capacity127),
 		observeroption.WithMonitorBuffer(queueSize),
 		observeroption.WithOnFlowDeliveryFunc(onFlowDelivery),
@@ -474,7 +650,7 @@ func TestLocalObserverServer_OnGetFlows(t *testing.T) {
 	}
 
 	pp := noopParser(t)
-	s, err := NewLocalServer(pp, log,
+	s, err := NewLocalServer(pp, nsManager, log,
 		observeroption.WithMaxFlows(container.Capacity127),
 		observeroption.WithMonitorBuffer(queueSize),
 		observeroption.WithOnFlowDeliveryFunc(onFlowDelivery),
@@ -504,4 +680,72 @@ func TestLocalObserverServer_OnGetFlows(t *testing.T) {
 	// This should be assert.Equals(t, flowsReceived, numFlows)
 	// A bug in the ring buffer prevents this from succeeding
 	assert.Greater(t, flowsReceived, 0)
+}
+
+func TestLocalObserverServer_GetNamespaces(t *testing.T) {
+	pp := noopParser(t)
+	nsManager := NewNamespaceManager()
+	nsManager.AddNamespace(&observerpb.Namespace{
+		Namespace: "zzz",
+	})
+	nsManager.AddNamespace(&observerpb.Namespace{
+		Namespace: "bbb",
+		Cluster:   "some-cluster",
+	})
+	nsManager.AddNamespace(&observerpb.Namespace{
+		Namespace: "aaa",
+		Cluster:   "some-cluster",
+	})
+	s, err := NewLocalServer(pp, nsManager, log, observeroption.WithMaxFlows(container.Capacity1))
+	require.NoError(t, err)
+	res, err := s.GetNamespaces(context.Background(), &observerpb.GetNamespacesRequest{})
+	require.NoError(t, err)
+	expected := &observerpb.GetNamespacesResponse{
+		Namespaces: []*observerpb.Namespace{
+			{
+				Namespace: "zzz",
+			},
+			{
+				Namespace: "aaa",
+				Cluster:   "some-cluster",
+			},
+			{
+				Namespace: "bbb",
+				Cluster:   "some-cluster",
+			},
+		},
+	}
+	assert.Equal(t, expected, res)
+}
+
+func Benchmark_TrackNamespaces(b *testing.B) {
+	pp, err := parser.New(
+		log,
+		&testutils.NoopEndpointGetter,
+		&testutils.NoopIdentityGetter,
+		&testutils.NoopDNSGetter,
+		&testutils.NoopIPGetter,
+		&testutils.NoopServiceGetter,
+		&testutils.NoopLinkGetter,
+		&testutils.NoopPodMetadataGetter,
+	)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	nsManager := NewNamespaceManager()
+	s, err := NewLocalServer(pp, nsManager, log, observeroption.WithMaxFlows(container.Capacity1))
+	if err != nil {
+		b.Fatal(err)
+	}
+	f := &flowpb.Flow{
+		Source:      &flowpb.Endpoint{Namespace: "foo"},
+		Destination: &flowpb.Endpoint{Namespace: "bar"},
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		s.trackNamespaces(f)
+	}
 }

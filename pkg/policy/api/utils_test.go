@@ -6,11 +6,11 @@ package api
 import (
 	"testing"
 
-	. "gopkg.in/check.v1"
+	. "github.com/cilium/checkmate"
+	"github.com/cilium/proxy/pkg/policy/api/kafka"
 
 	"github.com/cilium/cilium/pkg/defaults"
 	"github.com/cilium/cilium/pkg/fqdn/re"
-	"github.com/cilium/cilium/pkg/policy/api/kafka"
 )
 
 // Hook up gocheck into the "go test" runner.
@@ -113,26 +113,110 @@ func (s *PolicyAPITestSuite) TestParseL4Proto(c *C) {
 }
 
 func (s *PolicyAPITestSuite) TestResourceQualifiedName(c *C) {
-	var fullName, namespace, name, resource string
+	// Empty resource name is passed through
+	name, updated := ResourceQualifiedName("", "", "")
+	c.Assert(name, Equals, "")
+	c.Assert(updated, Equals, false)
 
-	resource = "test-resource"
-	fullName = ResourceQualifiedName(namespace, name, resource)
-	c.Assert(fullName, Equals, "test-resource")
+	name, updated = ResourceQualifiedName("a", "", "")
+	c.Assert(name, Equals, "")
+	c.Assert(updated, Equals, false)
 
-	name = "test-name"
-	resource = "test-resource"
-	fullName = ResourceQualifiedName(namespace, name, resource)
-	c.Assert(fullName, Equals, "test-name/test-resource")
+	name, updated = ResourceQualifiedName("a", "", "")
+	c.Assert(name, Equals, "")
+	c.Assert(updated, Equals, false)
 
-	namespace = "test-namespace"
-	name = ""
-	resource = "test-resource"
-	fullName = ResourceQualifiedName(namespace, name, resource)
-	c.Assert(fullName, Equals, "test-namespace/test-resource")
+	name, updated = ResourceQualifiedName("a", "", "")
+	c.Assert(name, Equals, "")
+	c.Assert(updated, Equals, false)
 
-	namespace = "test-namespace"
-	name = "test-name"
-	resource = "test-resource"
-	fullName = ResourceQualifiedName(namespace, name, resource)
-	c.Assert(fullName, Equals, "test-namespace/test-name/test-resource")
+	name, updated = ResourceQualifiedName("", "b", "")
+	c.Assert(name, Equals, "")
+	c.Assert(updated, Equals, false)
+
+	name, updated = ResourceQualifiedName("", "", "", ForceNamespace)
+	c.Assert(name, Equals, "")
+	c.Assert(updated, Equals, false)
+
+	name, updated = ResourceQualifiedName("a", "", "", ForceNamespace)
+	c.Assert(name, Equals, "")
+	c.Assert(updated, Equals, false)
+
+	name, updated = ResourceQualifiedName("", "b", "", ForceNamespace)
+	c.Assert(name, Equals, "")
+	c.Assert(updated, Equals, false)
+
+	// Cluster-scope resources have no namespace
+	name, updated = ResourceQualifiedName("", "", "test-resource")
+	c.Assert(name, Equals, "//test-resource")
+	c.Assert(updated, Equals, true)
+
+	// Every resource has a name of a CEC they originate from
+	name, updated = ResourceQualifiedName("", "test-name", "test-resource")
+	c.Assert(name, Equals, "/test-name/test-resource")
+	c.Assert(updated, Equals, true)
+
+	// namespaced resources have a namespace
+	name, updated = ResourceQualifiedName("test-namespace", "", "test-resource")
+	c.Assert(name, Equals, "test-namespace//test-resource")
+	c.Assert(updated, Equals, true)
+
+	name, updated = ResourceQualifiedName("test-namespace", "test-name", "test-resource")
+	c.Assert(name, Equals, "test-namespace/test-name/test-resource")
+	c.Assert(updated, Equals, true)
+
+	// resource names with slashes is considered to already be qualified, and will not be prepended with namespace/cec-name
+	name, updated = ResourceQualifiedName("test-namespace", "test-name", "test/resource")
+	c.Assert(name, Equals, "test/resource")
+	c.Assert(updated, Equals, false)
+
+	name, updated = ResourceQualifiedName("test-namespace", "test-name", "/resource")
+	c.Assert(name, Equals, "/resource")
+	c.Assert(updated, Equals, false)
+
+	name, updated = ResourceQualifiedName("", "test-name", "test/resource")
+	c.Assert(name, Equals, "test/resource")
+	c.Assert(updated, Equals, false)
+
+	name, updated = ResourceQualifiedName("", "test-name", "/resource")
+	c.Assert(name, Equals, "/resource")
+	c.Assert(updated, Equals, false)
+
+	// forceNamespacing has no effect when the resource name is non-qualified
+	name, updated = ResourceQualifiedName("", "", "test-resource", ForceNamespace)
+	c.Assert(name, Equals, "//test-resource")
+	c.Assert(updated, Equals, true)
+
+	name, updated = ResourceQualifiedName("", "test-name", "test-resource", ForceNamespace)
+	c.Assert(name, Equals, "/test-name/test-resource")
+	c.Assert(updated, Equals, true)
+
+	name, updated = ResourceQualifiedName("test-namespace", "", "test-resource", ForceNamespace)
+	c.Assert(name, Equals, "test-namespace//test-resource")
+	c.Assert(updated, Equals, true)
+
+	name, updated = ResourceQualifiedName("test-namespace", "test-name", "test-resource", ForceNamespace)
+	c.Assert(name, Equals, "test-namespace/test-name/test-resource")
+	c.Assert(updated, Equals, true)
+
+	// forceNamespacing qualifies names in foreign namespaces
+	name, updated = ResourceQualifiedName("test-namespace", "test-name", "test/resource", ForceNamespace)
+	c.Assert(name, Equals, "test-namespace/test-name/test/resource")
+	c.Assert(updated, Equals, true)
+
+	name, updated = ResourceQualifiedName("test-namespace", "test-name", "/resource", ForceNamespace)
+	c.Assert(name, Equals, "test-namespace/test-name//resource")
+	c.Assert(updated, Equals, true)
+
+	name, updated = ResourceQualifiedName("", "test-name", "test/resource", ForceNamespace)
+	c.Assert(name, Equals, "/test-name/test/resource")
+	c.Assert(updated, Equals, true)
+
+	// forceNamespacing skips prepending if namespace matches
+	name, updated = ResourceQualifiedName("test-namespace", "test-name", "test-namespace/resource", ForceNamespace)
+	c.Assert(name, Equals, "test-namespace/resource")
+	c.Assert(updated, Equals, false)
+	name, updated = ResourceQualifiedName("", "test-name", "/resource", ForceNamespace)
+	c.Assert(name, Equals, "/resource")
+	c.Assert(updated, Equals, false)
 }

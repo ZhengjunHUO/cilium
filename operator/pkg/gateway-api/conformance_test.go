@@ -4,11 +4,12 @@
 package gateway_api
 
 import (
-	"strings"
 	"testing"
 
+	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
+	v1 "sigs.k8s.io/gateway-api/apis/v1"
 	"sigs.k8s.io/gateway-api/apis/v1alpha2"
 	"sigs.k8s.io/gateway-api/apis/v1beta1"
 	"sigs.k8s.io/gateway-api/conformance/tests"
@@ -20,7 +21,7 @@ import (
 
 // TestConformance runs the conformance tests for Gateway API
 // Adapted from https://github.com/kubernetes-sigs/gateway-api/blob/v0.6.1/conformance/conformance_test.go
-// Some features are not supported by Cilium (e.g. TLSRoute), so we skip them.
+// Some features are not supported by Cilium, so we skip them.
 // This test should be adjusted as new features are added to the Gateway API.
 //
 // The below command can be used to run the conformance tests locally, you can also run directly from
@@ -48,34 +49,38 @@ func TestConformance(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Error initializing Kubernetes client: %v", err)
 	}
-	_ = v1alpha2.AddToScheme(c.Scheme())
-	_ = v1beta1.AddToScheme(c.Scheme())
-
-	t.Logf("Running conformance tests with %s GatewayClass", *flags.GatewayClassName)
-
-	supportedFeatures := parseSupportedFeatures(*flags.SupportedFeatures)
-	exemptFeatures := parseSupportedFeatures(*flags.ExemptFeatures)
-	for feature := range exemptFeatures {
-		supportedFeatures[feature] = false
+	clientset, err := kubernetes.NewForConfig(cfg)
+	if err != nil {
+		t.Fatalf("Error initializing Kubernetes REST client: %v", err)
 	}
 
+	_ = v1alpha2.AddToScheme(c.Scheme())
+	_ = v1beta1.AddToScheme(c.Scheme())
+	_ = v1.AddToScheme(c.Scheme())
+
+	supportedFeatures := suite.ParseSupportedFeatures(*flags.SupportedFeatures)
+	exemptFeatures := suite.ParseSupportedFeatures(*flags.ExemptFeatures)
+	skipTests := suite.ParseSkipTests(*flags.SkipTests)
+	namespaceLabels := suite.ParseKeyValuePairs(*flags.NamespaceLabels)
+
+	t.Logf("Running conformance tests with %s GatewayClass\n cleanup: %t\n debug: %t\n enable all features: %t \n supported features: [%v]\n exempt features: [%v]",
+		*flags.GatewayClassName, *flags.CleanupBaseResources, *flags.ShowDebug, *flags.EnableAllSupportedFeatures, *flags.SupportedFeatures, *flags.ExemptFeatures)
+
 	cSuite := suite.New(suite.Options{
-		Client:               c,
-		GatewayClassName:     *flags.GatewayClassName,
-		Debug:                *flags.ShowDebug,
-		CleanupBaseResources: *flags.CleanupBaseResources,
-		SupportedFeatures:    supportedFeatures,
+		Client:     c,
+		RestConfig: cfg,
+		// This clientset is needed in addition to the client only because
+		// controller-runtime client doesn't support non CRUD sub-resources yet (https://github.com/kubernetes-sigs/controller-runtime/issues/452).
+		Clientset:                  clientset,
+		GatewayClassName:           *flags.GatewayClassName,
+		Debug:                      *flags.ShowDebug,
+		CleanupBaseResources:       *flags.CleanupBaseResources,
+		SupportedFeatures:          supportedFeatures,
+		ExemptFeatures:             exemptFeatures,
+		EnableAllSupportedFeatures: *flags.EnableAllSupportedFeatures,
+		NamespaceLabels:            namespaceLabels,
+		SkipTests:                  skipTests,
 	})
 	cSuite.Setup(t)
 	cSuite.Run(t, tests.ConformanceTests)
-}
-
-// parseSupportedFeatures parses flag arguments and converts the string to
-// map[suite.SupportedFeature]bool
-func parseSupportedFeatures(f string) map[suite.SupportedFeature]bool {
-	res := map[suite.SupportedFeature]bool{}
-	for _, value := range strings.Split(f, ",") {
-		res[suite.SupportedFeature(value)] = true
-	}
-	return res
 }

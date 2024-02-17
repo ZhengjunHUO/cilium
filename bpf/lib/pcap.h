@@ -98,7 +98,7 @@ static __always_inline void __cilium_capture_out(struct __ctx_buff *ctx,
  * below is a fallback definition for when the templating var is not defined.
  */
 #ifndef capture_enabled
-# define capture_enabled (__ctx_is == __ctx_xdp)
+# define capture_enabled (ctx_is_xdp())
 #endif /* capture_enabled */
 
 struct capture_cache {
@@ -238,8 +238,7 @@ cilium_capture4_classify_wcard(struct __ctx_buff *ctx)
 	if (ip4->protocol != IPPROTO_TCP &&
 	    ip4->protocol != IPPROTO_UDP)
 		return NULL;
-	if (ctx_load_bytes(ctx, ETH_HLEN + ipv4_hdrlen(ip4),
-			   &okey.sport, 4) < 0)
+	if (l4_load_ports(ctx, ETH_HLEN + ipv4_hdrlen(ip4), &okey.sport) < 0)
 		return NULL;
 
 	okey.flags = 0;
@@ -363,8 +362,7 @@ cilium_capture6_classify_wcard(struct __ctx_buff *ctx)
 	if (okey.nexthdr != IPPROTO_TCP &&
 	    okey.nexthdr != IPPROTO_UDP)
 		return NULL;
-	if (ctx_load_bytes(ctx, l3_off + ret,
-			   &okey.sport, 4) < 0)
+	if (l4_load_ports(ctx, l3_off + ret, &okey.sport) < 0)
 		return NULL;
 
 	okey.flags = 0;

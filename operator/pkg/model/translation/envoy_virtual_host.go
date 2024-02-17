@@ -6,16 +6,20 @@ package translation
 import (
 	"fmt"
 	"net"
+	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	envoy_config_core_v3 "github.com/cilium/proxy/go/envoy/config/core/v3"
 	envoy_config_route_v3 "github.com/cilium/proxy/go/envoy/config/route/v3"
 	envoy_type_matcher_v3 "github.com/cilium/proxy/go/envoy/type/matcher/v3"
+	envoy_type_v3 "github.com/cilium/proxy/go/envoy/type/v3"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 
 	"github.com/cilium/cilium/operator/pkg/model"
+	"github.com/cilium/cilium/pkg/math"
 )
 
 const (
@@ -30,28 +34,16 @@ const (
 
 type VirtualHostMutator func(*envoy_config_route_v3.VirtualHost) *envoy_config_route_v3.VirtualHost
 
-func WithMaxStreamDuration(seconds int64) VirtualHostMutator {
-	return func(vh *envoy_config_route_v3.VirtualHost) *envoy_config_route_v3.VirtualHost {
-		for _, route := range vh.Routes {
-			if route.GetRoute() == nil {
-				continue
-			}
-			route.GetRoute().MaxStreamDuration = &envoy_config_route_v3.RouteAction_MaxStreamDuration{
-				MaxStreamDuration: &durationpb.Duration{
-					Seconds: seconds,
-				},
-			}
-		}
-		return vh
-	}
-}
-
 // SortableRoute is a slice of envoy Route, which can be sorted based on
 // matching order as per Ingress requirement.
 //
-//   - Exact Match must have the highest priority
-//   - If multiple prefix matches are satisfied, the longest path is having
-//     higher priority
+// The sorting order is as follows, continuing on ties, and also noting that
+// when Exact, Regex, or Prefix matches are unset, their length is zero:
+//   - Exact Match length
+//   - Regex Match length
+//   - Prefix match length
+//   - Number of header matches
+//   - Number of query parameter matches
 //
 // As Envoy route matching logic is done sequentially, we need to enforce
 // such sorting order.
@@ -63,67 +55,68 @@ func (s SortableRoute) Len() int {
 
 func (s SortableRoute) Less(i, j int) bool {
 	// Make sure Exact Match always comes first
-	isExactMatch1 := len(s[i].Match.GetPath()) != 0
-	isExactMatch2 := len(s[j].Match.GetPath()) != 0
-	if isExactMatch1 && isExactMatch2 {
-		return len(s[i].Match.GetPath()) > len(s[j].Match.GetPath())
-	}
-	if isExactMatch1 {
-		return true
-	}
-	if isExactMatch2 {
-		return false
+	exactMatch1 := len(s[i].Match.GetPath())
+	exactMatch2 := len(s[j].Match.GetPath())
+	if exactMatch1 != exactMatch2 {
+		return exactMatch1 > exactMatch2
 	}
 
-	// Make sure longest Prefix match always comes first
-	regexMatch1 := len(s[i].Match.GetSafeRegex().String())
-	regexMatch2 := len(s[j].Match.GetSafeRegex().String())
-	if regexMatch1 > regexMatch2 {
-		return true
-	} else if regexMatch1 < regexMatch2 {
-		return false
+	// Make sure longest Regex match always after Exact
+	regexMatch1 := len(s[i].Match.GetSafeRegex().GetRegex())
+	regexMatch2 := len(s[j].Match.GetSafeRegex().GetRegex())
+	if regexMatch1 != regexMatch2 {
+		return regexMatch1 > regexMatch2
 	}
 
-	// Make sure the longest query match always comes first
-	queryMatch1 := len(s[i].Match.GetQueryParameters())
-	queryMatch2 := len(s[j].Match.GetQueryParameters())
-	if queryMatch1 > queryMatch2 {
-		return true
-	} else if queryMatch1 < queryMatch2 {
-		return false
-	}
-
-	// Make sure the longest header match always comes first
+	// There are two types of prefix match, so get whichever one is bigger
+	prefixMatch1 := math.IntMax(len(s[i].Match.GetPathSeparatedPrefix()), len(s[i].Match.GetPrefix()))
+	prefixMatch2 := math.IntMax(len(s[j].Match.GetPathSeparatedPrefix()), len(s[j].Match.GetPrefix()))
 	headerMatch1 := len(s[i].Match.GetHeaders())
 	headerMatch2 := len(s[j].Match.GetHeaders())
-	if headerMatch1 > headerMatch2 {
-		return true
+	queryMatch1 := len(s[i].Match.GetQueryParameters())
+	queryMatch2 := len(s[j].Match.GetQueryParameters())
+
+	// Next up, sort by prefix match length
+	if prefixMatch1 != prefixMatch2 {
+		return prefixMatch1 > prefixMatch2
 	}
-	return false
+
+	// If that's the same, then sort by header length
+	if headerMatch1 != headerMatch2 {
+		return headerMatch1 > headerMatch2
+	}
+
+	// lastly, sort by query match length
+	return queryMatch1 > queryMatch2
 }
 
 func (s SortableRoute) Swap(i, j int) {
 	s[i], s[j] = s[j], s[i]
 }
 
+// VirtualHostParameter is the parameter for NewVirtualHost
+type VirtualHostParameter struct {
+	HostNames           []string
+	HTTPSRedirect       bool
+	HostNameSuffixMatch bool
+	ListenerPort        uint32
+}
+
 // NewVirtualHostWithDefaults is same as NewVirtualHost but with a few
 // default mutator function. If there are multiple http routes having
 // the same path matching (e.g. exact, prefix or regex), the incoming
 // request will be load-balanced to multiple backends equally.
-func NewVirtualHostWithDefaults(hostnames []string, httpsRedirect bool, hostNameSuffixMatch bool, httpRoutes []model.HTTPRoute, mutators ...VirtualHostMutator) (*envoy_config_route_v3.VirtualHost, error) {
-	fns := append(mutators,
-		WithMaxStreamDuration(0),
-	)
-	return NewVirtualHost(hostnames, httpsRedirect, hostNameSuffixMatch, httpRoutes, fns...)
+func NewVirtualHostWithDefaults(httpRoutes []model.HTTPRoute, param VirtualHostParameter, mutators ...VirtualHostMutator) (*envoy_config_route_v3.VirtualHost, error) {
+	return NewVirtualHost(httpRoutes, param, mutators...)
 }
 
 // NewVirtualHost creates a new VirtualHost with the given host and routes.
-func NewVirtualHost(hostnames []string, httpsRedirect bool, hostNameSuffixMatch bool, httpRoutes []model.HTTPRoute, mutators ...VirtualHostMutator) (*envoy_config_route_v3.VirtualHost, error) {
+func NewVirtualHost(httpRoutes []model.HTTPRoute, param VirtualHostParameter, mutators ...VirtualHostMutator) (*envoy_config_route_v3.VirtualHost, error) {
 	var routes SortableRoute
-	if httpsRedirect {
-		routes = envoyHTTPSRoutes(httpRoutes, hostnames, hostNameSuffixMatch)
+	if param.HTTPSRedirect {
+		routes = envoyHTTPSRoutes(httpRoutes, param.HostNames, param.HostNameSuffixMatch)
 	} else {
-		routes = envoyHTTPRoutes(httpRoutes, hostnames, hostNameSuffixMatch)
+		routes = envoyHTTPRoutes(httpRoutes, param.HostNames, param.HostNameSuffixMatch, param.ListenerPort)
 	}
 
 	// This is to make sure that the Exact match is always having higher priority.
@@ -133,7 +126,7 @@ func NewVirtualHost(hostnames []string, httpsRedirect bool, hostNameSuffixMatch 
 	sort.Stable(routes)
 
 	var domains []string
-	for _, host := range hostnames {
+	for _, host := range param.HostNames {
 		if host == wildCard {
 			domains = []string{wildCard}
 			break
@@ -193,7 +186,7 @@ func envoyHTTPSRoutes(httpRoutes []model.HTTPRoute, hostnames []string, hostName
 	return routes
 }
 
-func envoyHTTPRoutes(httpRoutes []model.HTTPRoute, hostnames []string, hostNameSuffixMatch bool) []*envoy_config_route_v3.Route {
+func envoyHTTPRoutes(httpRoutes []model.HTTPRoute, hostnames []string, hostNameSuffixMatch bool, listenerPort uint32) []*envoy_config_route_v3.Route {
 	matchBackendMap := make(map[string][]model.HTTPRoute)
 	for _, r := range httpRoutes {
 		matchBackendMap[r.GetMatchKey()] = append(matchBackendMap[r.GetMatchKey()], r)
@@ -229,9 +222,18 @@ func envoyHTTPRoutes(httpRoutes []model.HTTPRoute, hostnames []string, hostNameS
 		}
 
 		if hRoutes[0].RequestRedirect != nil {
-			route.Action = getRouteRedirect(hRoutes[0].RequestRedirect)
+			route.Action = getRouteRedirect(hRoutes[0].RequestRedirect, listenerPort)
 		} else {
-			route.Action = getRouteAction(backends)
+			route.Action = getRouteAction(&r, backends, r.BackendHTTPFilters, r.Rewrite, r.RequestMirrors)
+		}
+		// If there is only one backend, we can add the header filter to the route
+		if len(backends) == 1 {
+			for _, fn := range hRoutes[0].BackendHTTPFilters {
+				route.RequestHeadersToAdd = append(route.RequestHeadersToAdd, getHeadersToAdd(fn.RequestHeaderFilter)...)
+				route.RequestHeadersToRemove = append(route.RequestHeadersToRemove, getHeadersToRemove(fn.RequestHeaderFilter)...)
+				route.ResponseHeadersToAdd = append(route.ResponseHeadersToAdd, getHeadersToAdd(fn.ResponseHeaderModifier)...)
+				route.ResponseHeadersToRemove = append(route.ResponseHeadersToRemove, getHeadersToRemove(fn.ResponseHeaderModifier)...)
+			}
 		}
 		routes = append(routes, &route)
 		delete(matchBackendMap, r.GetMatchKey())
@@ -239,28 +241,143 @@ func envoyHTTPRoutes(httpRoutes []model.HTTPRoute, hostnames []string, hostNameS
 	return routes
 }
 
-func getRouteAction(backends []model.Backend) *envoy_config_route_v3.Route_Route {
+type routeActionMutation func(*envoy_config_route_v3.Route_Route) *envoy_config_route_v3.Route_Route
+
+func hostRewriteMutation(rewrite *model.HTTPURLRewriteFilter) routeActionMutation {
+	return func(route *envoy_config_route_v3.Route_Route) *envoy_config_route_v3.Route_Route {
+		if rewrite == nil || rewrite.HostName == nil || route.Route == nil {
+			return route
+		}
+		route.Route.HostRewriteSpecifier = &envoy_config_route_v3.RouteAction_HostRewriteLiteral{
+			HostRewriteLiteral: *rewrite.HostName,
+		}
+		return route
+	}
+}
+
+func pathPrefixMutation(rewrite *model.HTTPURLRewriteFilter, httpRoute *model.HTTPRoute) routeActionMutation {
+	return func(route *envoy_config_route_v3.Route_Route) *envoy_config_route_v3.Route_Route {
+		if rewrite == nil || rewrite.Path == nil || httpRoute == nil || len(rewrite.Path.Exact) != 0 || len(rewrite.Path.Regex) != 0 {
+			return route
+		}
+
+		// Refer to: https://gateway-api.sigs.k8s.io/references/spec/#gateway.networking.k8s.io%2fv1beta1.HTTPPathModifier
+		// ReplacePrefix is allowed to be empty.
+		if len(rewrite.Path.Prefix) == 0 || rewrite.Path.Prefix == "/" {
+			route.Route.RegexRewrite = &envoy_type_matcher_v3.RegexMatchAndSubstitute{
+				Pattern: &envoy_type_matcher_v3.RegexMatcher{
+					Regex: fmt.Sprintf(`^%s(/?)(.*)`, regexp.QuoteMeta(httpRoute.PathMatch.Prefix)),
+				},
+				// hold `/` in case the entire path is removed
+				Substitution: `/\2`,
+			}
+		} else {
+			route.Route.PrefixRewrite = rewrite.Path.Prefix
+		}
+		return route
+	}
+}
+
+func pathFullReplaceMutation(rewrite *model.HTTPURLRewriteFilter) routeActionMutation {
+	return func(route *envoy_config_route_v3.Route_Route) *envoy_config_route_v3.Route_Route {
+		if rewrite == nil || rewrite.Path == nil || len(rewrite.Path.Exact) == 0 {
+			return route
+		}
+		route.Route.RegexRewrite = &envoy_type_matcher_v3.RegexMatchAndSubstitute{
+			Pattern: &envoy_type_matcher_v3.RegexMatcher{
+				Regex: "^/.*$",
+			},
+			Substitution: rewrite.Path.Exact,
+		}
+		return route
+	}
+}
+
+func requestMirrorMutation(mirrors []*model.HTTPRequestMirror) routeActionMutation {
+	return func(route *envoy_config_route_v3.Route_Route) *envoy_config_route_v3.Route_Route {
+		if len(mirrors) == 0 {
+			return route
+		}
+		var action []*envoy_config_route_v3.RouteAction_RequestMirrorPolicy
+		for _, m := range mirrors {
+			if m.Backend == nil {
+				continue
+			}
+			action = append(action, &envoy_config_route_v3.RouteAction_RequestMirrorPolicy{
+				Cluster: fmt.Sprintf("%s:%s:%s", m.Backend.Namespace, m.Backend.Name, m.Backend.Port.GetPort()),
+				RuntimeFraction: &envoy_config_core_v3.RuntimeFractionalPercent{
+					DefaultValue: &envoy_type_v3.FractionalPercent{
+						Numerator: 100,
+					},
+				},
+			})
+		}
+		route.Route.RequestMirrorPolicies = action
+		return route
+	}
+}
+
+func timeoutMutation(backend *time.Duration, request *time.Duration) routeActionMutation {
+	return func(route *envoy_config_route_v3.Route_Route) *envoy_config_route_v3.Route_Route {
+		if backend == nil && request == nil {
+			return route
+		}
+		minTimeout := backend
+		if request != nil && (minTimeout == nil || *request < *minTimeout) {
+			minTimeout = request
+		}
+		route.Route.Timeout = durationpb.New(*minTimeout)
+		return route
+	}
+}
+
+func getRouteAction(route *model.HTTPRoute, backends []model.Backend, backendHTTPFilter []*model.BackendHTTPFilter, rewrite *model.HTTPURLRewriteFilter, mirrors []*model.HTTPRequestMirror) *envoy_config_route_v3.Route_Route {
 	var routeAction *envoy_config_route_v3.Route_Route
+
+	mutators := []routeActionMutation{
+		hostRewriteMutation(rewrite),
+		pathPrefixMutation(rewrite, route),
+		pathFullReplaceMutation(rewrite),
+		requestMirrorMutation(mirrors),
+		timeoutMutation(route.Timeout.Backend, route.Timeout.Request),
+	}
+
 	if len(backends) == 1 {
-		return &envoy_config_route_v3.Route_Route{
+		r := &envoy_config_route_v3.Route_Route{
 			Route: &envoy_config_route_v3.RouteAction{
 				ClusterSpecifier: &envoy_config_route_v3.RouteAction_Cluster{
-					Cluster: fmt.Sprintf("%s/%s:%s", backends[0].Namespace, backends[0].Name, backends[0].Port.GetPort()),
+					Cluster: getClusterName(backends[0].Namespace, backends[0].Name, backends[0].Port.GetPort()),
 				},
 			},
 		}
-	}
 
+		for _, mutator := range mutators {
+			r = mutator(r)
+		}
+		return r
+	}
+	backendFilter := make(map[string]*model.BackendHTTPFilter)
+	for _, f := range backendHTTPFilter {
+		backendFilter[f.Name] = f
+	}
 	weightedClusters := make([]*envoy_config_route_v3.WeightedCluster_ClusterWeight, 0, len(backends))
 	for _, be := range backends {
 		var weight int32 = 1
 		if be.Weight != nil {
 			weight = *be.Weight
 		}
-		weightedClusters = append(weightedClusters, &envoy_config_route_v3.WeightedCluster_ClusterWeight{
-			Name:   fmt.Sprintf("%s/%s:%s", be.Namespace, be.Name, be.Port.GetPort()),
+		clusterWeight := &envoy_config_route_v3.WeightedCluster_ClusterWeight{
+			Name:   getClusterName(be.Namespace, be.Name, be.Port.GetPort()),
 			Weight: wrapperspb.UInt32(uint32(weight)),
-		})
+		}
+		// If their two or more backends, we need to add the header filter to the clusterWeight level.
+		if fn, ok := backendFilter[getClusterName(be.Namespace, be.Name, be.Port.GetPort())]; ok {
+			clusterWeight.RequestHeadersToAdd = append(clusterWeight.RequestHeadersToAdd, getHeadersToAdd(fn.RequestHeaderFilter)...)
+			clusterWeight.RequestHeadersToRemove = append(clusterWeight.RequestHeadersToRemove, getHeadersToRemove(fn.RequestHeaderFilter)...)
+			clusterWeight.ResponseHeadersToAdd = append(clusterWeight.ResponseHeadersToAdd, getHeadersToAdd(fn.ResponseHeaderModifier)...)
+			clusterWeight.ResponseHeadersToRemove = append(clusterWeight.ResponseHeadersToRemove, getHeadersToRemove(fn.ResponseHeaderModifier)...)
+		}
+		weightedClusters = append(weightedClusters, clusterWeight)
 	}
 	routeAction = &envoy_config_route_v3.Route_Route{
 		Route: &envoy_config_route_v3.RouteAction{
@@ -271,10 +388,13 @@ func getRouteAction(backends []model.Backend) *envoy_config_route_v3.Route_Route
 			},
 		},
 	}
+	for _, mutator := range mutators {
+		routeAction = mutator(routeAction)
+	}
 	return routeAction
 }
 
-func getRouteRedirect(redirect *model.HTTPRequestRedirectFilter) *envoy_config_route_v3.Route_Redirect {
+func getRouteRedirect(redirect *model.HTTPRequestRedirectFilter, listenerPort uint32) *envoy_config_route_v3.Route_Redirect {
 	redirectAction := &envoy_config_route_v3.RedirectAction{}
 
 	if redirect.Scheme != nil {
@@ -289,6 +409,16 @@ func getRouteRedirect(redirect *model.HTTPRequestRedirectFilter) *envoy_config_r
 
 	if redirect.Port != nil {
 		redirectAction.PortRedirect = uint32(*redirect.Port)
+	} else {
+		if redirect.Scheme != nil {
+			if *redirect.Scheme == "https" {
+				redirectAction.PortRedirect = 443
+			} else if *redirect.Scheme == "http" {
+				redirectAction.PortRedirect = 80
+			}
+		} else {
+			redirectAction.PortRedirect = listenerPort
+		}
 	}
 
 	if redirect.StatusCode != nil {
@@ -341,7 +471,9 @@ func envoyHTTPRouteNoBackend(route model.HTTPRoute, hostnames []string, hostName
 func getRouteMatch(hostnames []string, hostNameSuffixMatch bool, pathMatch model.StringMatch, headers []model.KeyValueMatch, query []model.KeyValueMatch, method *string) *envoy_config_route_v3.RouteMatch {
 	headerMatchers := getHeaderMatchers(hostnames, hostNameSuffixMatch, headers, method)
 	queryMatchers := getQueryMatchers(query)
-	if pathMatch.Exact != "" {
+
+	switch {
+	case pathMatch.Exact != "":
 		return &envoy_config_route_v3.RouteMatch{
 			PathSpecifier: &envoy_config_route_v3.RouteMatch_Path{
 				Path: pathMatch.Exact,
@@ -349,19 +481,23 @@ func getRouteMatch(hostnames []string, hostNameSuffixMatch bool, pathMatch model
 			Headers:         headerMatchers,
 			QueryParameters: queryMatchers,
 		}
-	}
-	if pathMatch.Prefix != "" {
+	case pathMatch.Prefix == "/":
 		return &envoy_config_route_v3.RouteMatch{
-			PathSpecifier: &envoy_config_route_v3.RouteMatch_SafeRegex{
-				SafeRegex: &envoy_type_matcher_v3.RegexMatcher{
-					Regex: getMatchingPrefixRegex(pathMatch.Prefix),
-				},
+			PathSpecifier: &envoy_config_route_v3.RouteMatch_Prefix{
+				Prefix: pathMatch.Prefix,
 			},
 			Headers:         headerMatchers,
 			QueryParameters: queryMatchers,
 		}
-	}
-	if pathMatch.Regex != "" {
+	case pathMatch.Prefix != "":
+		return &envoy_config_route_v3.RouteMatch{
+			PathSpecifier: &envoy_config_route_v3.RouteMatch_PathSeparatedPrefix{
+				PathSeparatedPrefix: strings.TrimSuffix(pathMatch.Prefix, "/"),
+			},
+			Headers:         headerMatchers,
+			QueryParameters: queryMatchers,
+		}
+	case pathMatch.Regex != "":
 		return &envoy_config_route_v3.RouteMatch{
 			PathSpecifier: &envoy_config_route_v3.RouteMatch_SafeRegex{
 				SafeRegex: &envoy_type_matcher_v3.RegexMatcher{
@@ -371,13 +507,14 @@ func getRouteMatch(hostnames []string, hostNameSuffixMatch bool, pathMatch model
 			Headers:         headerMatchers,
 			QueryParameters: queryMatchers,
 		}
-	}
-	return &envoy_config_route_v3.RouteMatch{
-		PathSpecifier: &envoy_config_route_v3.RouteMatch_Prefix{
-			Prefix: "/",
-		},
-		Headers:         headerMatchers,
-		QueryParameters: queryMatchers,
+	default:
+		return &envoy_config_route_v3.RouteMatch{
+			PathSpecifier: &envoy_config_route_v3.RouteMatch_Prefix{
+				Prefix: "/",
+			},
+			Headers:         headerMatchers,
+			QueryParameters: queryMatchers,
+		}
 	}
 }
 
@@ -441,23 +578,6 @@ func getHeaderMatchers(hostnames []string, hostNameSuffixMatch bool, headers []m
 	}
 
 	return result
-}
-
-// getMatchingPrefixRegex returns safe regex used by envoy to match the
-// prefix. By default, prefix matching in envoy will not reject /foobar
-// if the original path is only /foo. Hence, conversion with safe regex
-// is required.
-//
-// If the original path is /foo, the returned regex will be /foo(/.*)?$
-// - /foo -> matched
-// - /foo/ -> matched
-// - /foobar -> not matched
-func getMatchingPrefixRegex(path string) string {
-	removedTrailingSlash := path
-	if strings.HasSuffix(path, slash) {
-		removedTrailingSlash = removedTrailingSlash[:len(removedTrailingSlash)-1]
-	}
-	return fmt.Sprintf("%s(/.*)?$", removedTrailingSlash)
 }
 
 // getMatchingHeaderRegex is to make sure that one and only one single

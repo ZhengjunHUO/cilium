@@ -40,6 +40,31 @@ const (
 	// BGPPName is the full name of Cilium BGP Peering Policy
 	BGPPName = BGPPPluralName + "." + CustomResourceDefinitionGroup
 
+	// BGPClusterConfig (BGPCC)
+	BGPCCPluralName     = "ciliumbgpclusterconfigs"
+	BGPCCKindDefinition = "CiliumBGPClusterConfig"
+	BGPCCName           = BGPCCPluralName + "." + CustomResourceDefinitionGroup
+
+	// BGPPeerConfig (BGPPC)
+	BGPPCPluralName     = "ciliumbgppeerconfigs"
+	BGPPCKindDefinition = "CiliumBGPPeerConfig"
+	BGPPCName           = BGPPCPluralName + "." + CustomResourceDefinitionGroup
+
+	// BGPAdvertisement (BGPA)
+	BGPAPluralName     = "ciliumbgpadvertisements"
+	BGPAKindDefinition = "CiliumBGPAdvertisement"
+	BGPAName           = BGPAPluralName + "." + CustomResourceDefinitionGroup
+
+	// BGPNodeConfig (BGPNC)
+	BGPNCPluralName     = "ciliumbgpnodeconfigs"
+	BGPNCKindDefinition = "CiliumBGPNodeConfig"
+	BGPNCName           = BGPNCPluralName + "." + CustomResourceDefinitionGroup
+
+	// BGPNodeConfigOverride (BGPNCO)
+	BGPNCOPluralName     = "ciliumbgpnodeconfigoverrides"
+	BGPNCOKindDefinition = "CiliumBGPNodeConfigOverride"
+	BGPNCOName           = BGPNCOPluralName + "." + CustomResourceDefinitionGroup
+
 	// Cilium Load Balancer IP Pool (IPPool)
 
 	// PoolPluralName is the plural name of Cilium Load Balancer IP Pool
@@ -60,6 +85,25 @@ const (
 	CCGPluralName     = "ciliumcidrgroups"
 	CCGKindDefinition = "CiliumCIDRGroup"
 	CCGName           = CCGPluralName + "." + CustomResourceDefinitionGroup
+
+	// Cilium L2 Announcement policy
+
+	// L2AnnouncementSingularName is the singular name ofCilium L2 announcement policy
+	L2AnnouncementSingularName = "ciliuml2announcementpolicy"
+
+	// L2AnnouncementPluralName is the plural name of Cilium L2 announcement policy
+	L2AnnouncementPluralName = "ciliuml2announcementpolicies"
+
+	// L2AnnouncementKindDefinition is the kind name of Cilium L2 announcement policy
+	L2AnnouncementKindDefinition = "CiliumL2AnnouncementPolicy"
+
+	// L2AnnouncementName is the full name of Cilium L2 announcement policy
+	L2AnnouncementName = L2AnnouncementPluralName + "." + CustomResourceDefinitionGroup
+
+	// CiliumPodIPPool (CPIP)
+	CPIPPluralName     = "ciliumpodippools"
+	CPIPKindDefinition = "CiliumPodIPPool"
+	CPIPName           = CPIPPluralName + "." + CustomResourceDefinitionGroup
 )
 
 // SchemeGroupVersion is group version used to register these objects
@@ -113,6 +157,22 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 		&CiliumNodeConfigList{},
 		&CiliumCIDRGroup{},
 		&CiliumCIDRGroupList{},
+		&CiliumL2AnnouncementPolicy{},
+		&CiliumL2AnnouncementPolicyList{},
+		&CiliumPodIPPool{},
+		&CiliumPodIPPoolList{},
+
+		// new BGP types
+		&CiliumBGPClusterConfig{},
+		&CiliumBGPClusterConfigList{},
+		&CiliumBGPPeerConfig{},
+		&CiliumBGPPeerConfigList{},
+		&CiliumBGPAdvertisement{},
+		&CiliumBGPAdvertisementList{},
+		&CiliumBGPNodeConfig{},
+		&CiliumBGPNodeConfigList{},
+		&CiliumBGPNodeConfigOverride{},
+		&CiliumBGPNodeConfigOverrideList{},
 	)
 
 	metav1.AddToGroupVersion(scheme, SchemeGroupVersion)

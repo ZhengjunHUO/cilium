@@ -5,7 +5,7 @@ package egressgateway
 
 import (
 	"fmt"
-	"net"
+	"net/netip"
 
 	"k8s.io/apimachinery/pkg/types"
 
@@ -21,26 +21,35 @@ type endpointMetadata struct {
 	// Endpoint ID
 	id endpointID
 	// ips are endpoint's unique IPs
-	ips []net.IP
+	ips []netip.Addr
 }
 
-// endpointID includes endpoint name and namespace
-type endpointID = types.NamespacedName
+// endpointID is based on endpoint's UID
+type endpointID = types.UID
 
 func getEndpointMetadata(endpoint *k8sTypes.CiliumEndpoint, identityLabels labels.Labels) (*endpointMetadata, error) {
-	var ipv4s []net.IP
-	id := types.NamespacedName{
-		Name:      endpoint.GetName(),
-		Namespace: endpoint.GetNamespace(),
+	var addrs []netip.Addr
+
+	if endpoint.UID == "" {
+		// this can happen when CiliumEndpointSlices are in use - which is not supported in the EGW yet
+		return nil, fmt.Errorf("endpoint has empty UID")
 	}
 
 	if endpoint.Networking == nil {
 		return nil, fmt.Errorf("endpoint has no networking metadata")
 	}
 
+	if len(endpoint.Networking.Addressing) == 0 {
+		return nil, fmt.Errorf("failed to get valid endpoint IPs")
+	}
+
 	for _, pair := range endpoint.Networking.Addressing {
 		if pair.IPV4 != "" {
-			ipv4s = append(ipv4s, net.ParseIP(pair.IPV4).To4())
+			addr, err := netip.ParseAddr(pair.IPV4)
+			if err != nil || !addr.Is4() {
+				continue
+			}
+			addrs = append(addrs, addr)
 		}
 	}
 
@@ -49,9 +58,9 @@ func getEndpointMetadata(endpoint *k8sTypes.CiliumEndpoint, identityLabels label
 	}
 
 	data := &endpointMetadata{
-		ips:    ipv4s,
+		ips:    addrs,
 		labels: identityLabels.K8sStringMap(),
-		id:     id,
+		id:     endpoint.UID,
 	}
 
 	return data, nil

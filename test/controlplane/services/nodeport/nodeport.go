@@ -9,8 +9,7 @@ import (
 	"path"
 	"testing"
 
-	operatorOption "github.com/cilium/cilium/operator/option"
-	"github.com/cilium/cilium/pkg/datapath/fake"
+	fakeTypes "github.com/cilium/cilium/pkg/datapath/fake/types"
 	lb "github.com/cilium/cilium/pkg/loadbalancer"
 	agentOption "github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/test/controlplane"
@@ -25,8 +24,8 @@ func init() {
 			t.Fatal(err)
 		}
 
-		modConfig := func(daemonCfg *agentOption.DaemonConfig, _ *operatorOption.OperatorConfig) {
-			daemonCfg.EnableNodePort = true
+		modConfig := func(cfg *agentOption.DaemonConfig) {
+			cfg.EnableNodePort = true
 		}
 
 		for _, version := range controlplane.K8sVersions() {
@@ -40,11 +39,12 @@ func init() {
 					// Feed in initial state and start the agent.
 					test.
 						UpdateObjectsFromFile(abs("init.yaml")).
-						SetupEnvironment(modConfig).
-						StartAgent().
+						SetupEnvironment().
+						StartAgent(modConfig).
 						UpdateObjectsFromFile(abs("state1.yaml")).
 						Eventually(func() error { return validate(test, abs("lbmap1_"+nodeName+".golden")) }).
-						StopAgent()
+						StopAgent().
+						ClearEnvironment()
 				})
 			}
 		}
@@ -61,7 +61,7 @@ func validate(test *suite.ControlPlaneTest, goldenFile string) error {
 	return nil
 }
 
-func validateExternalTrafficPolicyLocal(dp *fake.FakeDatapath) error {
+func validateExternalTrafficPolicyLocal(dp *fakeTypes.FakeDatapath) error {
 	lbmap := dp.LBMockMap()
 	lbmap.Lock()
 	defer lbmap.Unlock()

@@ -81,6 +81,10 @@ func defaultCommands(confDir string, cmdDir string, k8sPods []string) []string {
 	var commands []string
 	// Not expecting all of the commands to be available
 	commands = []string{
+		// We want to collect this twice: at the very beginning and at the
+		// very end of the bugtool collection, to see if the counters are
+		// increasing.
+		"cat /proc/net/xfrm_stat",
 		// Host and misc
 		"ps auxfw",
 		"hostname",
@@ -110,7 +114,7 @@ func defaultCommands(confDir string, cmdDir string, k8sPods []string) []string {
 		"ip6tables-nft-save -c",
 		"iptables-legacy-save -c",
 		"ip6tables-legacy-save -c",
-		"ip rule",
+		"ip -d rule",
 		"ipset list",
 		// xfrm
 		"ip -s xfrm policy",
@@ -130,21 +134,21 @@ func defaultCommands(confDir string, cmdDir string, k8sPods []string) []string {
 	if bpffsMountpoint := bpffsMountpoint(); bpffsMountpoint != "" {
 		commands = append(commands, []string{
 			// LB and CT map for debugging services; using bpftool for a reliable dump
+			fmt.Sprintf("bpftool map dump pinned %s/tc/globals/cilium_auth_map", bpffsMountpoint),
 			fmt.Sprintf("bpftool map dump pinned %s/tc/globals/cilium_call_policy", bpffsMountpoint),
 			fmt.Sprintf("bpftool map dump pinned %s/tc/globals/cilium_calls_overlay_2", bpffsMountpoint),
+			fmt.Sprintf("bpftool map dump pinned %s/tc/globals/cilium_calls_xdp", bpffsMountpoint),
 			fmt.Sprintf("bpftool map dump pinned %s/tc/globals/cilium_capture_cache", bpffsMountpoint),
+			fmt.Sprintf("bpftool map dump pinned %s/tc/globals/cilium_runtime_config", bpffsMountpoint),
 			fmt.Sprintf("bpftool map dump pinned %s/tc/globals/cilium_lxc", bpffsMountpoint),
 			fmt.Sprintf("bpftool map dump pinned %s/tc/globals/cilium_metrics", bpffsMountpoint),
 			fmt.Sprintf("bpftool map dump pinned %s/tc/globals/cilium_tunnel_map", bpffsMountpoint),
-			fmt.Sprintf("bpftool map dump pinned %s/tc/globals/cilium_signals", bpffsMountpoint),
 			fmt.Sprintf("bpftool map dump pinned %s/tc/globals/cilium_ktime_cache", bpffsMountpoint),
 			fmt.Sprintf("bpftool map dump pinned %s/tc/globals/cilium_ipcache", bpffsMountpoint),
 			fmt.Sprintf("bpftool map dump pinned %s/tc/globals/cilium_events", bpffsMountpoint),
-			fmt.Sprintf("bpftool map dump pinned %s/tc/globals/cilium_sock_ops", bpffsMountpoint),
 			fmt.Sprintf("bpftool map dump pinned %s/tc/globals/cilium_signals", bpffsMountpoint),
 			fmt.Sprintf("bpftool map dump pinned %s/tc/globals/cilium_capture4_rules", bpffsMountpoint),
 			fmt.Sprintf("bpftool map dump pinned %s/tc/globals/cilium_capture6_rules", bpffsMountpoint),
-			fmt.Sprintf("bpftool map dump pinned %s/tc/globals/cilium_call_policy", bpffsMountpoint),
 			fmt.Sprintf("bpftool map dump pinned %s/tc/globals/cilium_nodeport_neigh4", bpffsMountpoint),
 			fmt.Sprintf("bpftool map dump pinned %s/tc/globals/cilium_nodeport_neigh6", bpffsMountpoint),
 			fmt.Sprintf("bpftool map dump pinned %s/tc/globals/cilium_lb4_source_range", bpffsMountpoint),
@@ -156,8 +160,8 @@ func defaultCommands(confDir string, cmdDir string, k8sPods []string) []string {
 			fmt.Sprintf("bpftool map dump pinned %s/tc/globals/cilium_lb4_health", bpffsMountpoint),
 			fmt.Sprintf("bpftool map dump pinned %s/tc/globals/cilium_lb4_reverse_sk", bpffsMountpoint),
 			fmt.Sprintf("bpftool map dump pinned %s/tc/globals/cilium_ipmasq_v4", bpffsMountpoint),
+			fmt.Sprintf("bpftool map dump pinned %s/tc/globals/cilium_ipmasq_v6", bpffsMountpoint),
 			fmt.Sprintf("bpftool map dump pinned %s/tc/globals/cilium_ipv4_frag_datagrams", bpffsMountpoint),
-			fmt.Sprintf("bpftool map dump pinned %s/tc/globals/cilium_ep_to_policy", bpffsMountpoint),
 			fmt.Sprintf("bpftool map dump pinned %s/tc/globals/cilium_throttle", bpffsMountpoint),
 			fmt.Sprintf("bpftool map dump pinned %s/tc/globals/cilium_encrypt_state", bpffsMountpoint),
 			fmt.Sprintf("bpftool map dump pinned %s/tc/globals/cilium_egress_gw_policy_v4", bpffsMountpoint),
@@ -170,6 +174,7 @@ func defaultCommands(confDir string, cmdDir string, k8sPods []string) []string {
 			fmt.Sprintf("bpftool map dump pinned %s/tc/globals/cilium_srv6_sid", bpffsMountpoint),
 			fmt.Sprintf("bpftool map dump pinned %s/tc/globals/cilium_lb4_services_v2", bpffsMountpoint),
 			fmt.Sprintf("bpftool map dump pinned %s/tc/globals/cilium_lb4_backends_v2", bpffsMountpoint),
+			fmt.Sprintf("bpftool map dump pinned %s/tc/globals/cilium_lb4_backends_v3", bpffsMountpoint),
 			fmt.Sprintf("bpftool map dump pinned %s/tc/globals/cilium_lb4_backends", bpffsMountpoint),
 			fmt.Sprintf("bpftool map dump pinned %s/tc/globals/cilium_lb4_reverse_nat", bpffsMountpoint),
 			fmt.Sprintf("bpftool map dump pinned %s/tc/globals/cilium_ct4_global", bpffsMountpoint),
@@ -179,6 +184,7 @@ func defaultCommands(confDir string, cmdDir string, k8sPods []string) []string {
 			fmt.Sprintf("bpftool map dump pinned %s/tc/globals/cilium_lb_affinity_match", bpffsMountpoint),
 			fmt.Sprintf("bpftool map dump pinned %s/tc/globals/cilium_lb6_services_v2", bpffsMountpoint),
 			fmt.Sprintf("bpftool map dump pinned %s/tc/globals/cilium_lb6_backends_v2", bpffsMountpoint),
+			fmt.Sprintf("bpftool map dump pinned %s/tc/globals/cilium_lb6_backends_v3", bpffsMountpoint),
 			fmt.Sprintf("bpftool map dump pinned %s/tc/globals/cilium_lb6_backends", bpffsMountpoint),
 			fmt.Sprintf("bpftool map dump pinned %s/tc/globals/cilium_lb6_reverse_nat", bpffsMountpoint),
 			fmt.Sprintf("bpftool map dump pinned %s/tc/globals/cilium_ct6_global", bpffsMountpoint),
@@ -186,6 +192,8 @@ func defaultCommands(confDir string, cmdDir string, k8sPods []string) []string {
 			fmt.Sprintf("bpftool map dump pinned %s/tc/globals/cilium_snat_v4_external", bpffsMountpoint),
 			fmt.Sprintf("bpftool map dump pinned %s/tc/globals/cilium_snat_v6_external", bpffsMountpoint),
 			fmt.Sprintf("bpftool map dump pinned %s/tc/globals/cilium_vtep_map", bpffsMountpoint),
+			fmt.Sprintf("bpftool map dump pinned %s/tc/globals/cilium_l2_responder_v4", bpffsMountpoint),
+			fmt.Sprintf("bpftool map dump pinned %s/tc/globals/cilium_ratelimit", bpffsMountpoint),
 		}...)
 	}
 
@@ -210,6 +218,15 @@ func defaultCommands(confDir string, cmdDir string, k8sPods []string) []string {
 	} else {
 		commands = append(commands, tcCommands...)
 	}
+
+	// We want to collect this twice: at the very beginning and at the
+	// very end of the bugtool collection, to see if the counters are
+	// increasing.
+	// The commands end up being the names of the files where their output
+	// is stored, so we can't have the two commands be the exact same or the
+	// second would overwrite. To avoid that, we use the -u flag in this second
+	// command; that flag is documented as being ignored.
+	commands = append(commands, "cat -u /proc/net/xfrm_stat")
 
 	return k8sCommands(commands, k8sPods)
 }
@@ -266,7 +283,6 @@ func tcInterfaceCommands() ([]string, error) {
 
 func catCommands() []string {
 	files := []string{
-		"/proc/net/xfrm_stat",
 		"/proc/sys/net/core/bpf_jit_enable",
 		"/proc/kallsyms",
 		"/etc/resolv.conf",
@@ -364,51 +380,65 @@ func copyCiliumInfoCommands(cmdDir string, k8sPods []string) []string {
 	// Most of the output should come via debuginfo but also adding
 	// these ones for skimming purposes
 	ciliumCommands := []string{
-		fmt.Sprintf("cilium debuginfo --output=markdown,json -f --output-directory=%s", cmdDir),
-		"cilium metrics list",
-		"cilium fqdn cache list",
-		"cilium config -a",
-		"cilium encrypt status",
-		"cilium endpoint list",
-		"cilium bpf bandwidth list",
-		"cilium bpf tunnel list",
-		"cilium bpf lb list",
-		"cilium bpf lb list --revnat",
-		"cilium bpf lb list --frontends",
-		"cilium bpf lb list --backends",
-		"cilium bpf lb list --source-ranges",
-		"cilium bpf lb maglev list",
-		"cilium bpf egress list",
-		"cilium bpf vtep list",
-		"cilium bpf endpoint list",
-		"cilium bpf ct list global",
-		"cilium bpf nat list",
-		"cilium bpf ipmasq list",
-		"cilium bpf ipcache list",
-		"cilium bpf policy get --all --numeric",
-		"cilium bpf sha list",
-		"cilium bpf fs show",
-		"cilium bpf recorder list",
-		"cilium ip list -n -o json",
-		"cilium map list --verbose",
-		"cilium map events cilium_ipcache -o json",
-		"cilium map events cilium_tunnel_map -o json",
-		"cilium map events cilium_lb4_services_v2 -o json",
-		"cilium map events cilium_lb4_backends_v2 -o json",
-		"cilium map events cilium_lxc -o json",
-		"cilium service list",
-		"cilium service list -o json",
-		"cilium recorder list",
-		"cilium status --verbose",
-		"cilium identity list",
-		"cilium-health status --verbose",
-		"cilium-health status -o json",
-		"cilium policy get",
-		"cilium policy selectors -o json",
-		"cilium node list",
-		"cilium node list -o json",
-		"cilium lrp list",
-		"cilium cgroups list -o json",
+		fmt.Sprintf("cilium-dbg debuginfo --output=markdown,json -f --output-directory=%s", cmdDir),
+		"cilium-dbg metrics list",
+		"cilium-dbg fqdn cache list",
+		"cilium-dbg config -a",
+		"cilium-dbg encrypt status",
+		"cilium-dbg endpoint list",
+		"cilium-dbg bpf auth list",
+		"cilium-dbg bpf bandwidth list",
+		"cilium-dbg bpf config list",
+		"cilium-dbg bpf tunnel list",
+		"cilium-dbg bpf lb list",
+		"cilium-dbg bpf lb list --revnat",
+		"cilium-dbg bpf lb list --frontends",
+		"cilium-dbg bpf lb list --backends",
+		"cilium-dbg bpf lb list --source-ranges",
+		"cilium-dbg bpf lb maglev list",
+		"cilium-dbg bpf egress list",
+		"cilium-dbg bpf vtep list",
+		"cilium-dbg bpf endpoint list",
+		"cilium-dbg bpf ct list global",
+		"cilium-dbg bpf nat list",
+		"cilium-dbg bpf ipmasq list",
+		"cilium-dbg bpf ipcache list",
+		"cilium-dbg bpf policy get --all --numeric",
+		"cilium-dbg bpf sha list",
+		"cilium-dbg bpf fs show",
+		"cilium-dbg bpf recorder list",
+		"cilium-dbg ip list -n -o json",
+		"cilium-dbg map list --verbose",
+		"cilium-dbg map events cilium_ipcache -o json",
+		"cilium-dbg map events cilium_tunnel_map -o json",
+		"cilium-dbg map events cilium_lb4_services_v2 -o json",
+		"cilium-dbg map events cilium_lb4_backends_v2 -o json",
+		"cilium-dbg map events cilium_lb4_backends_v3 -o json",
+		"cilium-dbg map events cilium_lb6_services_v2 -o json",
+		"cilium-dbg map events cilium_lb6_backends_v2 -o json",
+		"cilium-dbg map events cilium_lb6_backends_v3 -o json",
+		"cilium-dbg map events cilium_lxc -o json",
+		"cilium-dbg service list",
+		"cilium-dbg service list -o json",
+		"cilium-dbg recorder list",
+		"cilium-dbg status --verbose",
+		"cilium-dbg identity list",
+		"cilium-dbg-health status --verbose",
+		"cilium-dbg-health status -o json",
+		"cilium-dbg policy get",
+		"cilium-dbg policy selectors -o json",
+		"cilium-dbg node list",
+		"cilium-dbg node list -o json",
+		"cilium-dbg bpf nodeid list",
+		"cilium-dbg lrp list",
+		"cilium-dbg cgroups list -o json",
+		"cilium-dbg statedb dump",
+		"cilium-dbg bgp peers",
+		"cilium-dbg bgp routes available ipv4 unicast",
+		"cilium-dbg bgp routes available ipv6 unicast",
+		"cilium-dbg bgp routes advertised ipv4 unicast",
+		"cilium-dbg bgp routes advertised ipv6 unicast",
+		"cilium-dbg bgp route-policies",
 	}
 	var commands []string
 

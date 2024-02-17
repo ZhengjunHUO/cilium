@@ -6,7 +6,7 @@
 package bpf
 
 import (
-	"time"
+	"github.com/cilium/cilium/pkg/time"
 )
 
 // DumpStats tracks statistics over the dump of a map.
@@ -45,7 +45,7 @@ type DumpStats struct {
 // NewDumpStats returns a new stats structure for collecting dump statistics.
 func NewDumpStats(m *Map) *DumpStats {
 	return &DumpStats{
-		MaxEntries: m.MapInfo.MaxEntries,
+		MaxEntries: m.MaxEntries(),
 	}
 }
 

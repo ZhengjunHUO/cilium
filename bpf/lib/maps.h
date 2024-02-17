@@ -151,8 +151,8 @@ struct bpf_elf_map __section_maps CUSTOM_CALLS_MAP = {
 
 struct ipcache_key {
 	struct bpf_lpm_trie_key lpm_key;
-	__u16 pad1;
-	__u8 cluster_id;
+	__u16 cluster_id;
+	__u8 pad1;
 	__u8 family;
 	union {
 		struct {
@@ -207,6 +207,24 @@ struct {
 	__uint(map_flags, BPF_F_NO_PREALLOC);
 } NODE_MAP __section_maps_btf;
 
+struct l2_responder_v4_key {
+	__u32 ip4;
+	__u32 ifindex;
+};
+
+struct l2_responder_v4_stats {
+	__u64 responses_sent;
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__type(key, struct l2_responder_v4_key);
+	__type(value, struct l2_responder_v4_stats);
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
+	__uint(max_entries, L2_RESPONSER_MAP4_SIZE);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+} L2_RESPONDER_MAP4 __section_maps_btf;
+
 #ifdef ENABLE_EGRESS_GATEWAY
 struct {
 	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
@@ -216,7 +234,6 @@ struct {
 	__uint(max_entries, EGRESS_POLICY_MAP_SIZE);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
 } EGRESS_POLICY_MAP __section_maps_btf;
-
 #endif /* ENABLE_EGRESS_GATEWAY */
 
 #ifdef ENABLE_SRV6
@@ -280,11 +297,38 @@ struct {
 } VTEP_MAP __section_maps_btf;
 #endif /* ENABLE_VTEP */
 
+struct world_cidrs_key4 {
+	struct bpf_lpm_trie_key lpm_key;
+	__u32 ip;
+} __packed;
+
+#ifdef ENABLE_HIGH_SCALE_IPCACHE
+struct {
+	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
+	__type(key, struct world_cidrs_key4);
+	__type(value, __u8);
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
+	__uint(max_entries, WORLD_CIDRS4_MAP_SIZE);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+} WORLD_CIDRS4_MAP __section_maps_btf;
+#endif /* ENABLE_HIGH_SCALE_IPCACHE */
+
 #ifndef SKIP_CALLS_MAP
+/* Deprecated, use tail_call_internal() instead. */
 static __always_inline void ep_tail_call(struct __ctx_buff *ctx __maybe_unused,
 					 const __u32 index __maybe_unused)
 {
 	tail_call_static(ctx, &CALLS_MAP, index);
+}
+
+static __always_inline __must_check int
+tail_call_internal(struct __ctx_buff *ctx, const __u32 index, __s8 *ext_err)
+{
+	tail_call_static(ctx, &CALLS_MAP, index);
+
+	if (ext_err)
+		*ext_err = (__s8)index;
+	return DROP_MISSED_TAIL_CALL;
 }
 #endif /* SKIP_CALLS_MAP */
 #endif

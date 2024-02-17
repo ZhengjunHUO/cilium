@@ -10,11 +10,17 @@
 #define ___EP_CONFIG____
 
 #ifndef LXC_IP
-#define LXC_IP_1 bpf_htonl((0xbe) << 24 | (0xef) << 16 | (0) << 8 | (0))
-#define LXC_IP_2 bpf_htonl((0) << 24 | (0) << 16 | (0) << 8 | (0x01))
-#define LXC_IP_3 bpf_htonl((0) << 24 | (0) << 16 | (0) << 8 | (0x01))
-#define LXC_IP_4 bpf_htonl((0x01) << 24 | (0x65) << 16 | (0x82) << 8 | (0xbc))
-#define LXC_IP { { LXC_IP_1, LXC_IP_2, LXC_IP_3, LXC_IP_4 } }
+#define LXC_IP_1 bpf_cpu_to_be64( \
+		(__u64)(0xbe) << 56 | (__u64)(0xef) << 48 | \
+		(__u64)(0x00) << 40 | (__u64)(0x00) << 32 | \
+		(__u64)(0x00) << 24 | (__u64)(0x00) << 16 | \
+		(__u64)(0x00) << 8  | (__u64)(0x01))
+#define LXC_IP_2 bpf_cpu_to_be64( \
+		(__u64)(0x00) << 56 | (__u64)(0x00) << 48 | \
+		(__u64)(0x00) << 40 | (__u64)(0x01) << 32 | \
+		(__u64)(0x01) << 24 | (__u64)(0x65) << 16 | \
+		(__u64)(0x82) << 8  | (__u64)(0xbc))
+#define LXC_IP { { LXC_IP_1, LXC_IP_2 } }
 #endif /* LXC_IP */
 
 #ifndef LXC_IPV4
@@ -31,6 +37,14 @@
 
 #ifndef SECLABEL
 #define SECLABEL 0xfffff
+#endif
+
+#ifndef SECLABEL_IPV4
+#define SECLABEL_IPV4 0xfffff
+#endif
+
+#ifndef SECLABEL_IPV6
+#define SECLABEL_IPV6 0xfffff
 #endif
 
 #ifndef SECLABEL_NB
@@ -69,13 +83,10 @@
 #define CUSTOM_CALLS_MAP test_cilium_calls_custom_65535
 #define LOCAL_DELIVERY_METRICS
 #define CONNTRACK_ACCOUNTING
+#define POLICY_ACCOUNTING
 #define DIRECT_ROUTING_DEV_IFINDEX 0
 
 #endif /* ___EP_CONFIG____ */
-
-#define DEFINE_MAC(NAME, a1, a2, a3, a4, a5, a6)			\
-DEFINE_U32_I(NAME, 1) = (a1) << 24 | (a2) << 16 | (a3) << 8 | (a4);	\
-DEFINE_U32_I(NAME, 2) =                            (a5) << 8 | (a6)
 
 #ifndef NODE_MAC
 #define NODE_MAC_1 (0xde) << 24 | (0xad) << 16 | (0xbe) << 8 | (0xef)

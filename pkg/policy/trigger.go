@@ -6,11 +6,11 @@ package policy
 import (
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/cilium/cilium/pkg/endpoint/regeneration"
 	"github.com/cilium/cilium/pkg/metrics"
 	"github.com/cilium/cilium/pkg/option"
+	"github.com/cilium/cilium/pkg/time"
 	"github.com/cilium/cilium/pkg/trigger"
 )
 
@@ -38,7 +38,7 @@ func NewUpdater(r *Repository, regen regenerator) (*Updater, error) {
 		// changes in agent configuration, changes in endpoint labels, and
 		// change of security identities.
 		TriggerFunc: func(reasons []string) {
-			log.Debugf("Regenerating all endpoints")
+			log.Debug("Regenerating all endpoints")
 			reason := strings.Join(reasons, ", ")
 
 			regenerationMetadata := &regeneration.ExternalRegenerationMetadata{
@@ -74,17 +74,17 @@ type regenerator interface {
 type TriggerMetrics struct{}
 
 func (p *TriggerMetrics) QueueEvent(reason string) {
-	if option.Config.MetricsConfig.TriggerPolicyUpdateTotal {
+	if metrics.TriggerPolicyUpdateTotal.IsEnabled() {
 		metrics.TriggerPolicyUpdateTotal.WithLabelValues(reason).Inc()
 	}
 }
 
 func (p *TriggerMetrics) PostRun(duration, latency time.Duration, folds int) {
-	if option.Config.MetricsConfig.TriggerPolicyUpdateCallDuration {
+	if metrics.TriggerPolicyUpdateCallDuration.IsEnabled() {
 		metrics.TriggerPolicyUpdateCallDuration.WithLabelValues("duration").Observe(duration.Seconds())
 		metrics.TriggerPolicyUpdateCallDuration.WithLabelValues("latency").Observe(latency.Seconds())
 	}
-	if option.Config.MetricsConfig.TriggerPolicyUpdateFolds {
+	if metrics.TriggerPolicyUpdateFolds.IsEnabled() {
 		metrics.TriggerPolicyUpdateFolds.Set(float64(folds))
 	}
 }

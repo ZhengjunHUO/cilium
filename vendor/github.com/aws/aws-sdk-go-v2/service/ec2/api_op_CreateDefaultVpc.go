@@ -4,6 +4,7 @@ package ec2
 
 import (
 	"context"
+	"fmt"
 	awsmiddleware "github.com/aws/aws-sdk-go-v2/aws/middleware"
 	"github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
@@ -13,20 +14,10 @@ import (
 
 // Creates a default VPC with a size /16 IPv4 CIDR block and a default subnet in
 // each Availability Zone. For more information about the components of a default
-// VPC, see Default VPC and default subnets
-// (https://docs.aws.amazon.com/vpc/latest/userguide/default-vpc.html) in the
-// Amazon Virtual Private Cloud User Guide. You cannot specify the components of
-// the default VPC yourself. If you deleted your previous default VPC, you can
-// create a default VPC. You cannot have more than one default VPC per Region. If
-// your account supports EC2-Classic, you cannot use this action to create a
-// default VPC in a Region that supports EC2-Classic. If you want a default VPC in
-// a Region that supports EC2-Classic, see "I really want a default VPC for my
-// existing EC2 account. Is that possible?" in the Default VPCs FAQ
-// (http://aws.amazon.com/vpc/faqs/#Default_VPCs). We are retiring EC2-Classic. We
-// recommend that you migrate from EC2-Classic to a VPC. For more information, see
-// Migrate from EC2-Classic to a VPC
-// (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/vpc-migrate.html) in the
-// Amazon Elastic Compute Cloud User Guide.
+// VPC, see Default VPCs (https://docs.aws.amazon.com/vpc/latest/userguide/default-vpc.html)
+// in the Amazon VPC User Guide. You cannot specify the components of the default
+// VPC yourself. If you deleted your previous default VPC, you can create a default
+// VPC. You cannot have more than one default VPC per Region.
 func (c *Client) CreateDefaultVpc(ctx context.Context, params *CreateDefaultVpcInput, optFns ...func(*Options)) (*CreateDefaultVpcOutput, error) {
 	if params == nil {
 		params = &CreateDefaultVpcInput{}
@@ -46,8 +37,8 @@ type CreateDefaultVpcInput struct {
 
 	// Checks whether you have the required permissions for the action, without
 	// actually making the request, and provides an error response. If you have the
-	// required permissions, the error response is DryRunOperation. Otherwise, it is
-	// UnauthorizedOperation.
+	// required permissions, the error response is DryRunOperation . Otherwise, it is
+	// UnauthorizedOperation .
 	DryRun *bool
 
 	noSmithyDocumentSerde
@@ -65,12 +56,22 @@ type CreateDefaultVpcOutput struct {
 }
 
 func (c *Client) addOperationCreateDefaultVpcMiddlewares(stack *middleware.Stack, options Options) (err error) {
+	if err := stack.Serialize.Add(&setOperationInputMiddleware{}, middleware.After); err != nil {
+		return err
+	}
 	err = stack.Serialize.Add(&awsEc2query_serializeOpCreateDefaultVpc{}, middleware.After)
 	if err != nil {
 		return err
 	}
 	err = stack.Deserialize.Add(&awsEc2query_deserializeOpCreateDefaultVpc{}, middleware.After)
 	if err != nil {
+		return err
+	}
+	if err := addProtocolFinalizerMiddlewares(stack, options, "CreateDefaultVpc"); err != nil {
+		return fmt.Errorf("add protocol finalizers: %v", err)
+	}
+
+	if err = addlegacyEndpointContextSetter(stack, options); err != nil {
 		return err
 	}
 	if err = addSetLoggerMiddleware(stack, options); err != nil {
@@ -91,16 +92,13 @@ func (c *Client) addOperationCreateDefaultVpcMiddlewares(stack *middleware.Stack
 	if err = addRetryMiddlewares(stack, options); err != nil {
 		return err
 	}
-	if err = addHTTPSignerV4Middleware(stack, options); err != nil {
-		return err
-	}
 	if err = awsmiddleware.AddRawResponseToMetadata(stack); err != nil {
 		return err
 	}
 	if err = awsmiddleware.AddRecordResponseTiming(stack); err != nil {
 		return err
 	}
-	if err = addClientUserAgent(stack); err != nil {
+	if err = addClientUserAgent(stack, options); err != nil {
 		return err
 	}
 	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
@@ -109,7 +107,13 @@ func (c *Client) addOperationCreateDefaultVpcMiddlewares(stack *middleware.Stack
 	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
 		return err
 	}
+	if err = addSetLegacyContextSigningOptionsMiddleware(stack); err != nil {
+		return err
+	}
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opCreateDefaultVpc(options.Region), middleware.Before); err != nil {
+		return err
+	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
@@ -121,6 +125,9 @@ func (c *Client) addOperationCreateDefaultVpcMiddlewares(stack *middleware.Stack
 	if err = addRequestResponseLogging(stack, options); err != nil {
 		return err
 	}
+	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -128,7 +135,6 @@ func newServiceMetadataMiddleware_opCreateDefaultVpc(region string) *awsmiddlewa
 	return &awsmiddleware.RegisterServiceMetadata{
 		Region:        region,
 		ServiceID:     ServiceID,
-		SigningName:   "ec2",
 		OperationName: "CreateDefaultVpc",
 	}
 }

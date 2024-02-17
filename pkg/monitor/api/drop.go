@@ -90,6 +90,14 @@ var errors = map[uint8]string{
 	192: "Invalid ClusterID",
 	193: "Unsupported packet protocol for DSR encapsulation",
 	194: "No egress gateway found",
+	195: "Traffic is unencrypted",
+	196: "TTL exceeded",
+	197: "No node ID found",
+	198: "Rate limited",
+	199: "IGMP handled",
+	200: "IGMP subscribed",
+	201: "Multicast handled",
+	202: "Host datapath not ready",
 }
 
 func extendedReason(reason uint8, extError int8) string {

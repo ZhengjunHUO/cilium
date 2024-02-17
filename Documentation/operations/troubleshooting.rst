@@ -41,7 +41,7 @@ whether all pods have the status ``Running``:
    cilium-zmjj9   1/1       Running   0          4d
 
 If Cilium encounters a problem that it cannot recover from, it will
-automatically report the failure state via ``cilium status`` which is regularly
+automatically report the failure state via ``cilium-dbg status`` which is regularly
 queried by the Kubernetes liveness probe to automatically restart Cilium pods.
 If a Cilium pod is in state ``CrashLoopBackoff`` then this indicates a
 permanent failure scenario.
@@ -50,12 +50,12 @@ Detailed Status
 ~~~~~~~~~~~~~~~
 
 If a particular Cilium pod is not in running state, the status and health of
-the agent on that node can be retrieved by running ``cilium status`` in the
+the agent on that node can be retrieved by running ``cilium-dbg status`` in the
 context of that pod:
 
 .. code-block:: shell-session
 
-   $ kubectl -n kube-system exec cilium-2hq5z -- cilium status
+   $ kubectl -n kube-system exec cilium-2hq5z -- cilium-dbg status
    KVStore:                Ok   etcd: 1/1 connected: http://demo-etcd-lab--a.etcd.tgraf.test1.lab.corp.isovalent.link:2379 - 3.2.5 (Leader)
    ContainerRuntime:       Ok   docker daemon: OK
    Kubernetes:             Ok   OK
@@ -67,7 +67,7 @@ context of that pod:
    Proxy Status:           OK, ip 10.2.0.172, port-range 10000-20000
    Cluster health:   4/4 reachable   (2018-06-16T09:49:58Z)
 
-Alternatively, the ``k8s-cilium-exec.sh`` script can be used to run ``cilium
+Alternatively, the ``k8s-cilium-exec.sh`` script can be used to run ``cilium-dbg
 status`` on all nodes. This will provide detailed status and health information
 of all nodes in the cluster:
 
@@ -76,11 +76,11 @@ of all nodes in the cluster:
    curl -sLO https://raw.githubusercontent.com/cilium/cilium/main/contrib/k8s/k8s-cilium-exec.sh
    chmod +x ./k8s-cilium-exec.sh
 
-... and run ``cilium status`` on all nodes:
+... and run ``cilium-dbg status`` on all nodes:
 
 .. code-block:: shell-session
 
-   $ ./k8s-cilium-exec.sh cilium status
+   $ ./k8s-cilium-exec.sh cilium-dbg status
    KVStore:                Ok   Etcd: http://127.0.0.1:2379 - (Leader) 3.1.10
    ContainerRuntime:       Ok
    Kubernetes:             Ok   OK
@@ -93,7 +93,7 @@ of all nodes in the cluster:
    Cluster health:   1/1 reachable   (2018-02-27T00:24:34Z)
 
 Detailed information about the status of Cilium can be inspected with the
-``cilium status --verbose`` command. Verbose output includes detailed IPAM state
+``cilium-dbg status --verbose`` command. Verbose output includes detailed IPAM state
 (allocated addresses), Cilium controller status, and details of the Proxy
 status.
 
@@ -125,7 +125,7 @@ e.g.:
 
 .. code-block:: shell-session
 
-   $ cilium status
+   $ cilium-dbg status
    KVStore:                Ok   etcd: 1/1 connected: https://192.168.60.11:2379 - 3.2.7 (Leader)
    ContainerRuntime:       Ok
    Kubernetes:             Ok   OK
@@ -166,7 +166,7 @@ for the Hubble server to be enabled. When deploying Cilium with Helm, make sure
 to set the ``hubble.enabled=true`` value.
 
 To check if Hubble is enabled in your deployment, you may look for the
-following output in ``cilium status``:
+following output in ``cilium-dbg status``:
 
 .. code-block:: shell-session
 
@@ -375,13 +375,13 @@ Monitoring Datapath State
 Sometimes you may experience broken connectivity, which may be due to a
 number of different causes. A main cause can be unwanted packet drops on
 the networking level. The tool
-``cilium monitor`` allows you to quickly inspect and see if and where packet
+``cilium-dbg monitor`` allows you to quickly inspect and see if and where packet
 drops happen. Following is an example output (use ``kubectl exec`` as in
 previous examples if running with Kubernetes):
 
 .. code-block:: shell-session
 
-   $ kubectl -n kube-system exec -ti cilium-2hq5z -- cilium monitor --type drop
+   $ kubectl -n kube-system exec -ti cilium-2hq5z -- cilium-dbg monitor --type drop
    Listening for events on 2 CPUs with 64x4096 of shared memory
    Press Ctrl-C to quit
    xx drop (Policy denied) to endpoint 25729, identity 261->264: fd02::c0a8:210b:0:bf00 -> fd02::c0a8:210b:0:6481 EchoRequest
@@ -396,7 +396,7 @@ to violation of the Layer 3 policy.
 Handling drop (CT: Map insertion failed)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-If connectivity fails and ``cilium monitor --type drop`` shows ``xx drop (CT:
+If connectivity fails and ``cilium-dbg monitor --type drop`` shows ``xx drop (CT:
 Map insertion failed)``, then it is likely that the connection tracking table
 is filling up and the automatic adjustment of the garbage collector interval is
 insufficient.
@@ -406,7 +406,7 @@ may help. This controls the time interval between two garbage collection runs.
 
 By default ``--conntrack-gc-interval`` is set to 0 which translates to
 using a dynamic interval. In that case, the interval is updated after each
-garbage collection run depending on how many entries where garbage collected.
+garbage collection run depending on how many entries were garbage collected.
 If very few or no entries were garbage collected, the interval will increase;
 if many entries were garbage collected, it will decrease. The current interval
 value is reported in the Cilium agent logs.
@@ -424,7 +424,7 @@ Enabling datapath debug messages
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 By default, datapath debug messages are disabled, and therefore not shown in
-``cilium monitor -v`` output. To enable them, add ``"datapath"`` to
+``cilium-dbg monitor -v`` output. To enable them, add ``"datapath"`` to
 the ``debug-verbose`` option.
 
 Policy Troubleshooting
@@ -511,14 +511,14 @@ address and pod labels:
 
 .. code-block:: shell-session
 
-    kubectl -n kube-system exec -ti cilium-q8wvt -- cilium endpoint list
+    kubectl -n kube-system exec -ti cilium-q8wvt -- cilium-dbg endpoint list
 
 When you find the correct endpoint, the first column of every row is the
 endpoint ID. Use that to dump the full endpoint information:
 
 .. code-block:: shell-session
 
-    kubectl -n kube-system exec -ti cilium-q8wvt -- cilium endpoint get 59084
+    kubectl -n kube-system exec -ti cilium-q8wvt -- cilium-dbg endpoint get 59084
 
 .. image:: images/troubleshooting_policy.png
     :align: center
@@ -536,6 +536,101 @@ here, and it is iteratively working to bring the ``status`` in line with the
 Opening the ``status``, we can drill down through ``policy.realized.l4``. Do
 your ``ingress`` and ``egress`` rules match what you expect? If not, the
 reference to the errant rules can be found in the ``derived-from-rules`` node.
+
+Policymap pressure and overflow
+-------------------------------
+
+The most important step in debugging policymap pressure is finding out which
+node(s) are impacted.
+
+The ``cilium_bpf_map_pressure{map_name="cilium_policy_*"}`` metric monitors the
+endpoint's BPF policymap pressure. This metric exposes the maximum BPF map
+pressure on the node, meaning the policymap experiencing the most pressure on a
+particular node.
+
+Once the node is known, the troubleshooting steps are as follows:
+
+1. Find the Cilium pod on the node experiencing the problematic policymap
+   pressure and obtain a shell via ``kubectl exec``.
+2. Use ``cilium policy selectors`` to get an overview of which selectors are
+   selecting many identities. The output of this command as of Cilium v1.15
+   additionally displays the namespace and name of the policy resource of each
+   selector.
+3. The type of selector tells you what sort of policy rule could be having an
+   impact. The three existing types of selectors are explained below, each with
+   specific steps depending on the selector. See the steps below corresponding
+   to the type of selector.
+4. Consider bumping the policymap size as a last resort. However, keep in mind
+   the following implications:
+
+   * Increased memory consumption for each policymap.
+   * Generally, as identities increase in the cluster, the more work Cilium
+     performs.
+   * At a broader level, if the policy posture is such that all or nearly all
+     identities are selected, this suggests that the posture is too permissive.
+
++---------------+------------------------------------------------------------------------------------------------------------+
+| Selector type | Form in ``cilium policy selectors`` output                                                                 |
++===============+============================================================================================================+
+| CIDR          | ``&LabelSelector{MatchLabels:map[string]string{cidr.1.1.1.1/32: ,}``                                       |
++---------------+------------------------------------------------------------------------------------------------------------+
+| FQDN          | ``MatchName: , MatchPattern: *``                                                                           |
++---------------+------------------------------------------------------------------------------------------------------------+
+| Label         | ``&LabelSelector{MatchLabels:map[string]string{any.name: curl,k8s.io.kubernetes.pod.namespace: default,}`` |
++---------------+------------------------------------------------------------------------------------------------------------+
+
+An example output of ``cilium policy selectors``:
+
+.. code-block:: shell-session
+
+    root@kind-worker:/home/cilium# cilium policy selectors
+    SELECTOR                                                                                                                                                            LABELS                          USERS   IDENTITIES
+    &LabelSelector{MatchLabels:map[string]string{k8s.io.kubernetes.pod.namespace: kube-system,k8s.k8s-app: kube-dns,},MatchExpressions:[]LabelSelectorRequirement{},}   default/tofqdn-dns-visibility   1       16500
+    &LabelSelector{MatchLabels:map[string]string{reserved.none: ,},MatchExpressions:[]LabelSelectorRequirement{},}                                                      default/tofqdn-dns-visibility   1
+    MatchName: , MatchPattern: *                                                                                                                                        default/tofqdn-dns-visibility   1       16777231
+                                                                                                                                                                                                                16777232
+                                                                                                                                                                                                                16777233
+                                                                                                                                                                                                                16860295
+                                                                                                                                                                                                                16860322
+                                                                                                                                                                                                                16860323
+                                                                                                                                                                                                                16860324
+                                                                                                                                                                                                                16860325
+                                                                                                                                                                                                                16860326
+                                                                                                                                                                                                                16860327
+                                                                                                                                                                                                                16860328
+    &LabelSelector{MatchLabels:map[string]string{any.name: netperf,k8s.io.kubernetes.pod.namespace: default,},MatchExpressions:[]LabelSelectorRequirement{},}           default/tofqdn-dns-visibility   1
+    &LabelSelector{MatchLabels:map[string]string{cidr.1.1.1.1/32: ,},MatchExpressions:[]LabelSelectorRequirement{},}                                                    default/tofqdn-dns-visibility   1       16860329
+    &LabelSelector{MatchLabels:map[string]string{cidr.1.1.1.2/32: ,},MatchExpressions:[]LabelSelectorRequirement{},}                                                    default/tofqdn-dns-visibility   1       16860330
+    &LabelSelector{MatchLabels:map[string]string{cidr.1.1.1.3/32: ,},MatchExpressions:[]LabelSelectorRequirement{},}                                                    default/tofqdn-dns-visibility   1       16860331
+
+From the output above, we see that all three selectors are in use. The
+significant action here is to determine which selector is selecting the most
+identities, because the policy containing that selector is the likely cause for
+the policymap pressure.
+
+Label
+~~~~~
+
+See section on :ref:`identity-relevant labels <identity-relevant-labels>`.
+
+Another aspect to consider is the permissiveness of the policies and whether it
+could be reduced.
+
+CIDR
+~~~~
+
+One way to reduce the number of identities selected by a CIDR selector is to
+broaden the range of the CIDR, if possible. For example, in the above example
+output, the policy contains a ``/32`` rule for each CIDR, rather than using a
+wider range like ``/30`` instead. Updating the policy with this rule creates an
+identity that represents all IPs within the ``/30`` and therefore, only
+requires the selector to select 1 identity.
+
+FQDN
+~~~~
+
+See section on :ref:`isolating the source of toFQDNs issues regarding
+identities and policy <isolating-source-toFQDNs-issues-identities-policy>`.
 
 etcd (kvstore)
 ==============
@@ -593,7 +688,7 @@ Services updates:
 Understanding etcd status
 -------------------------
 
-The etcd status is reported when running ``cilium status``. The following line
+The etcd status is reported when running ``cilium-dbg status``. The following line
 represents the status of etcd::
 
    KVStore:  Ok  etcd: 1/1 connected, lease-ID=29c6732d5d580cb5, lock lease-ID=29c6732d5d580cb7, has-quorum=true: https://192.168.60.11:2379 - 3.4.9 (Leader)
@@ -636,7 +731,7 @@ etcd health and potentially take action. The interval depends on the overall
 cluster size. The larger the cluster, the longer the `interval
 <https://pkg.go.dev/github.com/cilium/cilium/pkg/kvstore?tab=doc#ExtraOptions.StatusCheckInterval>`_:
 
- * If no etcd endpoints can be reached, Cilium will report failure in ``cilium
+ * If no etcd endpoints can be reached, Cilium will report failure in ``cilium-dbg
    status``. This will cause the liveness and readiness probe of Kubernetes to
    fail and Cilium will be restarted.
 
@@ -690,12 +785,12 @@ Troubleshooting steps:
    command does not describe the status of the other node, there may be an
    issue with the KV-Store.
 
-#. Run ``cilium monitor`` on the node of the source and destination endpoint.
+#. Run ``cilium-dbg monitor`` on the node of the source and destination endpoint.
    Look for packet drops.
 
    When running in :ref:`arch_overlay` mode:
 
-#. Run ``cilium bpf tunnel list`` and verify that each Cilium node is aware of
+#. Run ``cilium-dbg bpf tunnel list`` and verify that each Cilium node is aware of
    the other nodes in the cluster.  If not, check the logfile for errors.
 
 #. If nodes are being populated correctly, run ``tcpdump -n -i cilium_vxlan`` on
@@ -704,7 +799,7 @@ Troubleshooting steps:
 
    If packets are being dropped,
 
-   * verify that the node IP listed in ``cilium bpf tunnel list`` can reach each
+   * verify that the node IP listed in ``cilium-dbg bpf tunnel list`` can reach each
      other.
    * verify that the firewall on each node allows UDP port 8472.
 
@@ -791,6 +886,8 @@ Reporting a problem
 
 Before you report a problem, make sure to retrieve the necessary information
 from your cluster before the failure state is lost.
+
+.. _sysdump:
 
 Automatic log & state collection
 --------------------------------
@@ -897,29 +994,29 @@ Below is an approximate list of the kind of information in the archive.
 * ``kubectl get pods,svc for all namespaces``
 * ``uname``
 * ``uptime``
-* ``cilium bpf * list``
-* ``cilium endpoint get for each endpoint``
-* ``cilium endpoint list``
+* ``cilium-dbg bpf * list``
+* ``cilium-dbg endpoint get for each endpoint``
+* ``cilium-dbg endpoint list``
 * ``hostname``
-* ``cilium policy get``
-* ``cilium service list``
+* ``cilium-dbg policy get``
+* ``cilium-dbg service list``
 
 
 Debugging information
 ~~~~~~~~~~~~~~~~~~~~~
 
-If you are not running Kubernetes, you can use the ``cilium debuginfo`` command
+If you are not running Kubernetes, you can use the ``cilium-dbg debuginfo`` command
 to retrieve useful debugging information. If you are running Kubernetes, this
 command is automatically run as part of the system dump.
 
-``cilium debuginfo`` can print useful output from the Cilium API. The output
+``cilium-dbg debuginfo`` can print useful output from the Cilium API. The output
 format is in Markdown format so this can be used when reporting a bug on the
 `issue tracker`_.  Running without arguments will print to standard output, but
 you can also redirect to a file like
 
 .. code-block:: shell-session
 
-   cilium debuginfo -f debuginfo.md
+   cilium-dbg debuginfo -f debuginfo.md
 
 .. note::
 
@@ -927,14 +1024,12 @@ you can also redirect to a file like
    away before sharing it with us.
 
 
-Slack Assistance
+Slack assistance
 ----------------
 
-The Cilium slack community is helpful first point of assistance to get help
-troubleshooting a problem or to discuss options on how to address a problem.
-
-The slack community is open to everyone. You can request an invite email by
-visiting `Slack <https://cilium.herokuapp.com/>`_.
+The `Cilium Slack`_ community is a helpful first point of assistance to get
+help troubleshooting a problem or to discuss options on how to address a
+problem. The community is open to anyone.
 
 Report an issue via GitHub
 --------------------------
@@ -943,7 +1038,6 @@ If you believe to have found an issue in Cilium, please report a
 `GitHub issue`_ and make sure to attach a system dump as described above to
 ensure that developers have the best chance to reproduce the issue.
 
-.. _Slack channel: https://cilium.herokuapp.com
 .. _NodeSelector: https://kubernetes.io/docs/concepts/scheduling-eviction/assign-pod-node/#nodeselector
 .. _RBAC: https://kubernetes.io/docs/reference/access-authn-authz/rbac/
 .. _CNI: https://github.com/containernetworking/cni

@@ -59,11 +59,17 @@ type SSHConfigs map[string]*SSHConfig
 
 // GetSSHClient initializes an SSHClient based on the provided SSHConfig
 func (cfg *SSHConfig) GetSSHClient() *SSHClient {
+	var auths []ssh.AuthMethod
+	sshAgent := cfg.GetSSHAgent()
+	if sshAgent != nil {
+		auths = []ssh.AuthMethod{
+			sshAgent,
+		}
+	}
+
 	sshConfig := &ssh.ClientConfig{
 		User: cfg.user,
-		Auth: []ssh.AuthMethod{
-			cfg.GetSSHAgent(),
-		},
+		Auth: auths,
 		// ssh.InsecureIgnoreHostKey is OK in test code.
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(), // lgtm[go/insecure-hostkeycallback]
 		Timeout:         15 * time.Second,
@@ -86,6 +92,9 @@ func (cfg *SSHConfig) String() string {
 
 // GetSSHAgent returns the ssh.AuthMethod corresponding to SSHConfig cfg.
 func (cfg *SSHConfig) GetSSHAgent() ssh.AuthMethod {
+	if cfg.identityFile == "" {
+		return nil
+	}
 	key, err := os.ReadFile(cfg.identityFile)
 	if err != nil {
 		log.Fatalf("unable to retrieve ssh-key on target '%s': %s", cfg.target, err)
@@ -207,22 +216,20 @@ func (client *SSHClient) RunCommandInBackground(ctx context.Context, cmd *SSHCom
 	}
 
 	go func() {
-		select {
-		case <-ctx.Done():
-			_, err := stdin.Write([]byte{3})
-			if err != nil {
-				log.Errorf("write ^C error: %s", err)
-			}
-			err = session.Wait()
-			if err != nil {
-				log.Errorf("wait error: %s", err)
-			}
-			if err = session.Signal(ssh.SIGHUP); err != nil {
-				log.Errorf("failed to kill command: %s", err)
-			}
-			if err = session.Close(); err != nil {
-				log.Errorf("failed to close session: %s", err)
-			}
+		<-ctx.Done()
+		_, err := stdin.Write([]byte{3})
+		if err != nil {
+			log.Errorf("write ^C error: %s", err)
+		}
+		err = session.Wait()
+		if err != nil {
+			log.Errorf("wait error: %s", err)
+		}
+		if err = session.Signal(ssh.SIGHUP); err != nil {
+			log.Errorf("failed to kill command: %s", err)
+		}
+		if err = session.Close(); err != nil {
+			log.Errorf("failed to close session: %s", err)
 		}
 	}()
 	_, err = runCommand(session, cmd)

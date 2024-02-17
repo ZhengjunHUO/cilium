@@ -9,11 +9,15 @@ kind: ConfigMap
 metadata:
   name: hubble-relay-config
   namespace: {{ .Release.Namespace }}
+  {{- with .Values.hubble.relay.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 data:
   config.yaml: |
     cluster-name: {{ .Values.cluster.name }}
     peer-service: "hubble-peer.{{ .Release.Namespace }}.svc.{{ .Values.hubble.peerService.clusterDomain }}:{{ $peerSvcPort }}"
-    listen-address: {{ .Values.hubble.relay.listenHost }}:{{ .Values.hubble.relay.listenPort }}
+    listen-address: {{ include "hubble-relay.config.listenAddress" . }}
     gops: {{ .Values.hubble.relay.gops.enabled }}
     gops-port: {{ .Values.hubble.relay.gops.port | quote }}
     {{- if .Values.hubble.relay.pprof.enabled }}
@@ -29,16 +33,11 @@ data:
     sort-buffer-len-max: {{ .Values.hubble.relay.sortBufferLenMax }}
     sort-buffer-drain-timeout: {{ .Values.hubble.relay.sortBufferDrainTimeout }}
     {{- if .Values.hubble.tls.enabled }}
-    tls-client-cert-file: /var/lib/hubble-relay/tls/client.crt
-    tls-client-key-file: /var/lib/hubble-relay/tls/client.key
+    tls-hubble-client-cert-file: /var/lib/hubble-relay/tls/client.crt
+    tls-hubble-client-key-file: /var/lib/hubble-relay/tls/client.key
     tls-hubble-server-ca-files: /var/lib/hubble-relay/tls/hubble-server-ca.crt
     {{- else }}
     disable-client-tls: true
     {{- end }}
-    {{- if and .Values.hubble.tls.enabled .Values.hubble.relay.tls.server.enabled }}
-    tls-server-cert-file: /var/lib/hubble-relay/tls/server.crt
-    tls-server-key-file: /var/lib/hubble-relay/tls/server.key
-    {{- else }}
-    disable-server-tls: true
-    {{- end }}
+    {{- include "hubble-relay.config.tls" . | nindent 4 }}
 {{- end }}

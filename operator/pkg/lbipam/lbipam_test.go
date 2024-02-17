@@ -6,106 +6,58 @@ package lbipam
 import (
 	"context"
 	"net"
+	"net/netip"
 	"strings"
 	"testing"
 	"time"
 
-	"go.uber.org/goleak"
 	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	k8s_testing "k8s.io/client-go/testing"
 
+	"github.com/cilium/cilium/pkg/annotation"
 	cilium_api_v2alpha1 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2alpha1"
 	slim_core_v1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/core/v1"
 	slim_meta_v1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/meta/v1"
 )
 
-func TestMain(m *testing.M) {
-	goleak.VerifyTestMain(m)
-}
-
 // TestConflictResolution tests that, upon initialization, LB IPAM will detect conflicts between pools,
 // internally disables one of the pools, and notifies the user via a status update.
 // Next, we update the conflicting pool to remove the offending range, this should re-enable the pool.
 func TestConflictResolution(t *testing.T) {
+	fixture := mkTestFixture(true, false)
+
+	poolA := mkPool(poolAUID, "pool-a", []string{"10.0.10.0/24"})
+	fixture.UpsertPool(t, poolA)
+
 	poolB := mkPool(poolBUID, "pool-b", []string{"10.0.10.0/24", "FF::0/48"})
 	poolB.CreationTimestamp = meta_v1.Date(2022, 10, 16, 13, 30, 00, 0, time.UTC)
-	fixture := mkTestFixture([]*cilium_api_v2alpha1.CiliumLoadBalancerIPPool{
-		mkPool(poolAUID, "pool-a", []string{"10.0.10.0/24"}),
-		poolB,
-	}, true, false, nil)
+	fixture.UpsertPool(t, poolB)
 
-	await := fixture.AwaitPool(func(action k8s_testing.Action) bool {
-		if action.GetResource() != poolResource || action.GetVerb() != "patch" {
-			return false
-		}
-
-		pool := fixture.PatchedPool(action)
-
-		if pool.Name != "pool-b" {
-			return false
-		}
-
-		if !isPoolConflicting(pool) {
-			return false
-		}
-
-		return true
-	}, time.Second)
-
-	go fixture.hive.Start(context.Background())
-	defer fixture.hive.Stop(context.Background())
-
-	if await.Block() {
-		t.Fatal("Pool B has not been marked conflicting")
+	poolB = fixture.GetPool("pool-b")
+	if !isPoolConflicting(poolB) {
+		t.Fatal("Pool B should be conflicting")
 	}
 
 	// All ranges of a conflicting pool must be disabled
-	poolBRanges, _ := fixture.lbIPAM.rangesStore.GetRangesForPool("pool-b")
+	poolBRanges, _ := fixture.lbipam.rangesStore.GetRangesForPool("pool-b")
 	for _, r := range poolBRanges {
 		if !r.internallyDisabled {
-			t.Fatalf("Range '%s' from pool B hasn't been disabled", ipNetStr(r.allocRange.CIDR()))
+			t.Fatalf("Range '%s' from pool B hasn't been disabled", ipNetStr(r))
 		}
 	}
 
 	// Phase 2, resolving the conflict
 
-	await = fixture.AwaitPool(func(action k8s_testing.Action) bool {
-		if action.GetResource() != poolResource || action.GetVerb() != "patch" {
-			return false
-		}
-
-		pool := fixture.PatchedPool(action)
-
-		if pool.Name != "pool-b" {
-			return false
-		}
-
-		if isPoolConflicting(pool) {
-			return false
-		}
-
-		return true
-	}, time.Second)
-
-	poolB, err := fixture.poolClient.Get(context.Background(), "pool-b", meta_v1.GetOptions{})
-	if err != nil {
-		t.Fatal(poolB)
-	}
-
 	// Remove the conflicting range
-	poolB.Spec.Cidrs = []cilium_api_v2alpha1.CiliumLoadBalancerIPPoolCIDRBlock{
+	poolB.Spec.Cidrs = []cilium_api_v2alpha1.CiliumLoadBalancerIPPoolIPBlock{
 		{
 			Cidr: cilium_api_v2alpha1.IPv4orIPv6CIDR("FF::0/48"),
 		},
 	}
+	fixture.UpsertPool(t, poolB)
 
-	_, err = fixture.poolClient.Update(context.Background(), poolB, meta_v1.UpdateOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if await.Block() {
-		t.Fatal("Pool b has not de-conflicted")
+	poolB = fixture.GetPool("pool-b")
+	if isPoolConflicting(poolB) {
+		t.Fatal("Pool B should no longer be conflicting")
 	}
 }
 
@@ -114,62 +66,23 @@ func TestConflictResolution(t *testing.T) {
 // after which the pool should be no longer be marked conflicting.
 func TestPoolInternalConflict(t *testing.T) {
 	poolA := mkPool(poolAUID, "pool-a", []string{"10.0.10.0/24", "10.0.10.64/28"})
-	fixture := mkTestFixture([]*cilium_api_v2alpha1.CiliumLoadBalancerIPPool{
-		poolA,
-	}, true, false, nil)
+	fixture := mkTestFixture(true, false)
+	fixture.UpsertPool(t, poolA)
+	poolA = fixture.GetPool("pool-a")
 
-	await := fixture.AwaitPool(func(action k8s_testing.Action) bool {
-		if action.GetResource() != poolResource || action.GetVerb() != "patch" {
-			return false
-		}
-
-		pool := fixture.PatchedPool(action)
-
-		if !isPoolConflicting(pool) {
-			return false
-		}
-
-		return true
-	}, time.Second)
-
-	go fixture.hive.Start(context.Background())
-	defer fixture.hive.Stop(context.Background())
-
-	if await.Block() {
-		t.Fatal("Expected pool to be marked conflicting")
+	if !isPoolConflicting(poolA) {
+		t.Fatal("Pool A should be conflicting")
 	}
 
-	await = fixture.AwaitPool(func(action k8s_testing.Action) bool {
-		if action.GetResource() != poolResource || action.GetVerb() != "patch" {
-			return false
-		}
-
-		pool := fixture.PatchedPool(action)
-
-		if isPoolConflicting(pool) {
-			return false
-		}
-
-		return true
-	}, 2*time.Second)
-
-	pool, err := fixture.poolClient.Get(context.Background(), "pool-a", meta_v1.GetOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	pool.Spec.Cidrs = []cilium_api_v2alpha1.CiliumLoadBalancerIPPoolCIDRBlock{
+	poolA.Spec.Cidrs = []cilium_api_v2alpha1.CiliumLoadBalancerIPPoolIPBlock{
 		{
 			Cidr: "10.0.10.0/24",
 		},
 	}
+	fixture.UpsertPool(t, poolA)
+	poolA = fixture.GetPool("pool-a")
 
-	_, err = fixture.poolClient.Update(context.Background(), pool, meta_v1.UpdateOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if await.Block() {
+	if isPoolConflicting(poolA) {
 		t.Fatal("Expected pool to be un-marked conflicting")
 	}
 }
@@ -177,237 +90,591 @@ func TestPoolInternalConflict(t *testing.T) {
 // TestAllocHappyPath tests that an existing service will first get an IPv4 address assigned, then when they request
 // an IPv6 instead, the IPv4 is freed and an IPv6 is allocated for them.
 func TestAllocHappyPath(t *testing.T) {
-	fixture := mkTestFixture([]*cilium_api_v2alpha1.CiliumLoadBalancerIPPool{
-		mkPool(poolAUID, "pool-a", []string{"10.0.10.0/24", "FF::0/48"}),
-	}, true, true, nil)
+	poolA := mkPool(poolAUID, "pool-a", []string{"10.0.10.0/24", "FF::0/48"})
+	fixture := mkTestFixture(true, true)
+	fixture.UpsertPool(t, poolA)
 
 	// Initially request only an IPv4
 	policy := slim_core_v1.IPFamilyPolicySingleStack
-	fixture.coreCS.Tracker().Add(
-		&slim_core_v1.Service{
-			ObjectMeta: slim_meta_v1.ObjectMeta{
-				Name:      "service-a",
-				Namespace: "default",
-				UID:       serviceAUID,
-			},
-			Spec: slim_core_v1.ServiceSpec{
-				Type:           slim_core_v1.ServiceTypeLoadBalancer,
-				IPFamilyPolicy: &policy,
-				IPFamilies: []slim_core_v1.IPFamily{
-					slim_core_v1.IPv4Protocol,
-				},
+	svcA := &slim_core_v1.Service{
+		ObjectMeta: slim_meta_v1.ObjectMeta{
+			Name:      "service-a",
+			Namespace: "default",
+			UID:       serviceAUID,
+		},
+		Spec: slim_core_v1.ServiceSpec{
+			Type:           slim_core_v1.ServiceTypeLoadBalancer,
+			IPFamilyPolicy: &policy,
+			IPFamilies: []slim_core_v1.IPFamily{
+				slim_core_v1.IPv4Protocol,
 			},
 		},
-	)
-
-	await := fixture.AwaitService(func(action k8s_testing.Action) bool {
-		if action.GetResource() != servicesResource || action.GetVerb() != "patch" {
-			return false
-		}
-
-		svc := fixture.PatchedSvc(action.(k8s_testing.PatchAction))
-
-		if len(svc.Status.LoadBalancer.Ingress) != 1 {
-			t.Error("Expected service to receive exactly one ingress IP")
-			return true
-		}
-
-		if net.ParseIP(svc.Status.LoadBalancer.Ingress[0].IP).To4() == nil {
-			t.Error("Expected service to receive a IPv4 address")
-			return true
-		}
-
-		if len(svc.Status.Conditions) != 1 {
-			t.Error("Expected service to receive exactly one condition")
-			return true
-		}
-
-		if svc.Status.Conditions[0].Type != ciliumSvcRequestSatisfiedCondition {
-			t.Error("Unexpected condition type assigned to service")
-			return true
-		}
-
-		if svc.Status.Conditions[0].Status != slim_meta_v1.ConditionTrue {
-			t.Error("Unexpected condition status assigned to service")
-			return true
-		}
-
-		return true
-	}, time.Second)
-
-	go fixture.hive.Start(context.Background())
-	defer fixture.hive.Stop(context.Background())
-
-	if await.Block() {
-		t.Fatal("Expected service to be updated")
 	}
-	// If t.Error was called within the await
-	if t.Failed() {
-		return
+	fixture.UpsertSvc(t, svcA)
+
+	svcA = fixture.GetSvc("default", "service-a")
+	if len(svcA.Status.LoadBalancer.Ingress) != 1 {
+		t.Error("Expected service to receive exactly one ingress IP")
 	}
 
-	svc, err := fixture.svcClient.Services("default").Get(context.Background(), "service-a", meta_v1.GetOptions{})
-	if err != nil {
-		t.Fatal(err)
+	if net.ParseIP(svcA.Status.LoadBalancer.Ingress[0].IP).To4() == nil {
+		t.Error("Expected service to receive a IPv4 address")
+	}
+
+	if len(svcA.Status.Conditions) != 1 {
+		t.Error("Expected service to receive exactly one condition")
+	}
+
+	if svcA.Status.Conditions[0].Type != ciliumSvcRequestSatisfiedCondition {
+		t.Error("Unexpected condition type assigned to service")
+	}
+
+	if svcA.Status.Conditions[0].Status != slim_meta_v1.ConditionTrue {
+		t.Error("Unexpected condition status assigned to service")
 	}
 
 	// Switch to requesting an IPv6 address
-	svc.Spec.IPFamilies = []slim_core_v1.IPFamily{
+	svcA.Spec.IPFamilies = []slim_core_v1.IPFamily{
 		slim_core_v1.IPv6Protocol,
 	}
+	fixture.UpsertSvc(t, svcA)
+	svcA = fixture.GetSvc("default", "service-a")
 
-	await = fixture.AwaitService(func(action k8s_testing.Action) bool {
-		if action.GetResource() != servicesResource || action.GetVerb() != "patch" {
-			return false
-		}
-
-		svc := fixture.PatchedSvc(action.(k8s_testing.PatchAction))
-
-		// The second update allocates the new IPv6
-		if len(svc.Status.LoadBalancer.Ingress) != 1 {
-			t.Error("Expected service to receive exactly one ingress IP")
-			return true
-		}
-
-		if net.ParseIP(svc.Status.LoadBalancer.Ingress[0].IP).To4() != nil {
-			t.Error("Expected service to receive a IPv6 address")
-			return true
-		}
-
-		return true
-	}, time.Second)
-
-	_, err = fixture.svcClient.Services("default").Update(context.Background(), svc, meta_v1.UpdateOptions{})
-	if err != nil {
-		t.Fatal(err)
+	// The second update allocates the new IPv6
+	if len(svcA.Status.LoadBalancer.Ingress) != 1 {
+		t.Error("Expected service to receive exactly one ingress IP")
 	}
 
-	if await.Block() {
-		t.Fatal("Expected service status update after update")
-	}
-	// If t.Error was called within the await
-	if t.Failed() {
-		return
-	}
-
-	// Allow time for additional events to fire
-	time.Sleep(100 * time.Millisecond)
-
-	svc, err = fixture.svcClient.Services("default").Get(context.Background(), "service-a", meta_v1.GetOptions{})
-	if err != nil {
-		t.Fatal(err)
+	if net.ParseIP(svcA.Status.LoadBalancer.Ingress[0].IP).To4() != nil {
+		t.Error("Expected service to receive a IPv6 address")
 	}
 
 	// Switch back to requesting an IPv4 address
-	svc.Spec.IPFamilies = []slim_core_v1.IPFamily{
+	svcA.Spec.IPFamilies = []slim_core_v1.IPFamily{
 		slim_core_v1.IPv4Protocol,
 	}
+	fixture.UpsertSvc(t, svcA)
 
-	await = fixture.AwaitService(func(action k8s_testing.Action) bool {
-		if action.GetResource() != servicesResource || action.GetVerb() != "patch" {
-			return false
-		}
+	svcA = fixture.GetSvc("default", "service-a")
 
-		svc := fixture.PatchedSvc(action.(k8s_testing.PatchAction))
-
-		// The second update allocates the new IPv4
-		if len(svc.Status.LoadBalancer.Ingress) != 1 {
-			t.Error("Expected service to receive exactly one ingress IP")
-			return true
-		}
-
-		if net.ParseIP(svc.Status.LoadBalancer.Ingress[0].IP).To4() == nil {
-			t.Error("Expected service to receive a IPv4 address")
-			return true
-		}
-
-		return true
-	}, time.Second)
-
-	_, err = fixture.svcClient.Services("default").Update(context.Background(), svc, meta_v1.UpdateOptions{})
-	if err != nil {
-		t.Fatal(err)
+	// The second update allocates the new IPv4
+	if len(svcA.Status.LoadBalancer.Ingress) != 1 {
+		t.Error("Expected service to receive exactly one ingress IP")
 	}
 
-	if await.Block() {
-		t.Fatal("Expected service status update after update")
-	}
-	// If t.Error was called within the await
-	if t.Failed() {
-		return
+	if net.ParseIP(svcA.Status.LoadBalancer.Ingress[0].IP).To4() == nil {
+		t.Error("Expected service to receive a IPv4 address")
 	}
 }
 
-// TestServiceDelete tests the service deletion logic. It makes sure that the IP that was assigned to the service is
-// released after the service is deleted so it can be re-assigned.
-func TestServiceDelete(t *testing.T) {
-	fixture := mkTestFixture([]*cilium_api_v2alpha1.CiliumLoadBalancerIPPool{
-		mkPool(poolAUID, "pool-a", []string{"10.0.10.0/24"}),
-	}, true, true, nil)
+// This test makes sure that two services with the same sharing key get assigned the same IP.
+// And when the sharing key changes the IP is changed as well.
+func TestSharedServiceUpdatedSharingKey(t *testing.T) {
+	poolA := mkPool(poolAUID, "pool-a", []string{"10.0.10.0/24"})
+	fixture := mkTestFixture(true, false)
+	fixture.UpsertPool(t, poolA)
 
-	fixture.coreCS.Tracker().Add(
-		&slim_core_v1.Service{
-			ObjectMeta: slim_meta_v1.ObjectMeta{
-				Name:      "service-a",
-				Namespace: "default",
-				UID:       serviceAUID,
+	svcA := &slim_core_v1.Service{
+		ObjectMeta: slim_meta_v1.ObjectMeta{
+			Name:      "service-a",
+			Namespace: "default",
+			UID:       serviceAUID,
+			Annotations: map[string]string{
+				annotation.LBIPAMSharingKeyAlias: "key-1",
 			},
-			Spec: slim_core_v1.ServiceSpec{
-				Type: slim_core_v1.ServiceTypeLoadBalancer,
-				IPFamilies: []slim_core_v1.IPFamily{
-					slim_core_v1.IPv4Protocol,
+		},
+		Spec: slim_core_v1.ServiceSpec{
+			Type: slim_core_v1.ServiceTypeLoadBalancer,
+			IPFamilies: []slim_core_v1.IPFamily{
+				slim_core_v1.IPv4Protocol,
+			},
+			Ports: []slim_core_v1.ServicePort{{
+				Port: 80,
+			}},
+		},
+	}
+	fixture.UpsertSvc(t, svcA)
+
+	svcB := &slim_core_v1.Service{
+		ObjectMeta: slim_meta_v1.ObjectMeta{
+			Name:      "service-b",
+			Namespace: "default",
+			UID:       serviceAUID,
+			Annotations: map[string]string{
+				annotation.LBIPAMSharingKeyAlias: "key-1",
+			},
+		},
+		Spec: slim_core_v1.ServiceSpec{
+			Type: slim_core_v1.ServiceTypeLoadBalancer,
+			IPFamilies: []slim_core_v1.IPFamily{
+				slim_core_v1.IPv4Protocol,
+			},
+			Ports: []slim_core_v1.ServicePort{{
+				Port: 81,
+			}},
+		},
+	}
+	fixture.UpsertSvc(t, svcB)
+
+	svcA = fixture.GetSvc("default", "service-a")
+	svcB = fixture.GetSvc("default", "service-b")
+
+	if svcA.Status.LoadBalancer.Ingress[0].IP != svcB.Status.LoadBalancer.Ingress[0].IP {
+		t.Fatal("IPs should be the same")
+	}
+
+	svcB.Annotations[annotation.LBIPAMSharingKeyAlias] = "key-2"
+	fixture.UpsertSvc(t, svcB)
+	svcB = fixture.GetSvc("default", "service-b")
+
+	if len(svcB.Status.LoadBalancer.Ingress) != 1 {
+		t.Error("Expected service to receive exactly one ingress IP")
+	}
+
+	if svcB.Status.LoadBalancer.Ingress[0].IP == svcA.Status.LoadBalancer.Ingress[0].IP {
+		t.Error("Expected service to receive a different ingress IP")
+	}
+}
+
+// This test makes sure that two services with the same sharing key get assigned the same IP.
+// And when the ports change to overlap the IP is changed as well.
+func TestSharedServiceUpdatedPorts(t *testing.T) {
+	poolA := mkPool(poolAUID, "pool-a", []string{"10.0.10.0/24"})
+	fixture := mkTestFixture(true, false)
+	fixture.UpsertPool(t, poolA)
+
+	svcA := &slim_core_v1.Service{
+		ObjectMeta: slim_meta_v1.ObjectMeta{
+			Name:      "service-a",
+			Namespace: "default",
+			UID:       serviceAUID,
+			Annotations: map[string]string{
+				annotation.LBIPAMSharingKeyAlias: "key-1",
+			},
+		},
+		Spec: slim_core_v1.ServiceSpec{
+			Type: slim_core_v1.ServiceTypeLoadBalancer,
+			IPFamilies: []slim_core_v1.IPFamily{
+				slim_core_v1.IPv4Protocol,
+			},
+			Ports: []slim_core_v1.ServicePort{{
+				Port: 80,
+			}},
+		},
+	}
+	fixture.UpsertSvc(t, svcA)
+
+	svcB := &slim_core_v1.Service{
+		ObjectMeta: slim_meta_v1.ObjectMeta{
+			Name:      "service-b",
+			Namespace: "default",
+			UID:       serviceAUID,
+			Annotations: map[string]string{
+				annotation.LBIPAMSharingKeyAlias: "key-1",
+			},
+		},
+		Spec: slim_core_v1.ServiceSpec{
+			Type: slim_core_v1.ServiceTypeLoadBalancer,
+			IPFamilies: []slim_core_v1.IPFamily{
+				slim_core_v1.IPv4Protocol,
+			},
+			Ports: []slim_core_v1.ServicePort{{
+				Port: 81,
+			}},
+		},
+	}
+	fixture.UpsertSvc(t, svcB)
+
+	svcA = fixture.GetSvc("default", "service-a")
+	svcB = fixture.GetSvc("default", "service-b")
+
+	if svcA.Status.LoadBalancer.Ingress[0].IP != svcB.Status.LoadBalancer.Ingress[0].IP {
+		t.Fatal("IPs should be the same")
+	}
+
+	svcB.Spec.Ports[0].Port = 80
+	fixture.UpsertSvc(t, svcB)
+	svcB = fixture.GetSvc("default", "service-b")
+
+	if len(svcB.Status.LoadBalancer.Ingress) != 1 {
+		t.Error("Expected service to receive exactly one ingress IP")
+	}
+
+	if svcB.Status.LoadBalancer.Ingress[0].IP == svcA.Status.LoadBalancer.Ingress[0].IP {
+		t.Error("Expected service to receive a different ingress IP")
+	}
+}
+
+// TestSharingKey tests that the sharing key causes the LB IPAM to reuse the same IP for services with the same
+// sharing key. This test also verifies that the ip is not reused if there is a conflict with another service.
+func TestSharingKey(t *testing.T) {
+	poolA := mkPool(poolAUID, "pool-a", []string{"10.0.10.0/24"})
+	fixture := mkTestFixture(true, true)
+	fixture.UpsertPool(t, poolA)
+
+	svcA := &slim_core_v1.Service{
+		ObjectMeta: slim_meta_v1.ObjectMeta{
+			Name:      "service-a",
+			Namespace: "default",
+			UID:       serviceAUID,
+			Annotations: map[string]string{
+				"io.cilium/lb-ipam-sharing-key": "key-a",
+			},
+		},
+		Spec: slim_core_v1.ServiceSpec{
+			Type: slim_core_v1.ServiceTypeLoadBalancer,
+			IPFamilies: []slim_core_v1.IPFamily{
+				slim_core_v1.IPv4Protocol,
+			},
+		},
+	}
+	fixture.UpsertSvc(t, svcA)
+
+	svcA = fixture.GetSvc("default", "service-a")
+	if len(svcA.Status.LoadBalancer.Ingress) != 1 {
+		t.Error("Expected service to receive exactly one ingress IP")
+	}
+
+	if net.ParseIP(svcA.Status.LoadBalancer.Ingress[0].IP).To4() == nil {
+		t.Error("Expected service to receive a IPv4 address")
+	}
+
+	svcIP := svcA.Status.LoadBalancer.Ingress[0].IP
+
+	if _, has := fixture.lbipam.rangesStore.ranges[0].alloc.Get(netip.MustParseAddr(svcIP)); !has {
+		t.Fatal("Service IP hasn't been allocated")
+	}
+
+	svcB := &slim_core_v1.Service{
+		ObjectMeta: slim_meta_v1.ObjectMeta{
+			Name:      "service-b",
+			Namespace: "default",
+			UID:       serviceBUID,
+			Annotations: map[string]string{
+				"io.cilium/lb-ipam-sharing-key": "key-a",
+			},
+		},
+		Spec: slim_core_v1.ServiceSpec{
+			Type: slim_core_v1.ServiceTypeLoadBalancer,
+			IPFamilies: []slim_core_v1.IPFamily{
+				slim_core_v1.IPv4Protocol,
+			},
+		},
+	}
+	fixture.UpsertSvc(t, svcB)
+
+	svcB = fixture.GetSvc("default", "service-b")
+	if len(svcB.Status.LoadBalancer.Ingress) != 1 {
+		t.Error("Expected service to receive exactly one ingress IP")
+	}
+
+	if net.ParseIP(svcB.Status.LoadBalancer.Ingress[0].IP).To4() == nil {
+		t.Error("Expected service to receive a IPv4 address")
+	}
+
+	if svcB.Status.LoadBalancer.Ingress[0].IP != svcIP {
+		t.Error("Expected service to receive the same IP as service-a")
+	}
+
+	if _, has := fixture.lbipam.rangesStore.ranges[0].alloc.Get(netip.MustParseAddr(svcIP)); !has {
+		t.Fatal("Service IP hasn't been allocated")
+	}
+
+	svcC := &slim_core_v1.Service{
+		ObjectMeta: slim_meta_v1.ObjectMeta{
+			Name:      "service-c",
+			Namespace: "default",
+			UID:       serviceCUID,
+			Annotations: map[string]string{
+				"io.cilium/lb-ipam-sharing-key": "key-b",
+			},
+		},
+		Spec: slim_core_v1.ServiceSpec{
+			Type: slim_core_v1.ServiceTypeLoadBalancer,
+			IPFamilies: []slim_core_v1.IPFamily{
+				slim_core_v1.IPv4Protocol,
+			},
+			Ports: []slim_core_v1.ServicePort{
+				{
+					Port: 80,
 				},
 			},
 		},
-	)
-
-	var svcIP string
-
-	await := fixture.AwaitService(func(action k8s_testing.Action) bool {
-		if action.GetResource() != servicesResource || action.GetVerb() != "patch" {
-			return false
-		}
-
-		svc := fixture.PatchedSvc(action)
-
-		if len(svc.Status.LoadBalancer.Ingress) != 1 {
-			t.Error("Expected service to receive exactly one ingress IP")
-			return true
-		}
-
-		if net.ParseIP(svc.Status.LoadBalancer.Ingress[0].IP).To4() == nil {
-			t.Error("Expected service to receive a IPv4 address")
-			return true
-		}
-
-		svcIP = svc.Status.LoadBalancer.Ingress[0].IP
-
-		return true
-	}, time.Second)
-
-	go fixture.hive.Start(context.Background())
-	defer fixture.hive.Stop(context.Background())
-
-	if await.Block() {
-		t.Fatal("Expected service status to be updated")
 	}
-	// If t.Error was called within the await
-	if t.Failed() {
-		return
+	fixture.UpsertSvc(t, svcC)
+	svcC = fixture.GetSvc("default", "service-c")
+
+	if len(svcC.Status.LoadBalancer.Ingress) != 1 {
+		t.Error("Expected service to receive exactly one ingress IP")
 	}
 
-	if !fixture.lbIPAM.rangesStore.ranges[0].allocRange.Has(net.ParseIP(svcIP)) {
-		t.Fatal("Service IP hasn't been allocated")
+	if net.ParseIP(svcC.Status.LoadBalancer.Ingress[0].IP).To4() == nil {
+		t.Error("Expected service to receive a IPv4 address")
 	}
+
+	if svcC.Status.LoadBalancer.Ingress[0].IP == svcIP {
+		t.Error("Expected service to receive a different IP than service-a")
+	}
+
+	svcIP2 := svcC.Status.LoadBalancer.Ingress[0].IP
 
 	err := fixture.svcClient.Services("default").Delete(context.Background(), "service-a", meta_v1.DeleteOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	time.Sleep(100 * time.Millisecond)
+	fixture.DeleteSvc(t, svcA)
+	fixture.DeleteSvc(t, svcB)
 
-	if fixture.lbIPAM.rangesStore.ranges[0].allocRange.Has(net.ParseIP(svcIP)) {
+	// The IP is released because service-b is no longer using it
+	if _, has := fixture.lbipam.rangesStore.ranges[0].alloc.Get(netip.MustParseAddr(svcIP)); has {
+		t.Fatal("Service IP hasn't been released")
+	}
+
+	svcA = &slim_core_v1.Service{
+		ObjectMeta: slim_meta_v1.ObjectMeta{
+			Name:      "service-a",
+			Namespace: "default",
+			UID:       serviceAUID,
+			Annotations: map[string]string{
+				"io.cilium/lb-ipam-sharing-key": "key-b",
+			},
+		},
+		Spec: slim_core_v1.ServiceSpec{
+			Type: slim_core_v1.ServiceTypeLoadBalancer,
+			IPFamilies: []slim_core_v1.IPFamily{
+				slim_core_v1.IPv4Protocol,
+			},
+			Ports: []slim_core_v1.ServicePort{
+				{
+					Port: 80,
+				},
+			},
+		},
+	}
+	fixture.UpsertSvc(t, svcA)
+	svcA = fixture.GetSvc("default", "service-a")
+
+	if len(svcA.Status.LoadBalancer.Ingress) != 1 {
+		t.Error("Expected service to receive exactly one ingress IP")
+	}
+
+	if net.ParseIP(svcA.Status.LoadBalancer.Ingress[0].IP).To4() == nil {
+		t.Error("Expected service to receive a IPv4 address")
+	}
+
+	if svcA.Status.LoadBalancer.Ingress[0].IP == svcIP2 {
+		t.Error("Expected service to receive a different IP than service-c")
+	}
+
+	svcB = &slim_core_v1.Service{
+		ObjectMeta: slim_meta_v1.ObjectMeta{
+			Name:      "service-b",
+			Namespace: "default",
+			UID:       serviceBUID,
+			Annotations: map[string]string{
+				"io.cilium/lb-ipam-sharing-key": "key-b",
+			},
+		},
+		Spec: slim_core_v1.ServiceSpec{
+			Type: slim_core_v1.ServiceTypeLoadBalancer,
+			IPFamilies: []slim_core_v1.IPFamily{
+				slim_core_v1.IPv4Protocol,
+			},
+			Ports: []slim_core_v1.ServicePort{
+				{
+					Port: 81,
+				},
+			},
+		},
+	}
+	fixture.UpsertSvc(t, svcB)
+	svcB = fixture.GetSvc("default", "service-b")
+
+	if len(svcB.Status.LoadBalancer.Ingress) != 1 {
+		t.Error("Expected service to receive exactly one ingress IP")
+	}
+
+	if net.ParseIP(svcB.Status.LoadBalancer.Ingress[0].IP).To4() == nil {
+		t.Error("Expected service to receive a IPv4 address")
+	}
+
+	if svcB.Status.LoadBalancer.Ingress[0].IP != svcIP2 {
+		t.Error("Expected service to receive the same IP as service-c")
+	}
+
+	fixture.DeleteSvc(t, svcC)
+
+	// The IP is not released because service-b is still using it
+	if _, has := fixture.lbipam.rangesStore.ranges[0].alloc.Get(netip.MustParseAddr(svcIP2)); !has {
+		t.Fatal("Service IP has been released")
+	}
+
+	fixture.DeleteSvc(t, svcB)
+
+	// The IP is released because service-b is no longer using it
+	if _, has := fixture.lbipam.rangesStore.ranges[0].alloc.Get(netip.MustParseAddr(svcIP2)); has {
+		t.Fatal("Service IP hasn't been released")
+	}
+}
+
+// TestSharingCrossNamespace tests that the sharing of IPs is possible cross namespace when allowed.
+func TestSharingCrossNamespace(t *testing.T) {
+	poolA := mkPool(poolAUID, "pool-a", []string{"10.0.10.0/24"})
+	fixture := mkTestFixture(true, true)
+	fixture.UpsertPool(t, poolA)
+
+	svcA := &slim_core_v1.Service{
+		ObjectMeta: slim_meta_v1.ObjectMeta{
+			Name:      "service-a",
+			Namespace: "ns-a",
+			UID:       serviceAUID,
+			Annotations: map[string]string{
+				"io.cilium/lb-ipam-sharing-key":             "key-a",
+				"io.cilium/lb-ipam-sharing-cross-namespace": "ns-b",
+			},
+		},
+		Spec: slim_core_v1.ServiceSpec{
+			Type: slim_core_v1.ServiceTypeLoadBalancer,
+			IPFamilies: []slim_core_v1.IPFamily{
+				slim_core_v1.IPv4Protocol,
+			},
+		},
+	}
+	fixture.UpsertSvc(t, svcA)
+
+	svcA = fixture.GetSvc("ns-a", "service-a")
+	if len(svcA.Status.LoadBalancer.Ingress) != 1 {
+		t.Error("Expected service to receive exactly one ingress IP")
+	}
+
+	if net.ParseIP(svcA.Status.LoadBalancer.Ingress[0].IP).To4() == nil {
+		t.Error("Expected service to receive a IPv4 address")
+	}
+
+	svcIP := svcA.Status.LoadBalancer.Ingress[0].IP
+
+	if _, has := fixture.lbipam.rangesStore.ranges[0].alloc.Get(netip.MustParseAddr(svcIP)); !has {
+		t.Fatal("Service IP hasn't been allocated")
+	}
+
+	svcB := &slim_core_v1.Service{
+		ObjectMeta: slim_meta_v1.ObjectMeta{
+			Name:      "service-b",
+			Namespace: "ns-b",
+			UID:       serviceBUID,
+			Annotations: map[string]string{
+				"io.cilium/lb-ipam-sharing-key":             "key-a",
+				"io.cilium/lb-ipam-sharing-cross-namespace": "*",
+			},
+		},
+		Spec: slim_core_v1.ServiceSpec{
+			Type: slim_core_v1.ServiceTypeLoadBalancer,
+			IPFamilies: []slim_core_v1.IPFamily{
+				slim_core_v1.IPv4Protocol,
+			},
+		},
+	}
+	fixture.UpsertSvc(t, svcB)
+
+	svcB = fixture.GetSvc("ns-b", "service-b")
+	if len(svcB.Status.LoadBalancer.Ingress) != 1 {
+		t.Error("Expected service to receive exactly one ingress IP")
+	}
+
+	if net.ParseIP(svcB.Status.LoadBalancer.Ingress[0].IP).To4() == nil {
+		t.Error("Expected service to receive a IPv4 address")
+	}
+
+	if svcB.Status.LoadBalancer.Ingress[0].IP != svcIP {
+		t.Error("Expected service to receive the same IP as service-a")
+	}
+
+	if _, has := fixture.lbipam.rangesStore.ranges[0].alloc.Get(netip.MustParseAddr(svcIP)); !has {
+		t.Fatal("Service IP hasn't been allocated")
+	}
+
+	svcC := &slim_core_v1.Service{
+		ObjectMeta: slim_meta_v1.ObjectMeta{
+			Name:      "service-c",
+			Namespace: "ns-c",
+			UID:       serviceCUID,
+			Annotations: map[string]string{
+				"io.cilium/lb-ipam-sharing-key": "key-a",
+			},
+		},
+		Spec: slim_core_v1.ServiceSpec{
+			Type: slim_core_v1.ServiceTypeLoadBalancer,
+			IPFamilies: []slim_core_v1.IPFamily{
+				slim_core_v1.IPv4Protocol,
+			},
+			Ports: []slim_core_v1.ServicePort{
+				{
+					Port: 80,
+				},
+			},
+		},
+	}
+	fixture.UpsertSvc(t, svcC)
+	svcC = fixture.GetSvc("ns-c", "service-c")
+
+	if len(svcC.Status.LoadBalancer.Ingress) != 1 {
+		t.Error("Expected service to receive exactly one ingress IP")
+	}
+
+	if net.ParseIP(svcC.Status.LoadBalancer.Ingress[0].IP).To4() == nil {
+		t.Error("Expected service to receive a IPv4 address")
+	}
+
+	if svcC.Status.LoadBalancer.Ingress[0].IP == svcIP {
+		t.Error("Expected service to receive a different IP than service-a")
+	}
+
+	fixture.DeleteSvc(t, svcA)
+	fixture.DeleteSvc(t, svcB)
+	fixture.DeleteSvc(t, svcC)
+}
+
+// TestServiceDelete tests the service deletion logic. It makes sure that the IP that was assigned to the service is
+// released after the service is deleted so it can be re-assigned.
+func TestServiceDelete(t *testing.T) {
+	poolA := mkPool(poolAUID, "pool-a", []string{"10.0.10.0/24"})
+	fixture := mkTestFixture(true, true)
+	fixture.UpsertPool(t, poolA)
+
+	svcA := &slim_core_v1.Service{
+		ObjectMeta: slim_meta_v1.ObjectMeta{
+			Name:      "service-a",
+			Namespace: "default",
+			UID:       serviceAUID,
+		},
+		Spec: slim_core_v1.ServiceSpec{
+			Type: slim_core_v1.ServiceTypeLoadBalancer,
+			IPFamilies: []slim_core_v1.IPFamily{
+				slim_core_v1.IPv4Protocol,
+			},
+		},
+	}
+	fixture.UpsertSvc(t, svcA)
+	svcA = fixture.GetSvc("default", "service-a")
+
+	if len(svcA.Status.LoadBalancer.Ingress) != 1 {
+		t.Error("Expected service to receive exactly one ingress IP")
+	}
+
+	if net.ParseIP(svcA.Status.LoadBalancer.Ingress[0].IP).To4() == nil {
+		t.Error("Expected service to receive a IPv4 address")
+	}
+
+	svcIP := svcA.Status.LoadBalancer.Ingress[0].IP
+
+	if _, has := fixture.lbipam.rangesStore.ranges[0].alloc.Get(netip.MustParseAddr(svcIP)); !has {
+		t.Fatal("Service IP hasn't been allocated")
+	}
+
+	fixture.DeleteSvc(t, svcA)
+
+	if _, has := fixture.lbipam.rangesStore.ranges[0].alloc.Get(netip.MustParseAddr(svcIP)); has {
 		t.Fatal("Service IP hasn't been released")
 	}
 }
@@ -416,167 +683,132 @@ func TestServiceDelete(t *testing.T) {
 // LB IPAM should take the unknown IP away and allocate a new and valid IP. This scenario can happen when a service
 // passes ownership from on controller to another or when a pool is deleted while the operator is down.
 func TestReallocOnInit(t *testing.T) {
-	fixture := mkTestFixture([]*cilium_api_v2alpha1.CiliumLoadBalancerIPPool{
-		mkPool(poolAUID, "pool-a", []string{"10.0.10.0/24"}),
-	}, true, true, nil)
+	poolA := mkPool(poolAUID, "pool-a", []string{"10.0.10.0/24"})
+	fixture := mkTestFixture(true, true)
+	fixture.UpsertPool(t, poolA)
 
 	// Initially request only an IPv4
 	policy := slim_core_v1.IPFamilyPolicySingleStack
-	fixture.coreCS.Tracker().Add(
-		&slim_core_v1.Service{
-			ObjectMeta: slim_meta_v1.ObjectMeta{
-				Name:      "service-a",
-				Namespace: "default",
-				UID:       serviceAUID,
+	svcA := &slim_core_v1.Service{
+		ObjectMeta: slim_meta_v1.ObjectMeta{
+			Name:      "service-a",
+			Namespace: "default",
+			UID:       serviceAUID,
+		},
+		Spec: slim_core_v1.ServiceSpec{
+			Type:           slim_core_v1.ServiceTypeLoadBalancer,
+			IPFamilyPolicy: &policy,
+			IPFamilies: []slim_core_v1.IPFamily{
+				slim_core_v1.IPv4Protocol,
 			},
-			Spec: slim_core_v1.ServiceSpec{
-				Type:           slim_core_v1.ServiceTypeLoadBalancer,
-				IPFamilyPolicy: &policy,
-				IPFamilies: []slim_core_v1.IPFamily{
-					slim_core_v1.IPv4Protocol,
-				},
-			},
-			Status: slim_core_v1.ServiceStatus{
-				LoadBalancer: slim_core_v1.LoadBalancerStatus{
-					Ingress: []slim_core_v1.LoadBalancerIngress{
-						{
-							IP: "192.168.1.12",
-						},
+		},
+		Status: slim_core_v1.ServiceStatus{
+			LoadBalancer: slim_core_v1.LoadBalancerStatus{
+				Ingress: []slim_core_v1.LoadBalancerIngress{
+					{
+						IP: "192.168.1.12",
 					},
 				},
 			},
 		},
-	)
+	}
+	fixture.UpsertSvc(t, svcA)
+	svcA = fixture.GetSvc("default", "service-a")
 
-	await := fixture.AwaitService(func(action k8s_testing.Action) bool {
-		if action.GetResource() != servicesResource || action.GetVerb() != "patch" {
-			return false
-		}
+	if len(svcA.Status.LoadBalancer.Ingress) != 1 {
+		t.Error("Expected service to receive exactly one ingress IP")
+	}
 
-		svc := fixture.PatchedSvc(action)
+	if net.ParseIP(svcA.Status.LoadBalancer.Ingress[0].IP).To4() == nil {
+		t.Error("Expected service to receive a IPv4 address")
+	}
 
-		if len(svc.Status.LoadBalancer.Ingress) != 1 {
-			t.Error("Expected service to receive exactly one ingress IP")
-			return true
-		}
+	if svcA.Status.LoadBalancer.Ingress[0].IP == "192.168.1.12" {
+		t.Error("Expected ingress IP to not be the initial, bad IP")
+	}
 
-		if net.ParseIP(svc.Status.LoadBalancer.Ingress[0].IP).To4() == nil {
-			t.Error("Expected service to receive a IPv4 address")
-			return true
-		}
+	if len(svcA.Status.Conditions) != 1 {
+		t.Error("Expected service to receive exactly one condition")
+	}
 
-		if svc.Status.LoadBalancer.Ingress[0].IP == "192.168.1.12" {
-			t.Error("Expected ingress IP to not be the initial, bad IP")
-			return true
-		}
+	if svcA.Status.Conditions[0].Type != ciliumSvcRequestSatisfiedCondition {
+		t.Error("Expected second condition to be svc-satisfied:true")
+	}
 
-		if len(svc.Status.Conditions) != 1 {
-			t.Error("Expected service to receive exactly one condition")
-			return true
-		}
-
-		if svc.Status.Conditions[0].Type != ciliumSvcRequestSatisfiedCondition {
-			t.Error("Expected second condition to be svc-satisfied:true")
-			return true
-		}
-
-		if svc.Status.Conditions[0].Status != slim_meta_v1.ConditionTrue {
-			t.Error("Expected second condition to be svc-satisfied:true")
-			return true
-		}
-
-		return true
-	}, time.Second)
-
-	go fixture.hive.Start(context.Background())
-	defer fixture.hive.Stop(context.Background())
-
-	if await.Block() {
-		t.Fatal("Expected service to be updated")
+	if svcA.Status.Conditions[0].Status != slim_meta_v1.ConditionTrue {
+		t.Error("Expected second condition to be svc-satisfied:true")
 	}
 }
 
 // TestAllocOnInit tests that on init, ingress IPs on services which match configured pools are imported
 // and marked as allocated. This is crucial when restarting the operator in a running cluster.
 func TestAllocOnInit(t *testing.T) {
-	initDone := make(chan struct{})
-	fixture := mkTestFixture([]*cilium_api_v2alpha1.CiliumLoadBalancerIPPool{
-		mkPool(poolAUID, "pool-a", []string{"10.0.10.0/24"}),
-	}, true, true, func() {
-		close(initDone)
-	})
+	poolA := mkPool(poolAUID, "pool-a", []string{"10.0.10.0/24"})
+	fixture := mkTestFixture(true, true)
+	fixture.UpsertPool(t, poolA)
 
 	policy := slim_core_v1.IPFamilyPolicySingleStack
-	fixture.coreCS.Tracker().Add(
-		&slim_core_v1.Service{
-			ObjectMeta: slim_meta_v1.ObjectMeta{
-				Name:      "service-a",
-				Namespace: "default",
-				UID:       serviceAUID,
+	svcA := &slim_core_v1.Service{
+		ObjectMeta: slim_meta_v1.ObjectMeta{
+			Name:      "service-a",
+			Namespace: "default",
+			UID:       serviceAUID,
+		},
+		Spec: slim_core_v1.ServiceSpec{
+			Type:           slim_core_v1.ServiceTypeLoadBalancer,
+			IPFamilyPolicy: &policy,
+			IPFamilies: []slim_core_v1.IPFamily{
+				slim_core_v1.IPv4Protocol,
 			},
-			Spec: slim_core_v1.ServiceSpec{
-				Type:           slim_core_v1.ServiceTypeLoadBalancer,
-				IPFamilyPolicy: &policy,
-				IPFamilies: []slim_core_v1.IPFamily{
-					slim_core_v1.IPv4Protocol,
-				},
-			},
-			Status: slim_core_v1.ServiceStatus{
-				LoadBalancer: slim_core_v1.LoadBalancerStatus{
-					Ingress: []slim_core_v1.LoadBalancerIngress{
-						{
-							IP: "10.0.10.123",
-						},
+		},
+		Status: slim_core_v1.ServiceStatus{
+			LoadBalancer: slim_core_v1.LoadBalancerStatus{
+				Ingress: []slim_core_v1.LoadBalancerIngress{
+					{
+						IP: "10.0.10.123",
 					},
 				},
 			},
 		},
-	)
-	fixture.coreCS.Tracker().Add(
-		&slim_core_v1.Service{
-			ObjectMeta: slim_meta_v1.ObjectMeta{
-				Name:      "service-b",
-				Namespace: "default",
-				UID:       serviceBUID,
-			},
-			Spec: slim_core_v1.ServiceSpec{
-				Type:           slim_core_v1.ServiceTypeLoadBalancer,
-				LoadBalancerIP: "10.0.10.124",
-			},
-			Status: slim_core_v1.ServiceStatus{
-				LoadBalancer: slim_core_v1.LoadBalancerStatus{
-					Ingress: []slim_core_v1.LoadBalancerIngress{
-						{
-							IP: "10.0.10.124",
-						},
+	}
+	fixture.UpsertSvc(t, svcA)
+	svcA = fixture.GetSvc("default", "service-a")
+
+	svcB := &slim_core_v1.Service{
+		ObjectMeta: slim_meta_v1.ObjectMeta{
+			Name:      "service-b",
+			Namespace: "default",
+			UID:       serviceBUID,
+		},
+		Spec: slim_core_v1.ServiceSpec{
+			Type:           slim_core_v1.ServiceTypeLoadBalancer,
+			LoadBalancerIP: "10.0.10.124",
+		},
+		Status: slim_core_v1.ServiceStatus{
+			LoadBalancer: slim_core_v1.LoadBalancerStatus{
+				Ingress: []slim_core_v1.LoadBalancerIngress{
+					{
+						IP: "10.0.10.124",
 					},
 				},
 			},
 		},
-	)
+	}
+	fixture.UpsertSvc(t, svcB)
 
-	await := fixture.AwaitService(func(action k8s_testing.Action) bool {
-		if action.GetResource() != servicesResource || action.GetVerb() != "patch" {
-			return false
-		}
+	if svcA.Status.LoadBalancer.Ingress[0].IP != "10.0.10.123" {
+		t.Error("Expected service to receive exactly one ingress IP")
+	}
 
-		t.Error("No service updates expected")
+	if svcB.Status.LoadBalancer.Ingress[0].IP != "10.0.10.124" {
+		t.Error("Expected service to receive exactly one ingress IP")
+	}
 
-		return false
-	}, 100*time.Millisecond)
-
-	go fixture.hive.Start(context.Background())
-	defer fixture.hive.Stop(context.Background())
-
-	<-initDone
-
-	await.Block()
-
-	if !fixture.lbIPAM.rangesStore.ranges[0].allocRange.Has(net.ParseIP("10.0.10.123")) {
+	if _, has := fixture.lbipam.rangesStore.ranges[0].alloc.Get(netip.MustParseAddr("10.0.10.123")); !has {
 		t.Fatal("Expected the imported IP to be allocated")
 	}
 
-	if !fixture.lbIPAM.rangesStore.ranges[0].allocRange.Has(net.ParseIP("10.0.10.124")) {
+	if _, has := fixture.lbipam.rangesStore.ranges[0].alloc.Get(netip.MustParseAddr("10.0.10.124")); !has {
 		t.Fatal("Expected the imported IP to be allocated")
 	}
 }
@@ -592,58 +824,15 @@ func TestPoolSelectorBasic(t *testing.T) {
 	}
 	poolA.Spec.ServiceSelector = &selector
 
-	fixture := mkTestFixture([]*cilium_api_v2alpha1.CiliumLoadBalancerIPPool{
-		poolA,
-	}, true, true, nil)
-
-	go fixture.hive.Start(context.Background())
-	defer fixture.hive.Stop(context.Background())
-
-	await := fixture.AwaitService(func(action k8s_testing.Action) bool {
-		if action.GetResource() != servicesResource || action.GetVerb() != "patch" {
-			return false
-		}
-
-		svc := fixture.PatchedSvc(action)
-
-		if svc.Name != "red-service" {
-			t.Error("Expected update from 'red-service'")
-			return true
-		}
-
-		if len(svc.Status.LoadBalancer.Ingress) != 1 {
-			t.Error("Expected service to receive exactly one ingress IP")
-			return true
-		}
-
-		if net.ParseIP(svc.Status.LoadBalancer.Ingress[0].IP).To4() == nil {
-			t.Error("Expected service to receive a IPv4 address")
-			return true
-		}
-
-		if len(svc.Status.Conditions) != 1 {
-			t.Error("Expected service to receive exactly one condition")
-			return true
-		}
-
-		if svc.Status.Conditions[0].Type != ciliumSvcRequestSatisfiedCondition {
-			t.Error("Expected condition to be svc-satisfied:true")
-			return true
-		}
-
-		if svc.Status.Conditions[0].Status != slim_meta_v1.ConditionTrue {
-			t.Error("Expected condition to be svc-satisfied:true")
-			return true
-		}
-
-		return true
-	}, time.Second)
+	fixture := mkTestFixture(true, true)
+	fixture.UpsertPool(t, poolA)
 
 	policy := slim_core_v1.IPFamilyPolicySingleStack
 	matchingService := &slim_core_v1.Service{
 		ObjectMeta: slim_meta_v1.ObjectMeta{
-			Name: "red-service",
-			UID:  serviceAUID,
+			Name:      "red-service",
+			Namespace: "default",
+			UID:       serviceAUID,
 			Labels: map[string]string{
 				"color": "red",
 			},
@@ -653,59 +842,34 @@ func TestPoolSelectorBasic(t *testing.T) {
 			IPFamilyPolicy: &policy,
 		},
 	}
+	fixture.UpsertSvc(t, matchingService)
+	matchingService = fixture.GetSvc("default", "red-service")
 
-	_, err := fixture.svcClient.Services("default").Create(context.Background(), matchingService, meta_v1.CreateOptions{})
-	if err != nil {
-		t.Fatal(err)
+	if len(matchingService.Status.LoadBalancer.Ingress) != 1 {
+		t.Error("Expected service to receive exactly one ingress IP")
 	}
 
-	if await.Block() {
-		t.Fatal("Expected service status update")
+	if net.ParseIP(matchingService.Status.LoadBalancer.Ingress[0].IP).To4() == nil {
+		t.Error("Expected service to receive a IPv4 address")
 	}
 
-	// If t.Error was called within the await
-	if t.Failed() {
-		return
+	if len(matchingService.Status.Conditions) != 1 {
+		t.Error("Expected service to receive exactly one condition")
 	}
 
-	await = fixture.AwaitService(func(action k8s_testing.Action) bool {
-		if action.GetResource() != servicesResource || action.GetVerb() != "patch" {
-			return false
-		}
+	if matchingService.Status.Conditions[0].Type != ciliumSvcRequestSatisfiedCondition {
+		t.Error("Expected condition to be svc-satisfied:true")
+	}
 
-		svc := fixture.PatchedSvc(action)
-
-		if svc.Name != "blue-service" {
-			return false
-		}
-
-		if len(svc.Status.LoadBalancer.Ingress) != 0 {
-			t.Error("Expected service to not receive any ingress IPs")
-			return true
-		}
-
-		if len(svc.Status.Conditions) != 1 {
-			t.Error("Expected service to receive exactly one condition")
-			return true
-		}
-
-		if svc.Status.Conditions[0].Type != ciliumSvcRequestSatisfiedCondition {
-			t.Error("Expected condition to be svc-satisfied:false")
-			return true
-		}
-
-		if svc.Status.Conditions[0].Status != slim_meta_v1.ConditionFalse {
-			t.Error("Expected condition to be svc-satisfied:false")
-			return true
-		}
-
-		return true
-	}, time.Second)
+	if matchingService.Status.Conditions[0].Status != slim_meta_v1.ConditionTrue {
+		t.Error("Expected condition to be svc-satisfied:true")
+	}
 
 	nonMatchingService := &slim_core_v1.Service{
 		ObjectMeta: slim_meta_v1.ObjectMeta{
-			Name: "blue-service",
-			UID:  serviceBUID,
+			Name:      "blue-service",
+			Namespace: "default",
+			UID:       serviceBUID,
 			Labels: map[string]string{
 				"color": "blue",
 			},
@@ -715,14 +879,23 @@ func TestPoolSelectorBasic(t *testing.T) {
 			IPFamilyPolicy: &policy,
 		},
 	}
+	fixture.UpsertSvc(t, nonMatchingService)
+	nonMatchingService = fixture.GetSvc("default", "blue-service")
 
-	_, err = fixture.svcClient.Services("default").Create(context.Background(), nonMatchingService, meta_v1.CreateOptions{})
-	if err != nil {
-		t.Fatal(err)
+	if len(nonMatchingService.Status.LoadBalancer.Ingress) != 0 {
+		t.Error("Expected service to not receive any ingress IPs")
 	}
 
-	if await.Block() {
-		t.Fatal("Expected service status update")
+	if len(nonMatchingService.Status.Conditions) != 1 {
+		t.Error("Expected service to receive exactly one condition")
+	}
+
+	if nonMatchingService.Status.Conditions[0].Type != ciliumSvcRequestSatisfiedCondition {
+		t.Error("Expected condition to be svc-satisfied:false")
+	}
+
+	if nonMatchingService.Status.Conditions[0].Status != slim_meta_v1.ConditionFalse {
+		t.Error("Expected condition to be svc-satisfied:false")
 	}
 }
 
@@ -737,52 +910,8 @@ func TestPoolSelectorNamespace(t *testing.T) {
 	}
 	poolA.Spec.ServiceSelector = &selector
 
-	fixture := mkTestFixture([]*cilium_api_v2alpha1.CiliumLoadBalancerIPPool{
-		poolA,
-	}, true, true, nil)
-
-	go fixture.hive.Start(context.Background())
-	defer fixture.hive.Stop(context.Background())
-
-	await := fixture.AwaitService(func(action k8s_testing.Action) bool {
-		if action.GetResource() != servicesResource || action.GetVerb() != "patch" {
-			return false
-		}
-
-		svc := fixture.PatchedSvc(action)
-
-		if svc.Name != "red-service" {
-			t.Error("Expected update from 'red-service'")
-			return true
-		}
-
-		if len(svc.Status.LoadBalancer.Ingress) != 1 {
-			t.Error("Expected service to receive exactly one ingress IP")
-			return true
-		}
-
-		if net.ParseIP(svc.Status.LoadBalancer.Ingress[0].IP).To4() == nil {
-			t.Error("Expected service to receive a IPv4 address")
-			return true
-		}
-
-		if len(svc.Status.Conditions) != 1 {
-			t.Error("Expected service to receive exactly one condition")
-			return true
-		}
-
-		if svc.Status.Conditions[0].Type != ciliumSvcRequestSatisfiedCondition {
-			t.Error("Expected condition to be svc-satisfied:true")
-			return true
-		}
-
-		if svc.Status.Conditions[0].Status != slim_meta_v1.ConditionTrue {
-			t.Error("Expected condition to be svc-satisfied:true")
-			return true
-		}
-
-		return true
-	}, time.Second)
+	fixture := mkTestFixture(true, true)
+	fixture.UpsertPool(t, poolA)
 
 	policy := slim_core_v1.IPFamilyPolicySingleStack
 	matchingService := &slim_core_v1.Service{
@@ -796,50 +925,28 @@ func TestPoolSelectorNamespace(t *testing.T) {
 			IPFamilyPolicy: &policy,
 		},
 	}
+	fixture.UpsertSvc(t, matchingService)
+	matchingService = fixture.GetSvc("tenant-one", "red-service")
 
-	_, err := fixture.svcClient.Services("tenant-one").Create(context.Background(), matchingService, meta_v1.CreateOptions{})
-	if err != nil {
-		t.Fatal(err)
+	if len(matchingService.Status.LoadBalancer.Ingress) != 1 {
+		t.Error("Expected service to receive exactly one ingress IP")
 	}
 
-	if await.Block() {
-		t.Fatal("Expected service status update")
+	if net.ParseIP(matchingService.Status.LoadBalancer.Ingress[0].IP).To4() == nil {
+		t.Error("Expected service to receive a IPv4 address")
 	}
 
-	// If t.Error was called within the await
-	if t.Failed() {
-		return
+	if len(matchingService.Status.Conditions) != 1 {
+		t.Error("Expected service to receive exactly one condition")
 	}
 
-	await = fixture.AwaitService(func(action k8s_testing.Action) bool {
-		if action.GetResource() != servicesResource || action.GetVerb() != "patch" {
-			return false
-		}
+	if matchingService.Status.Conditions[0].Type != ciliumSvcRequestSatisfiedCondition {
+		t.Error("Expected condition to be svc-satisfied:true")
+	}
 
-		svc := fixture.PatchedSvc(action)
-
-		if svc.Name != "blue-service" {
-			return false
-		}
-
-		if len(svc.Status.LoadBalancer.Ingress) != 0 {
-			t.Error("Expected service to not receive any ingress IPs")
-		}
-
-		if len(svc.Status.Conditions) != 1 {
-			t.Error("Expected service to receive exactly one condition")
-		}
-
-		if svc.Status.Conditions[0].Type != ciliumSvcRequestSatisfiedCondition {
-			t.Error("Expected condition to be svc-satisfied:false")
-		}
-
-		if svc.Status.Conditions[0].Status != slim_meta_v1.ConditionFalse {
-			t.Error("Expected condition to be svc-satisfied:false")
-		}
-
-		return true
-	}, time.Second)
+	if matchingService.Status.Conditions[0].Status != slim_meta_v1.ConditionTrue {
+		t.Error("Expected condition to be svc-satisfied:true")
+	}
 
 	nonMatchingService := &slim_core_v1.Service{
 		ObjectMeta: slim_meta_v1.ObjectMeta{
@@ -856,101 +963,50 @@ func TestPoolSelectorNamespace(t *testing.T) {
 			IPFamilyPolicy: &policy,
 		},
 	}
+	fixture.UpsertSvc(t, nonMatchingService)
+	nonMatchingService = fixture.GetSvc("tenant-two", "blue-service")
 
-	_, err = fixture.svcClient.Services("tenant-two").Create(context.Background(), nonMatchingService, meta_v1.CreateOptions{})
-	if err != nil {
-		t.Fatal(err)
+	if len(nonMatchingService.Status.LoadBalancer.Ingress) != 0 {
+		t.Error("Expected service to not receive any ingress IPs")
 	}
 
-	if await.Block() {
-		t.Fatal("Expected service status update")
+	if len(nonMatchingService.Status.Conditions) != 1 {
+		t.Error("Expected service to receive exactly one condition")
+	}
+
+	if nonMatchingService.Status.Conditions[0].Type != ciliumSvcRequestSatisfiedCondition {
+		t.Error("Expected condition to be svc-satisfied:false")
+	}
+
+	if nonMatchingService.Status.Conditions[0].Status != slim_meta_v1.ConditionFalse {
+		t.Error("Expected condition to be svc-satisfied:false")
 	}
 }
 
 // TestChangeServiceType tests that we don't handle non-LB services, then we update the type and check that we start
 // handling the service, then switch the type again and verify that we release the allocated IP.
 func TestChangeServiceType(t *testing.T) {
-	initDone := make(chan struct{})
-	fixture := mkTestFixture([]*cilium_api_v2alpha1.CiliumLoadBalancerIPPool{
-		mkPool(poolAUID, "pool-a", []string{"10.0.10.0/24"}),
-	}, true, true, func() {
-		close(initDone)
-	})
+	poolA := mkPool(poolAUID, "pool-a", []string{"10.0.10.0/24"})
+	fixture := mkTestFixture(true, true)
+	fixture.UpsertPool(t, poolA)
 
-	// This existing ClusterIP service should be ignored
-	fixture.coreCS.Tracker().Add(
-		&slim_core_v1.Service{
-			ObjectMeta: slim_meta_v1.ObjectMeta{
-				Name:      "service-a",
-				Namespace: "default",
-				UID:       serviceAUID,
-			},
-			Spec: slim_core_v1.ServiceSpec{
-				Type: slim_core_v1.ServiceTypeClusterIP,
-			},
+	// This ClusterIP service should be ignored
+	clusterIPService := &slim_core_v1.Service{
+		ObjectMeta: slim_meta_v1.ObjectMeta{
+			Name:      "service-a",
+			Namespace: "default",
+			UID:       serviceAUID,
 		},
-	)
-
-	await := fixture.AwaitService(func(action k8s_testing.Action) bool {
-		if action.GetResource() != servicesResource || action.GetVerb() != "patch" {
-			return false
-		}
-
-		t.Error("No service updates expected")
-
-		return false
-	}, 100*time.Millisecond)
-
-	go fixture.hive.Start(context.Background())
-	defer fixture.hive.Stop(context.Background())
-
-	<-initDone
-
-	await.Block()
-
-	// If t.Error was called within the await
-	if t.Failed() {
-		return
+		Spec: slim_core_v1.ServiceSpec{
+			Type: slim_core_v1.ServiceTypeClusterIP,
+		},
 	}
+	fixture.UpsertSvc(t, clusterIPService)
+	clusterIPService = fixture.GetSvc("default", "service-a")
 
-	var assignedIP string
-
-	await = fixture.AwaitService(func(action k8s_testing.Action) bool {
-		if action.GetResource() != servicesResource || action.GetVerb() != "patch" {
-			return false
-		}
-
-		svc := fixture.PatchedSvc(action)
-
-		if len(svc.Status.LoadBalancer.Ingress) != 1 {
-			t.Error("Expected service to receive exactly one ingress IP")
-			return true
-		}
-
-		if net.ParseIP(svc.Status.LoadBalancer.Ingress[0].IP).To4() == nil {
-			t.Error("Expected service to receive a IPv4 address")
-			return true
-		}
-
-		assignedIP = svc.Status.LoadBalancer.Ingress[0].IP
-
-		if len(svc.Status.Conditions) != 1 {
-			t.Error("Expected service to receive exactly one condition")
-			return true
-		}
-
-		if svc.Status.Conditions[0].Type != ciliumSvcRequestSatisfiedCondition {
-			t.Error("Expected condition to be svc-satisfied:true")
-			return true
-		}
-
-		if svc.Status.Conditions[0].Status != slim_meta_v1.ConditionTrue {
-			t.Error("Expected condition to be svc-satisfied:true")
-			return true
-		}
-
-		return true
-	}, time.Second)
+	if len(clusterIPService.Status.LoadBalancer.Ingress) != 0 {
+		t.Error("Expected service to not receive any ingress IPs")
+	}
 
 	updatedService := &slim_core_v1.Service{
 		ObjectMeta: slim_meta_v1.ObjectMeta{
@@ -962,40 +1018,30 @@ func TestChangeServiceType(t *testing.T) {
 			Type: slim_core_v1.ServiceTypeLoadBalancer,
 		},
 	}
+	fixture.UpsertSvc(t, updatedService)
+	updatedService = fixture.GetSvc("default", "service-a")
 
-	_, err := fixture.svcClient.Services("default").Update(context.Background(), updatedService, meta_v1.UpdateOptions{})
-	if err != nil {
-		t.Fatal(err)
+	if len(updatedService.Status.LoadBalancer.Ingress) != 1 {
+		t.Error("Expected service to receive exactly one ingress IP")
 	}
 
-	if await.Block() {
-		t.Fatal("Expected service status update")
+	if net.ParseIP(updatedService.Status.LoadBalancer.Ingress[0].IP).To4() == nil {
+		t.Error("Expected service to receive a IPv4 address")
 	}
 
-	// If t.Error was called within the await
-	if t.Failed() {
-		return
+	assignedIP := updatedService.Status.LoadBalancer.Ingress[0].IP
+
+	if len(updatedService.Status.Conditions) != 1 {
+		t.Error("Expected service to receive exactly one condition")
 	}
 
-	await = fixture.AwaitService(func(action k8s_testing.Action) bool {
-		if action.GetResource() != servicesResource || action.GetVerb() != "patch" {
-			return false
-		}
+	if updatedService.Status.Conditions[0].Type != ciliumSvcRequestSatisfiedCondition {
+		t.Error("Expected condition to be svc-satisfied:true")
+	}
 
-		svc := fixture.PatchedSvc(action)
-
-		if len(svc.Status.LoadBalancer.Ingress) != 0 {
-			t.Error("Expected service to have no ingress IPs")
-			return true
-		}
-
-		if len(svc.Status.Conditions) != 0 {
-			t.Error("Expected service to have no conditions")
-			return true
-		}
-
-		return true
-	}, time.Second)
+	if updatedService.Status.Conditions[0].Status != slim_meta_v1.ConditionTrue {
+		t.Error("Expected condition to be svc-satisfied:true")
+	}
 
 	updatedService = &slim_core_v1.Service{
 		ObjectMeta: slim_meta_v1.ObjectMeta{
@@ -1007,254 +1053,171 @@ func TestChangeServiceType(t *testing.T) {
 			Type: slim_core_v1.ServiceTypeNodePort,
 		},
 	}
+	fixture.UpsertSvc(t, updatedService)
+	updatedService = fixture.GetSvc("default", "service-a")
 
-	_, err = fixture.svcClient.Services("default").Update(context.Background(), updatedService, meta_v1.UpdateOptions{})
-	if err != nil {
-		t.Fatal(err)
+	if len(updatedService.Status.LoadBalancer.Ingress) != 0 {
+		t.Error("Expected service to have no ingress IPs")
 	}
 
-	if await.Block() {
-		t.Fatal("Expected service status update")
+	if len(updatedService.Status.Conditions) != 0 {
+		t.Error("Expected service to have no conditions")
 	}
 
-	if fixture.lbIPAM.rangesStore.ranges[0].allocRange.Has(net.ParseIP(assignedIP)) {
+	if _, has := fixture.lbipam.rangesStore.ranges[0].alloc.Get(netip.MustParseAddr(assignedIP)); has {
 		t.Fatal("Expected assigned IP to be released")
 	}
 }
 
-// TestRangesFull tests the behavior when all eligible ranges are full.
-func TestRangesFull(t *testing.T) {
-	initDone := make(chan struct{})
-	// A single /32 can't be used to allocate since we always reserve 2 IPs,
-	// the network and broadcast address, which in the case of a /32 means it is always full.
-	fixture := mkTestFixture([]*cilium_api_v2alpha1.CiliumLoadBalancerIPPool{
-		mkPool(poolAUID, "pool-a", []string{"10.0.10.123/32", "FF::123/128"}),
-	}, true, true, func() {
-		close(initDone)
-	})
+// TestAllowFirstLastIPs tests that first and last IPs are assigned when we set .spec.allowFirstLastIPs to yes.
+func TestAllowFirstLastIPs(t *testing.T) {
+	pool := mkPool(poolAUID, "pool-a", []string{"10.0.10.16/30"})
+	pool.Spec.AllowFirstLastIPs = cilium_api_v2alpha1.AllowFirstLastIPYes
+	fixture := mkTestFixture(true, true)
+	fixture.UpsertPool(t, pool)
 
 	policy := slim_core_v1.IPFamilyPolicySingleStack
-	fixture.coreCS.Tracker().Add(
-		&slim_core_v1.Service{
-			ObjectMeta: slim_meta_v1.ObjectMeta{
-				Name:      "service-a",
-				Namespace: "default",
-				UID:       serviceAUID,
-			},
-			Spec: slim_core_v1.ServiceSpec{
-				Type:           slim_core_v1.ServiceTypeLoadBalancer,
-				IPFamilyPolicy: &policy,
-				IPFamilies: []slim_core_v1.IPFamily{
-					slim_core_v1.IPv4Protocol,
-				},
-			},
+	svcA := &slim_core_v1.Service{
+		ObjectMeta: slim_meta_v1.ObjectMeta{
+			Name:      "service-a",
+			Namespace: "default",
+			UID:       serviceAUID,
 		},
-	)
-	fixture.coreCS.Tracker().Add(
-		&slim_core_v1.Service{
-			ObjectMeta: slim_meta_v1.ObjectMeta{
-				Name:      "service-b",
-				Namespace: "default",
-				UID:       serviceBUID,
+		Spec: slim_core_v1.ServiceSpec{
+			Type:           slim_core_v1.ServiceTypeLoadBalancer,
+			IPFamilyPolicy: &policy,
+			IPFamilies: []slim_core_v1.IPFamily{
+				slim_core_v1.IPv4Protocol,
 			},
-			Spec: slim_core_v1.ServiceSpec{
-				Type:           slim_core_v1.ServiceTypeLoadBalancer,
-				IPFamilyPolicy: &policy,
-				IPFamilies: []slim_core_v1.IPFamily{
-					slim_core_v1.IPv6Protocol,
-				},
-			},
+			LoadBalancerIP: "10.0.10.16",
 		},
-	)
+	}
+	fixture.UpsertSvc(t, svcA)
+	svcA = fixture.GetSvc("default", "service-a")
 
-	await := fixture.AwaitService(func(action k8s_testing.Action) bool {
-		if action.GetResource() != servicesResource || action.GetVerb() != "patch" {
-			return false
-		}
+	if len(svcA.Status.LoadBalancer.Ingress) != 1 {
+		t.Error("Expected service to have one ingress IPs")
+	}
 
-		svc := fixture.PatchedSvc(action)
+	if len(svcA.Status.Conditions) != 1 {
+		t.Error("Expected service to have one conditions")
+	}
 
-		if svc.Name != "service-a" {
-			if len(svc.Status.LoadBalancer.Ingress) != 0 {
-				t.Error("Expected service to have no ingress IPs")
-				return true
-			}
+	if svcA.Status.Conditions[0].Type != ciliumSvcRequestSatisfiedCondition {
+		t.Error("Expected condition to be svc-satisfied:true")
+	}
 
-			if len(svc.Status.Conditions) != 1 {
-				t.Error("Expected service to have one conditions")
-				return true
-			}
+	if svcA.Status.Conditions[0].Status != slim_meta_v1.ConditionTrue {
+		t.Error("Expected condition to be svc-satisfied:true")
+	}
+}
 
-			if svc.Status.Conditions[0].Type != ciliumSvcRequestSatisfiedCondition {
-				t.Error("Expected condition to be svc-satisfied:false")
-				return true
-			}
+// TestUpdateAllowFirstAndLastIPs tests that first and last IPs are assigned when we update the
+// .spec.allowFirstLastIPs field.
+func TestUpdateAllowFirstAndLastIPs(t *testing.T) {
+	// Add pool which does not allow first and last IPs
+	poolA := mkPool(poolAUID, "pool-a", []string{"10.0.10.16/30"})
+	fixture := mkTestFixture(true, true)
+	fixture.UpsertPool(t, poolA)
 
-			if svc.Status.Conditions[0].Status != slim_meta_v1.ConditionFalse {
-				t.Error("Expected condition to be svc-satisfied:false")
-				return true
-			}
+	policy := slim_core_v1.IPFamilyPolicySingleStack
+	svcA := &slim_core_v1.Service{
+		ObjectMeta: slim_meta_v1.ObjectMeta{
+			Name:      "service-a",
+			Namespace: "default",
+			UID:       serviceAUID,
+		},
+		Spec: slim_core_v1.ServiceSpec{
+			Type:           slim_core_v1.ServiceTypeLoadBalancer,
+			IPFamilyPolicy: &policy,
+			IPFamilies: []slim_core_v1.IPFamily{
+				slim_core_v1.IPv4Protocol,
+			},
+			LoadBalancerIP: "10.0.10.16",
+		},
+	}
+	fixture.UpsertSvc(t, svcA)
+	svcA = fixture.GetSvc("default", "service-a")
 
-			if svc.Status.Conditions[0].Reason != "out_of_ips" {
-				t.Error("Expected condition reason to be out of IPs")
-				return true
-			}
+	// First confirm that by default, first and last IPs are not allowed and thus the first and last IPs of the CIDR
+	// are reserved.
 
-			return false
-		}
+	if len(svcA.Status.LoadBalancer.Ingress) != 0 {
+		t.Error("Expected service to have zero ingress IPs")
+	}
 
-		if svc.Name != "service-b" {
+	if len(svcA.Status.Conditions) != 1 {
+		t.Error("Expected service to have one conditions")
+	}
 
-			if len(svc.Status.LoadBalancer.Ingress) != 0 {
-				t.Error("Expected service to have no ingress IPs")
-				return true
-			}
+	if svcA.Status.Conditions[0].Type != ciliumSvcRequestSatisfiedCondition {
+		t.Error("Expected condition to be svc-satisfied:false")
+	}
 
-			if len(svc.Status.Conditions) != 1 {
-				t.Error("Expected service to have one conditions")
-				return true
-			}
+	if svcA.Status.Conditions[0].Status != slim_meta_v1.ConditionFalse {
+		t.Error("Expected condition to be svc-satisfied:false")
+	}
 
-			if svc.Status.Conditions[0].Type != ciliumSvcRequestSatisfiedCondition {
-				t.Error("Expected condition to be svc-satisfied:false")
-				return true
-			}
+	// Then update the pool and confirm that the service got the first IP.
 
-			if svc.Status.Conditions[0].Status != slim_meta_v1.ConditionFalse {
-				t.Error("Expected condition to be svc-satisfied:false")
-				return true
-			}
+	poolA = fixture.GetPool("pool-a")
+	poolA.Spec.AllowFirstLastIPs = cilium_api_v2alpha1.AllowFirstLastIPYes
+	fixture.UpsertPool(t, poolA)
 
-			if svc.Status.Conditions[0].Reason != "out_of_ips" {
-				t.Error("Expected condition reason to be out of IPs")
-				return true
-			}
-		}
+	svcA = fixture.GetSvc("default", "service-a")
 
-		return true
-	}, time.Second)
+	if len(svcA.Status.LoadBalancer.Ingress) != 1 {
+		t.Error("Expected service to have one ingress IPs")
+	}
 
-	go fixture.hive.Start(context.Background())
-	defer fixture.hive.Stop(context.Background())
+	if len(svcA.Status.Conditions) != 1 {
+		t.Error("Expected service to have one conditions")
+	}
 
-	<-initDone
+	if svcA.Status.Conditions[0].Type != ciliumSvcRequestSatisfiedCondition {
+		t.Error("Expected condition 0 to be svc-satisfied:true")
+	}
 
-	if await.Block() {
-		t.Fatal("Expected two service updates")
+	if svcA.Status.Conditions[0].Status != slim_meta_v1.ConditionTrue {
+		t.Error("Expected condition 0 to be svc-satisfied:true")
 	}
 }
 
 // TestRequestIPs tests that we can request specific IPs
 func TestRequestIPs(t *testing.T) {
-	fixture := mkTestFixture([]*cilium_api_v2alpha1.CiliumLoadBalancerIPPool{
-		mkPool(poolAUID, "pool-a", []string{"10.0.10.0/24"}),
-	}, true, true, nil)
+	poolA := mkPool(poolAUID, "pool-a", []string{"10.0.10.0/24"})
+	fixture := mkTestFixture(true, true)
+	fixture.UpsertPool(t, poolA)
 
-	fixture.coreCS.Tracker().Add(
-		&slim_core_v1.Service{
-			ObjectMeta: slim_meta_v1.ObjectMeta{
-				Name:      "service-a",
-				Namespace: "default",
-				UID:       serviceAUID,
-			},
-			Spec: slim_core_v1.ServiceSpec{
-				Type:           slim_core_v1.ServiceTypeLoadBalancer,
-				LoadBalancerIP: "10.0.10.20",
-			},
+	svcA := &slim_core_v1.Service{
+		ObjectMeta: slim_meta_v1.ObjectMeta{
+			Name:      "service-a",
+			Namespace: "default",
+			UID:       serviceAUID,
 		},
-	)
-
-	await := fixture.AwaitService(func(action k8s_testing.Action) bool {
-		if action.GetResource() != servicesResource || action.GetVerb() != "patch" {
-			return false
-		}
-
-		svc := fixture.PatchedSvc(action)
-
-		if len(svc.Status.LoadBalancer.Ingress) != 1 {
-			t.Error("Expected service to receive exactly one ingress IP")
-			return true
-		}
-
-		if svc.Status.LoadBalancer.Ingress[0].IP != "10.0.10.20" {
-			t.Error("Expected service to receive IP '10.0.10.20'")
-			return true
-		}
-
-		return true
-	}, time.Second)
-
-	go fixture.hive.Start(context.Background())
-	defer fixture.hive.Stop(context.Background())
-
-	if await.Block() {
-		t.Fatal("Expected service status update")
+		Spec: slim_core_v1.ServiceSpec{
+			Type:           slim_core_v1.ServiceTypeLoadBalancer,
+			LoadBalancerIP: "10.0.10.20",
+		},
 	}
-	// If t.Error was called within the await
-	if t.Failed() {
-		return
+	fixture.UpsertSvc(t, svcA)
+	svcA = fixture.GetSvc("default", "service-a")
+
+	if len(svcA.Status.LoadBalancer.Ingress) != 1 {
+		t.Error("Expected service to receive exactly one ingress IP")
 	}
 
-	await = fixture.AwaitService(func(action k8s_testing.Action) bool {
-		if action.GetResource() != servicesResource || action.GetVerb() != "patch" {
-			return false
-		}
+	if svcA.Status.LoadBalancer.Ingress[0].IP != "10.0.10.20" {
+		t.Error("Expected service to receive IP '10.0.10.20'")
+	}
 
-		svc := fixture.PatchedSvc(action)
-
-		if svc.Name != "service-b" {
-			t.Error("Expected status update for service-b")
-			return true
-		}
-
-		if len(svc.Status.LoadBalancer.Ingress) != 3 {
-			t.Error("Expected service to receive exactly three ingress IPs")
-			return true
-		}
-
-		first := false
-		second := false
-		third := false
-
-		for _, ingress := range svc.Status.LoadBalancer.Ingress {
-			switch ingress.IP {
-			case "10.0.10.21":
-				first = true
-			case "10.0.10.22":
-				second = true
-			case "10.0.10.23":
-				third = true
-			default:
-				t.Error("Unexpected ingress IP")
-				return true
-			}
-		}
-
-		if !first {
-			t.Error("Expected service to receive IP '10.0.10.21'")
-			return true
-		}
-
-		if !second {
-			t.Error("Expected service to receive IP '10.0.10.22'")
-			return true
-		}
-
-		if !third {
-			t.Error("Expected service to receive IP '10.0.10.23'")
-			return true
-		}
-
-		return true
-	}, time.Second)
-
-	serviceB := &slim_core_v1.Service{
+	svcB := &slim_core_v1.Service{
 		ObjectMeta: slim_meta_v1.ObjectMeta{
 			Name:      "service-b",
 			Namespace: "default",
 			UID:       serviceBUID,
 			Annotations: map[string]string{
-				ciliumSvcLBIPSAnnotation: "10.0.10.22,10.0.10.23",
+				annotation.LBIPAMIPKeyAlias: "10.0.10.22,10.0.10.23",
 			},
 		},
 		Spec: slim_core_v1.ServiceSpec{
@@ -1262,62 +1225,44 @@ func TestRequestIPs(t *testing.T) {
 			LoadBalancerIP: "10.0.10.21",
 		},
 	}
+	fixture.UpsertSvc(t, svcB)
+	svcB = fixture.GetSvc("default", "service-b")
 
-	_, err := fixture.svcClient.Services("default").Create(context.Background(), serviceB, meta_v1.CreateOptions{})
-	if err != nil {
-		t.Fatal(err)
+	if len(svcB.Status.LoadBalancer.Ingress) != 3 {
+		t.Error("Expected service to receive exactly three ingress IPs")
 	}
 
-	if await.Block() {
-		t.Fatal("Expected service status update")
+	first := false
+	second := false
+	third := false
+
+	for _, ingress := range svcB.Status.LoadBalancer.Ingress {
+		switch ingress.IP {
+		case "10.0.10.21":
+			first = true
+		case "10.0.10.22":
+			second = true
+		case "10.0.10.23":
+			third = true
+		default:
+			t.Error("Unexpected ingress IP")
+		}
 	}
-	// If t.Error was called within the await
-	if t.Failed() {
-		return
+
+	if !first {
+		t.Error("Expected service to receive IP '10.0.10.21'")
 	}
 
-	await = fixture.AwaitService(func(action k8s_testing.Action) bool {
-		if action.GetResource() != servicesResource || action.GetVerb() != "patch" {
-			return false
-		}
+	if !second {
+		t.Error("Expected service to receive IP '10.0.10.22'")
+	}
 
-		svc := fixture.PatchedSvc(action)
-
-		if svc.Name != "service-c" {
-			t.Error("Expected status update for service-b")
-			return true
-		}
-
-		if len(svc.Status.LoadBalancer.Ingress) != 0 {
-			t.Error("Expected service to receive no ingress IPs")
-			return true
-		}
-
-		if len(svc.Status.Conditions) != 1 {
-			t.Error("Expected service to have one conditions")
-			return true
-		}
-
-		if svc.Status.Conditions[0].Type != ciliumSvcRequestSatisfiedCondition {
-			t.Error("Expected condition to be request-valid:false")
-			return true
-		}
-
-		if svc.Status.Conditions[0].Status != slim_meta_v1.ConditionFalse {
-			t.Error("Expected condition to be request-valid:false")
-			return true
-		}
-
-		if svc.Status.Conditions[0].Reason != "already_allocated" {
-			t.Error("Expected condition reason to be 'already_allocated'")
-			return true
-		}
-
-		return true
-	}, time.Second)
+	if !third {
+		t.Error("Expected service to receive IP '10.0.10.23'")
+	}
 
 	// request an already allocated IP
-	serviceC := &slim_core_v1.Service{
+	svcC := &slim_core_v1.Service{
 		ObjectMeta: slim_meta_v1.ObjectMeta{
 			Name:      "service-c",
 			Namespace: "default",
@@ -1328,172 +1273,106 @@ func TestRequestIPs(t *testing.T) {
 			LoadBalancerIP: "10.0.10.21",
 		},
 	}
+	fixture.UpsertSvc(t, svcC)
+	svcC = fixture.GetSvc("default", "service-c")
 
-	_, err = fixture.svcClient.Services("default").Create(context.Background(), serviceC, meta_v1.CreateOptions{})
-	if err != nil {
-		t.Fatal(err)
+	if len(svcC.Status.LoadBalancer.Ingress) != 0 {
+		t.Error("Expected service to receive no ingress IPs")
 	}
 
-	if await.Block() {
-		t.Fatal("Expected service status update")
+	if len(svcC.Status.Conditions) != 1 {
+		t.Error("Expected service to have one conditions")
+	}
+
+	if svcC.Status.Conditions[0].Type != ciliumSvcRequestSatisfiedCondition {
+		t.Error("Expected condition to be request-valid:false")
+	}
+
+	if svcC.Status.Conditions[0].Status != slim_meta_v1.ConditionFalse {
+		t.Error("Expected condition to be request-valid:false")
+	}
+
+	if svcC.Status.Conditions[0].Reason != "already_allocated" {
+		t.Error("Expected condition reason to be 'already_allocated'")
 	}
 }
 
 // TestAddPool tests that adding a new pool will satisfy services.
 func TestAddPool(t *testing.T) {
-	fixture := mkTestFixture([]*cilium_api_v2alpha1.CiliumLoadBalancerIPPool{
-		mkPool(poolAUID, "pool-a", []string{"10.0.10.0/24"}),
-	}, true, true, nil)
+	poolA := mkPool(poolAUID, "pool-a", []string{"10.0.10.0/24"})
+	fixture := mkTestFixture(true, true)
+	fixture.UpsertPool(t, poolA)
 
-	fixture.coreCS.Tracker().Add(
-		&slim_core_v1.Service{
-			ObjectMeta: slim_meta_v1.ObjectMeta{
-				Name:      "service-a",
-				Namespace: "default",
-				UID:       serviceAUID,
-			},
-			Spec: slim_core_v1.ServiceSpec{
-				Type:           slim_core_v1.ServiceTypeLoadBalancer,
-				LoadBalancerIP: "10.0.20.10",
-			},
+	svcA := &slim_core_v1.Service{
+		ObjectMeta: slim_meta_v1.ObjectMeta{
+			Name:      "service-a",
+			Namespace: "default",
+			UID:       serviceAUID,
 		},
-	)
-
-	await := fixture.AwaitService(func(action k8s_testing.Action) bool {
-		if action.GetResource() != servicesResource || action.GetVerb() != "patch" {
-			return false
-		}
-
-		svc := fixture.PatchedSvc(action)
-
-		if len(svc.Status.LoadBalancer.Ingress) != 0 {
-			t.Error("Expected service to receive no ingress IPs")
-			return true
-		}
-
-		return true
-	}, time.Second)
-
-	go fixture.hive.Start(context.Background())
-	defer fixture.hive.Stop(context.Background())
-
-	if await.Block() {
-		t.Fatal("Expected service status update")
+		Spec: slim_core_v1.ServiceSpec{
+			Type:           slim_core_v1.ServiceTypeLoadBalancer,
+			LoadBalancerIP: "10.0.20.10",
+		},
 	}
-	// If t.Error was called within the await
-	if t.Failed() {
-		return
+	fixture.UpsertSvc(t, svcA)
+	svcA = fixture.GetSvc("default", "service-a")
+
+	if len(svcA.Status.LoadBalancer.Ingress) != 0 {
+		t.Error("Expected service to receive no ingress IPs")
 	}
-
-	await = fixture.AwaitService(func(action k8s_testing.Action) bool {
-		if action.GetResource() != servicesResource || action.GetVerb() != "patch" {
-			return false
-		}
-
-		svc := fixture.PatchedSvc(action)
-
-		if len(svc.Status.LoadBalancer.Ingress) != 1 {
-			t.Error("Expected service to receive exactly one ingress IP")
-			return true
-		}
-
-		if svc.Status.LoadBalancer.Ingress[0].IP != "10.0.20.10" {
-			t.Error("Expected service to receive IP '10.0.20.10'")
-			return true
-		}
-
-		return true
-	}, time.Second)
 
 	twentyPool := mkPool(poolBUID, "pool-b", []string{"10.0.20.0/24"})
-	_, err := fixture.poolClient.Create(context.Background(), twentyPool, meta_v1.CreateOptions{})
-	if err != nil {
-		t.Fatal(err)
+	fixture.UpsertPool(t, twentyPool)
+
+	svcA = fixture.GetSvc("default", "service-a")
+
+	if len(svcA.Status.LoadBalancer.Ingress) != 1 {
+		t.Error("Expected service to receive exactly one ingress IP")
 	}
 
-	if await.Block() {
-		t.Fatal("Expected service status update")
+	if svcA.Status.LoadBalancer.Ingress[0].IP != "10.0.20.10" {
+		t.Error("Expected service to receive IP '10.0.20.10'")
 	}
 }
 
 // TestAddRange tests adding a range to a pool will satisfy services which have not been able to get an IP
 func TestAddRange(t *testing.T) {
 	poolA := mkPool(poolAUID, "pool-a", []string{"10.0.10.0/24"})
-	fixture := mkTestFixture([]*cilium_api_v2alpha1.CiliumLoadBalancerIPPool{
-		poolA,
-	}, true, true, nil)
+	fixture := mkTestFixture(true, true)
+	fixture.UpsertPool(t, poolA)
 
-	fixture.coreCS.Tracker().Add(
-		&slim_core_v1.Service{
-			ObjectMeta: slim_meta_v1.ObjectMeta{
-				Name:      "service-a",
-				Namespace: "default",
-				UID:       serviceAUID,
-			},
-			Spec: slim_core_v1.ServiceSpec{
-				Type:           slim_core_v1.ServiceTypeLoadBalancer,
-				LoadBalancerIP: "10.0.20.10",
-			},
+	svcA := &slim_core_v1.Service{
+		ObjectMeta: slim_meta_v1.ObjectMeta{
+			Name:      "service-a",
+			Namespace: "default",
+			UID:       serviceAUID,
 		},
-	)
-
-	await := fixture.AwaitService(func(action k8s_testing.Action) bool {
-		if action.GetResource() != servicesResource || action.GetVerb() != "patch" {
-			return false
-		}
-
-		svc := fixture.PatchedSvc(action)
-
-		if len(svc.Status.LoadBalancer.Ingress) != 0 {
-			t.Error("Expected service to receive no ingress IPs")
-			return true
-		}
-
-		return true
-	}, time.Second)
-
-	go fixture.hive.Start(context.Background())
-	defer fixture.hive.Stop(context.Background())
-
-	if await.Block() {
-		t.Fatal("Expected service status update")
+		Spec: slim_core_v1.ServiceSpec{
+			Type:           slim_core_v1.ServiceTypeLoadBalancer,
+			LoadBalancerIP: "10.0.20.10",
+		},
 	}
-	// If t.Error was called within the await
-	if t.Failed() {
-		return
+	fixture.UpsertSvc(t, svcA)
+	svcA = fixture.GetSvc("default", "service-a")
+
+	if len(svcA.Status.LoadBalancer.Ingress) != 0 {
+		t.Error("Expected service to receive no ingress IPs")
 	}
 
-	poolA.Spec.Cidrs = append(poolA.Spec.Cidrs, cilium_api_v2alpha1.CiliumLoadBalancerIPPoolCIDRBlock{
+	poolA = fixture.GetPool("pool-a")
+	poolA.Spec.Cidrs = append(poolA.Spec.Cidrs, cilium_api_v2alpha1.CiliumLoadBalancerIPPoolIPBlock{
 		Cidr: "10.0.20.0/24",
 	})
+	fixture.UpsertPool(t, poolA)
 
-	await = fixture.AwaitService(func(action k8s_testing.Action) bool {
-		if action.GetResource() != servicesResource || action.GetVerb() != "patch" {
-			return false
-		}
+	svcA = fixture.GetSvc("default", "service-a")
 
-		svc := fixture.PatchedSvc(action)
-
-		if len(svc.Status.LoadBalancer.Ingress) != 1 {
-			t.Error("Expected service to receive exactly one ingress IP")
-			return true
-		}
-
-		if svc.Status.LoadBalancer.Ingress[0].IP != "10.0.20.10" {
-			t.Error("Expected service to receive IP '10.0.20.10'")
-			return true
-		}
-
-		return true
-	}, time.Second)
-
-	_, err := fixture.poolClient.Update(context.Background(), poolA, meta_v1.UpdateOptions{})
-	if err != nil {
-		t.Fatal(err)
+	if len(svcA.Status.LoadBalancer.Ingress) != 1 {
+		t.Error("Expected service to receive exactly one ingress IP")
 	}
 
-	if await.Block() {
-		t.Fatal("Expected service status update")
+	if svcA.Status.LoadBalancer.Ingress[0].IP != "10.0.20.10" {
+		t.Error("Expected service to receive IP '10.0.20.10'")
 	}
 }
 
@@ -1501,89 +1380,35 @@ func TestAddRange(t *testing.T) {
 // Then re-enable the pool and see that the pool resumes allocating IPs
 func TestDisablePool(t *testing.T) {
 	poolA := mkPool(poolAUID, "pool-a", []string{"10.0.10.0/24"})
-	fixture := mkTestFixture([]*cilium_api_v2alpha1.CiliumLoadBalancerIPPool{
-		poolA,
-	}, true, true, nil)
+	fixture := mkTestFixture(true, true)
+	fixture.UpsertPool(t, poolA)
 
-	fixture.coreCS.Tracker().Add(
-		&slim_core_v1.Service{
-			ObjectMeta: slim_meta_v1.ObjectMeta{
-				Name:      "service-a",
-				Namespace: "default",
-				UID:       serviceAUID,
-			},
-			Spec: slim_core_v1.ServiceSpec{
-				Type: slim_core_v1.ServiceTypeLoadBalancer,
-			},
+	svcA := &slim_core_v1.Service{
+		ObjectMeta: slim_meta_v1.ObjectMeta{
+			Name:      "service-a",
+			Namespace: "default",
+			UID:       serviceAUID,
 		},
-	)
+		Spec: slim_core_v1.ServiceSpec{
+			Type: slim_core_v1.ServiceTypeLoadBalancer,
+		},
+	}
+	fixture.UpsertSvc(t, svcA)
+	svcA = fixture.GetSvc("default", "service-a")
 
-	await := fixture.AwaitService(func(action k8s_testing.Action) bool {
-		if action.GetResource() != servicesResource || action.GetVerb() != "patch" {
-			return false
-		}
-
-		svc := fixture.PatchedSvc(action)
-
-		if len(svc.Status.LoadBalancer.Ingress) != 1 {
-			t.Error("Expected service to receive exactly one ingress IP")
-			return true
-		}
-
-		return true
-	}, time.Second)
-
-	go fixture.hive.Start(context.Background())
-	defer fixture.hive.Stop(context.Background())
-
-	if await.Block() {
-		t.Fatal("Expected service status update")
+	if len(svcA.Status.LoadBalancer.Ingress) != 1 {
+		t.Error("Expected service to receive exactly one ingress IP")
 	}
 
-	await = fixture.AwaitService(func(action k8s_testing.Action) bool {
-		if action.GetResource() != servicesResource || action.GetVerb() != "patch" {
-			return false
-		}
-
-		return true
-	}, 500*time.Millisecond)
-
+	poolA = fixture.GetPool("pool-a")
 	poolA.Spec.Disabled = true
+	fixture.UpsertPool(t, poolA)
 
-	_, err := fixture.poolClient.Update(context.Background(), poolA, meta_v1.UpdateOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if !await.Block() {
-		t.Fatal("Unexpected service status update")
-	}
-
-	if !fixture.lbIPAM.rangesStore.ranges[0].externallyDisabled {
+	if !fixture.lbipam.rangesStore.ranges[0].externallyDisabled {
 		t.Fatal("The range has not been externally disabled")
 	}
 
-	await = fixture.AwaitService(func(action k8s_testing.Action) bool {
-		if action.GetResource() != servicesResource || action.GetVerb() != "patch" {
-			return false
-		}
-
-		svc := fixture.PatchedSvc(action)
-
-		if svc.Name != "service-b" {
-			t.Error("Expected service status update to occur on service-b")
-			return true
-		}
-
-		if len(svc.Status.LoadBalancer.Ingress) != 0 {
-			t.Error("Expected service to receive no ingress IPs")
-			return true
-		}
-
-		return true
-	}, time.Second)
-
-	serviceB := &slim_core_v1.Service{
+	svcB := &slim_core_v1.Service{
 		ObjectMeta: slim_meta_v1.ObjectMeta{
 			Name:      "service-b",
 			Namespace: "default",
@@ -1593,140 +1418,80 @@ func TestDisablePool(t *testing.T) {
 			Type: slim_core_v1.ServiceTypeLoadBalancer,
 		},
 	}
+	fixture.UpsertSvc(t, svcB)
+	svcB = fixture.GetSvc("default", "service-b")
 
-	_, err = fixture.svcClient.Services("default").Create(context.Background(), serviceB, meta_v1.CreateOptions{})
-	if err != nil {
-		t.Fatal(err)
+	if len(svcB.Status.LoadBalancer.Ingress) != 0 {
+		t.Error("Expected service to receive no ingress IPs")
 	}
 
-	if await.Block() {
-		t.Fatal("Expected service status update")
-	}
-
-	await = fixture.AwaitService(func(action k8s_testing.Action) bool {
-		if action.GetResource() != servicesResource || action.GetVerb() != "patch" {
-			return false
-		}
-
-		svc := fixture.PatchedSvc(action)
-
-		if svc.Name != "service-b" {
-			return false
-		}
-
-		if len(svc.Status.LoadBalancer.Ingress) != 1 {
-			return false
-		}
-
-		return true
-	}, time.Second)
-
+	poolA = fixture.GetPool("pool-a")
 	poolA.Spec.Disabled = false
+	fixture.UpsertPool(t, poolA)
 
-	_, err = fixture.poolClient.Update(context.Background(), poolA, meta_v1.UpdateOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
+	svcB = fixture.GetSvc("default", "service-b")
 
-	if await.Block() {
-		t.Fatal("Expected service status update")
+	if len(svcB.Status.LoadBalancer.Ingress) != 1 {
+		t.Error("Expected service to receive exactly one ingress IP")
 	}
 }
 
 // TestPoolDelete tests that when a pool is deleted, all of the IPs from that pool are released and that any effected
 // services get a new IP from another pool.
 func TestPoolDelete(t *testing.T) {
-	initDone := make(chan struct{})
-	fixture := mkTestFixture([]*cilium_api_v2alpha1.CiliumLoadBalancerIPPool{
-		mkPool(poolAUID, "pool-a", []string{"10.0.10.0/24"}),
-		mkPool(poolBUID, "pool-b", []string{"10.0.20.0/24"}),
-	}, true, true, func() {
-		close(initDone)
-	})
+	poolA := mkPool(poolAUID, "pool-a", []string{"10.0.10.0/24"})
+	poolB := mkPool(poolBUID, "pool-b", []string{"10.0.20.0/24"})
 
-	fixture.coreCS.Tracker().Add(
-		&slim_core_v1.Service{
-			ObjectMeta: slim_meta_v1.ObjectMeta{
-				Name:      "service-a",
-				Namespace: "default",
-				UID:       serviceAUID,
-			},
-			Spec: slim_core_v1.ServiceSpec{
-				Type: slim_core_v1.ServiceTypeLoadBalancer,
-			},
+	fixture := mkTestFixture(true, true)
+	fixture.UpsertPool(t, poolA)
+	fixture.UpsertPool(t, poolB)
+
+	svcA := &slim_core_v1.Service{
+		ObjectMeta: slim_meta_v1.ObjectMeta{
+			Name:      "service-a",
+			Namespace: "default",
+			UID:       serviceAUID,
 		},
-	)
+		Spec: slim_core_v1.ServiceSpec{
+			Type: slim_core_v1.ServiceTypeLoadBalancer,
+		},
+	}
+	fixture.UpsertSvc(t, svcA)
+	svcA = fixture.GetSvc("default", "service-a")
+
+	if len(svcA.Status.LoadBalancer.Ingress) != 1 {
+		t.Error("Expected service to receive exactly one ingress IP")
+	}
 
 	var allocPool string
-
-	await := fixture.AwaitService(func(action k8s_testing.Action) bool {
-		if action.GetResource() != servicesResource || action.GetVerb() != "patch" {
-			return false
-		}
-
-		svc := fixture.PatchedSvc(action)
-
-		if len(svc.Status.LoadBalancer.Ingress) != 1 {
-			t.Error("Expected service to receive exactly one ingress IP")
-			return true
-		}
-
-		if strings.HasPrefix(svc.Status.LoadBalancer.Ingress[0].IP, "10.0.10") {
-			allocPool = "pool-a"
-		} else {
-			allocPool = "pool-b"
-		}
-
-		return true
-	}, time.Second)
-
-	go fixture.hive.Start(context.Background())
-	defer fixture.hive.Stop(context.Background())
-
-	if await.Block() {
-		t.Fatal("Expected service status update")
-	}
-	// If t.Error was called within the await
-	if t.Failed() {
-		return
+	if strings.HasPrefix(svcA.Status.LoadBalancer.Ingress[0].IP, "10.0.10") {
+		allocPool = "pool-a"
+	} else {
+		allocPool = "pool-b"
 	}
 
-	<-initDone
-
-	await = fixture.AwaitService(func(action k8s_testing.Action) bool {
-		if action.GetResource() != servicesResource || action.GetVerb() != "patch" {
-			return false
-		}
-
-		svc := fixture.PatchedSvc(action)
-
-		if len(svc.Status.LoadBalancer.Ingress) != 1 {
-			t.Error("Expected service to receive exactly one ingress IP")
-			return true
-		}
-
-		if strings.HasPrefix(svc.Status.LoadBalancer.Ingress[0].IP, "10.0.10") {
-			if allocPool == "pool-a" {
-				t.Error("New IP was allocated from deleted pool")
-				return true
-			}
-		} else {
-			if allocPool == "pool-b" {
-				t.Error("New IP was allocated from deleted pool")
-				return true
-			}
-		}
-
-		return true
-	}, time.Second)
-
-	err := fixture.poolClient.Delete(context.Background(), allocPool, meta_v1.DeleteOptions{})
-	if err != nil {
-		t.Fatal(err)
+	if allocPool == "pool-a" {
+		poolA = fixture.GetPool("pool-a")
+		fixture.DeletePool(t, poolA)
+	} else {
+		poolB = fixture.GetPool("pool-b")
+		fixture.DeletePool(t, poolB)
 	}
 
-	if await.Block() {
-		t.Fatal("Expected service status update")
+	svcA = fixture.GetSvc("default", "service-a")
+
+	if len(svcA.Status.LoadBalancer.Ingress) != 1 {
+		t.Error("Expected service to receive exactly one ingress IP")
+	}
+
+	if strings.HasPrefix(svcA.Status.LoadBalancer.Ingress[0].IP, "10.0.10") {
+		if allocPool == "pool-a" {
+			t.Error("New IP was allocated from deleted pool")
+		}
+	} else {
+		if allocPool == "pool-b" {
+			t.Error("New IP was allocated from deleted pool")
+		}
 	}
 }
 
@@ -1734,107 +1499,61 @@ func TestPoolDelete(t *testing.T) {
 // that any effected services get a new IP from another range.
 func TestRangeDelete(t *testing.T) {
 	poolA := mkPool(poolAUID, "pool-a", []string{"10.0.10.0/24"})
-	fixture := mkTestFixture([]*cilium_api_v2alpha1.CiliumLoadBalancerIPPool{
-		poolA,
-	}, true, true, nil)
+	fixture := mkTestFixture(true, true)
+	fixture.UpsertPool(t, poolA)
 
-	fixture.coreCS.Tracker().Add(
-		&slim_core_v1.Service{
-			ObjectMeta: slim_meta_v1.ObjectMeta{
-				Name:      "service-a",
-				Namespace: "default",
-				UID:       serviceAUID,
-			},
-			Spec: slim_core_v1.ServiceSpec{
-				Type: slim_core_v1.ServiceTypeLoadBalancer,
-			},
+	svcA := &slim_core_v1.Service{
+		ObjectMeta: slim_meta_v1.ObjectMeta{
+			Name:      "service-a",
+			Namespace: "default",
+			UID:       serviceAUID,
 		},
-	)
-
-	await := fixture.AwaitService(func(action k8s_testing.Action) bool {
-		if action.GetResource() != servicesResource || action.GetVerb() != "patch" {
-			return false
-		}
-
-		svc := fixture.PatchedSvc(action)
-
-		if len(svc.Status.LoadBalancer.Ingress) != 1 {
-			t.Error("Expected service to receive exactly one ingress IP")
-			return true
-		}
-
-		return true
-	}, time.Second)
-
-	go fixture.hive.Start(context.Background())
-	defer fixture.hive.Stop(context.Background())
-
-	if await.Block() {
-		t.Fatal("Expected service status update")
+		Spec: slim_core_v1.ServiceSpec{
+			Type: slim_core_v1.ServiceTypeLoadBalancer,
+		},
 	}
-	// If t.Error was called within the await
-	if t.Failed() {
-		return
+	fixture.UpsertSvc(t, svcA)
+	svcA = fixture.GetSvc("default", "service-a")
+
+	if len(svcA.Status.LoadBalancer.Ingress) != 1 {
+		t.Error("Expected service to receive exactly one ingress IP")
 	}
+	assignedIP := svcA.Status.LoadBalancer.Ingress[0].IP
 
-	await = fixture.AwaitService(func(action k8s_testing.Action) bool {
-		if action.GetResource() != servicesResource || action.GetVerb() != "patch" {
-			return false
-		}
-
-		return true
-	}, 500*time.Millisecond)
-
+	poolA = fixture.GetPool("pool-a")
 	// Add a new CIDR, this should not have any effect on the existing service.
-	poolA.Spec.Cidrs = append(poolA.Spec.Cidrs, cilium_api_v2alpha1.CiliumLoadBalancerIPPoolCIDRBlock{
+	poolA.Spec.Cidrs = append(poolA.Spec.Cidrs, cilium_api_v2alpha1.CiliumLoadBalancerIPPoolIPBlock{
 		Cidr: "10.0.20.0/24",
 	})
-	_, err := fixture.poolClient.Update(context.Background(), poolA, meta_v1.UpdateOptions{})
-	if err != nil {
-		t.Fatal(err)
+	fixture.UpsertPool(t, poolA)
+
+	svcA = fixture.GetSvc("default", "service-a")
+
+	if len(svcA.Status.LoadBalancer.Ingress) != 1 {
+		t.Error("Expected service to receive exactly one ingress IP")
 	}
 
-	if !await.Block() {
-		t.Fatal("Unexpected service status update")
-	}
-	// If t.Error was called within the await
-	if t.Failed() {
-		return
+	if svcA.Status.LoadBalancer.Ingress[0].IP != assignedIP {
+		t.Error("Expected service to keep the same IP")
 	}
 
-	await = fixture.AwaitService(func(action k8s_testing.Action) bool {
-		if action.GetResource() != servicesResource || action.GetVerb() != "patch" {
-			return false
-		}
-
-		svc := fixture.PatchedSvc(action)
-
-		if len(svc.Status.LoadBalancer.Ingress) != 1 {
-			t.Error("Expected service to receive exactly one ingress IP")
-			return true
-		}
-
-		if !strings.HasPrefix(svc.Status.LoadBalancer.Ingress[0].IP, "10.0.20") {
-			t.Error("Expected new ingress to be in the 10.0.20.0/24 range")
-			return true
-		}
-
-		return true
-	}, time.Second)
-
+	poolA = fixture.GetPool("pool-a")
 	// Remove the existing range, this should trigger the re-allocation of the existing service
-	poolA.Spec.Cidrs = []cilium_api_v2alpha1.CiliumLoadBalancerIPPoolCIDRBlock{
+	poolA.Spec.Cidrs = []cilium_api_v2alpha1.CiliumLoadBalancerIPPoolIPBlock{
 		{
 			Cidr: "10.0.20.0/24",
 		},
 	}
-	_, err = fixture.poolClient.Update(context.Background(), poolA, meta_v1.UpdateOptions{})
-	if err != nil {
-		t.Fatal(err)
+	fixture.UpsertPool(t, poolA)
+
+	svcA = fixture.GetSvc("default", "service-a")
+
+	if len(svcA.Status.LoadBalancer.Ingress) != 1 {
+		t.Error("Expected service to receive exactly one ingress IP")
 	}
 
-	if await.Block() {
-		t.Fatal("Expected service status update")
+	if !strings.HasPrefix(svcA.Status.LoadBalancer.Ingress[0].IP, "10.0.20") {
+		t.Error("Expected new ingress to be in the 10.0.20.0/24 range")
 	}
 }
 
@@ -1997,8 +1716,10 @@ func TestLBIPAM_serviceIPFamilyRequest(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ipam := &LBIPAM{
-				ipv4Enabled: tt.IPv4Enabled,
-				ipv6Enabled: tt.IPv6Enabled,
+				lbIPAMParams: lbIPAMParams{
+					ipv4Enabled: tt.IPv4Enabled,
+					ipv6Enabled: tt.IPv6Enabled,
+				},
 			}
 			gotIPv4Requested, gotIPv6Requested := ipam.serviceIPFamilyRequest(tt.svc)
 			if gotIPv4Requested != tt.wantIPv4Requested {
@@ -2020,9 +1741,8 @@ func TestRemoveServiceLabel(t *testing.T) {
 			"color": "blue",
 		},
 	}
-	fixture := mkTestFixture([]*cilium_api_v2alpha1.CiliumLoadBalancerIPPool{
-		poolA,
-	}, true, true, nil)
+	fixture := mkTestFixture(true, true)
+	fixture.UpsertPool(t, poolA)
 
 	svc1 := &slim_core_v1.Service{
 		ObjectMeta: slim_meta_v1.ObjectMeta{
@@ -2037,64 +1757,23 @@ func TestRemoveServiceLabel(t *testing.T) {
 			Type: slim_core_v1.ServiceTypeLoadBalancer,
 		},
 	}
+	fixture.UpsertSvc(t, svc1)
+	svc1 = fixture.GetSvc("default", "service-a")
 
-	fixture.coreCS.Tracker().Add(
-		svc1,
-	)
-
-	await := fixture.AwaitService(func(action k8s_testing.Action) bool {
-		if action.GetResource() != servicesResource || action.GetVerb() != "patch" {
-			return false
-		}
-
-		svc := fixture.PatchedSvc(action)
-
-		if len(svc.Status.LoadBalancer.Ingress) != 1 {
-			t.Error("Expected service to receive exactly one ingress IP")
-			return true
-		}
-
-		return true
-	}, time.Second)
-
-	go fixture.hive.Start(context.Background())
-	defer fixture.hive.Stop(context.Background())
-
-	if await.Block() {
-		t.Fatal("Expected service status update")
+	if len(svc1.Status.LoadBalancer.Ingress) != 1 {
+		t.Error("Expected service to receive exactly one ingress IP")
 	}
-	// If t.Error was called within the await
-	if t.Failed() {
-		return
-	}
-
-	await = fixture.AwaitService(func(action k8s_testing.Action) bool {
-		if action.GetResource() != servicesResource || action.GetVerb() != "patch" {
-			return false
-		}
-
-		svc := fixture.PatchedSvc(action)
-
-		if len(svc.Status.LoadBalancer.Ingress) != 0 {
-			t.Error("Expected service to receive exactly zero ingress IPs")
-			return true
-		}
-
-		return true
-	}, time.Second)
 
 	svc1 = svc1.DeepCopy()
 	svc1.Labels = map[string]string{
 		"color": "green",
 	}
+	fixture.UpsertSvc(t, svc1)
 
-	_, err := fixture.svcClient.Services(svc1.Namespace).Update(context.Background(), svc1, meta_v1.UpdateOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
+	svc1 = fixture.GetSvc("default", "service-a")
 
-	if await.Block() {
-		t.Fatal("Expected service status update")
+	if len(svc1.Status.LoadBalancer.Ingress) != 0 {
+		t.Error("Expected service to receive exactly zero ingress IPs")
 	}
 }
 
@@ -2107,45 +1786,28 @@ func TestRequestIPWithMismatchedLabel(t *testing.T) {
 			"color": "blue",
 		},
 	}
-	fixture := mkTestFixture([]*cilium_api_v2alpha1.CiliumLoadBalancerIPPool{
-		poolA,
-	}, true, true, nil)
+	fixture := mkTestFixture(true, true)
+	fixture.UpsertPool(t, poolA)
 
-	fixture.coreCS.Tracker().Add(
-		&slim_core_v1.Service{
-			ObjectMeta: slim_meta_v1.ObjectMeta{
-				Name:      "service-a",
-				Namespace: "default",
-				UID:       serviceAUID,
-				Labels: map[string]string{
-					"color": "red",
-				},
-			},
-			Spec: slim_core_v1.ServiceSpec{
-				Type:           slim_core_v1.ServiceTypeLoadBalancer,
-				LoadBalancerIP: "10.0.10.123",
+	svcA := &slim_core_v1.Service{
+		ObjectMeta: slim_meta_v1.ObjectMeta{
+			Name:      "service-a",
+			Namespace: "default",
+			UID:       serviceAUID,
+			Labels: map[string]string{
+				"color": "red",
 			},
 		},
-	)
+		Spec: slim_core_v1.ServiceSpec{
+			Type:           slim_core_v1.ServiceTypeLoadBalancer,
+			LoadBalancerIP: "10.0.10.123",
+		},
+	}
+	fixture.UpsertSvc(t, svcA)
+	svcA = fixture.GetSvc("default", "service-a")
 
-	await := fixture.AwaitService(func(action k8s_testing.Action) bool {
-		if action.GetResource() != servicesResource || action.GetVerb() != "patch" {
-			return false
-		}
-
-		svc := fixture.PatchedSvc(action)
-		if svc.Status.Conditions[0].Reason != "pool_selector_mismatch" {
-			t.Error("Expected service to receive 'pool_selector_mismatch' condition")
-		}
-
-		return true
-	}, 1*time.Second)
-
-	go fixture.hive.Start(context.Background())
-	defer fixture.hive.Stop(context.Background())
-
-	if await.Block() {
-		t.Fatal("Expected status update of service")
+	if svcA.Status.Conditions[0].Reason != "pool_selector_mismatch" {
+		t.Error("Expected service to receive 'pool_selector_mismatch' condition")
 	}
 }
 
@@ -2153,9 +1815,8 @@ func TestRequestIPWithMismatchedLabel(t *testing.T) {
 // it from the ingress list.
 func TestRemoveRequestedIP(t *testing.T) {
 	poolA := mkPool(poolAUID, "pool-a", []string{"10.0.10.0/24"})
-	fixture := mkTestFixture([]*cilium_api_v2alpha1.CiliumLoadBalancerIPPool{
-		poolA,
-	}, true, true, nil)
+	fixture := mkTestFixture(true, true)
+	fixture.UpsertPool(t, poolA)
 
 	svc1 := &slim_core_v1.Service{
 		ObjectMeta: slim_meta_v1.ObjectMeta{
@@ -2171,80 +1832,34 @@ func TestRemoveRequestedIP(t *testing.T) {
 			LoadBalancerIP: "10.0.10.123",
 		},
 	}
+	fixture.UpsertSvc(t, svc1)
+	svc1 = fixture.GetSvc("default", "service-a")
 
-	fixture.coreCS.Tracker().Add(
-		svc1,
-	)
-
-	await := fixture.AwaitService(func(action k8s_testing.Action) bool {
-		if action.GetResource() != servicesResource || action.GetVerb() != "patch" {
-			return false
-		}
-
-		svc := fixture.PatchedSvc(action)
-
-		if len(svc.Status.LoadBalancer.Ingress) != 3 {
-			t.Error("Expected service to receive exactly three ingress IP")
-			return true
-		}
-
-		return true
-	}, time.Second)
-
-	go fixture.hive.Start(context.Background())
-	defer fixture.hive.Stop(context.Background())
-
-	if await.Block() {
-		t.Fatal("Expected service status update")
+	if len(svc1.Status.LoadBalancer.Ingress) != 3 {
+		t.Error("Expected service to receive exactly three ingress IP")
 	}
-	// If t.Error was called within the await
-	if t.Failed() {
-		return
-	}
-
-	await = fixture.AwaitService(func(action k8s_testing.Action) bool {
-		if action.GetResource() != servicesResource || action.GetVerb() != "patch" {
-			return false
-		}
-
-		svc := fixture.PatchedSvc(action)
-
-		if len(svc.Status.LoadBalancer.Ingress) != 2 {
-			t.Error("Expected service to receive exactly two ingress IPs")
-			return true
-		}
-
-		return true
-	}, time.Second)
 
 	svc1 = svc1.DeepCopy()
 	svc1.Annotations = map[string]string{
 		"io.cilium/lb-ipam-ips": "10.0.10.124",
 	}
 
-	_, err := fixture.svcClient.Services(svc1.Namespace).Update(context.Background(), svc1, meta_v1.UpdateOptions{})
-	if err != nil {
-		t.Fatal(err)
+	fixture.UpsertSvc(t, svc1)
+	svc1 = fixture.GetSvc("default", "service-a")
+
+	if len(svc1.Status.LoadBalancer.Ingress) != 2 {
+		t.Error("Expected service to receive exactly two ingress IPs")
 	}
 
-	if await.Block() {
-		t.Fatal("Expected service status update")
-	}
-
-	// If t.Error was called within the await
-	if t.Failed() {
-		return
-	}
-
-	if !fixture.lbIPAM.rangesStore.ranges[0].allocRange.Has(net.ParseIP("10.0.10.123")) {
+	if _, has := fixture.lbipam.rangesStore.ranges[0].alloc.Get(netip.MustParseAddr("10.0.10.123")); !has {
 		t.Fatal("Expected IP '10.0.10.123' to be allocated")
 	}
 
-	if !fixture.lbIPAM.rangesStore.ranges[0].allocRange.Has(net.ParseIP("10.0.10.124")) {
+	if _, has := fixture.lbipam.rangesStore.ranges[0].alloc.Get(netip.MustParseAddr("10.0.10.124")); !has {
 		t.Fatal("Expected IP '10.0.10.124' to be allocated")
 	}
 
-	if fixture.lbIPAM.rangesStore.ranges[0].allocRange.Has(net.ParseIP("10.0.10.125")) {
+	if _, has := fixture.lbipam.rangesStore.ranges[0].alloc.Get(netip.MustParseAddr("10.0.10.125")); has {
 		t.Fatal("Expected IP '10.0.10.125' to be released")
 	}
 }
@@ -2253,40 +1868,26 @@ func TestRemoveRequestedIP(t *testing.T) {
 // LBIPAM looks for, are ignored by LBIPAM.
 func TestNonMatchingLBClass(t *testing.T) {
 	poolA := mkPool(poolAUID, "pool-a", []string{"10.0.10.0/24"})
-	fixture := mkTestFixture([]*cilium_api_v2alpha1.CiliumLoadBalancerIPPool{
-		poolA,
-	}, true, true, nil)
+	fixture := mkTestFixture(true, true)
+	fixture.UpsertPool(t, poolA)
 
 	lbClass := "net.example/some-other-class"
-	fixture.coreCS.Tracker().Add(
-		&slim_core_v1.Service{
-			ObjectMeta: slim_meta_v1.ObjectMeta{
-				Name:      "service-a",
-				Namespace: "default",
-				UID:       serviceAUID,
-			},
-			Spec: slim_core_v1.ServiceSpec{
-				Type:              slim_core_v1.ServiceTypeLoadBalancer,
-				LoadBalancerClass: &lbClass,
-			},
+	svcA := &slim_core_v1.Service{
+		ObjectMeta: slim_meta_v1.ObjectMeta{
+			Name:      "service-a",
+			Namespace: "default",
+			UID:       serviceAUID,
 		},
-	)
+		Spec: slim_core_v1.ServiceSpec{
+			Type:              slim_core_v1.ServiceTypeLoadBalancer,
+			LoadBalancerClass: &lbClass,
+		},
+	}
+	fixture.UpsertSvc(t, svcA)
+	svcA = fixture.GetSvc("default", "service-a")
 
-	await := fixture.AwaitService(func(action k8s_testing.Action) bool {
-		if action.GetResource() != servicesResource || action.GetVerb() != "patch" {
-			return false
-		}
-
-		t.Error("Unexpected patch to a service")
-
-		return true
-	}, 100*time.Millisecond)
-
-	go fixture.hive.Start(context.Background())
-	defer fixture.hive.Stop(context.Background())
-
-	if !await.Block() {
-		t.Fatal("Unexpected service status update")
+	if len(svcA.Status.LoadBalancer.Ingress) != 0 {
+		t.Error("Expected service to receive no ingress IPs")
 	}
 }
 
@@ -2297,75 +1898,98 @@ func TestChangePoolSelector(t *testing.T) {
 	poolA.Spec.ServiceSelector = &slim_meta_v1.LabelSelector{
 		MatchLabels: map[string]string{"color": "red"},
 	}
-	fixture := mkTestFixture([]*cilium_api_v2alpha1.CiliumLoadBalancerIPPool{
-		poolA,
-	}, true, true, nil)
+	fixture := mkTestFixture(true, true)
+	fixture.UpsertPool(t, poolA)
 
-	fixture.coreCS.Tracker().Add(
-		&slim_core_v1.Service{
-			ObjectMeta: slim_meta_v1.ObjectMeta{
-				Name:      "service-a",
-				Namespace: "default",
-				UID:       serviceAUID,
-				Labels: map[string]string{
-					"color": "red",
-				},
-			},
-			Spec: slim_core_v1.ServiceSpec{
-				Type: slim_core_v1.ServiceTypeLoadBalancer,
+	svcA := &slim_core_v1.Service{
+		ObjectMeta: slim_meta_v1.ObjectMeta{
+			Name:      "service-a",
+			Namespace: "default",
+			UID:       serviceAUID,
+			Labels: map[string]string{
+				"color": "red",
 			},
 		},
-	)
-
-	await := fixture.AwaitService(func(action k8s_testing.Action) bool {
-		if action.GetResource() != servicesResource || action.GetVerb() != "patch" {
-			return false
-		}
-
-		svc := fixture.PatchedSvc(action)
-
-		if len(svc.Status.LoadBalancer.Ingress) != 1 {
-			t.Error("Expected service to receive exactly one ingress IP")
-			return true
-		}
-
-		return true
-	}, time.Second)
-
-	go fixture.hive.Start(context.Background())
-	defer fixture.hive.Stop(context.Background())
-
-	if await.Block() {
-		t.Fatal("Expected service status update")
+		Spec: slim_core_v1.ServiceSpec{
+			Type: slim_core_v1.ServiceTypeLoadBalancer,
+		},
 	}
-	// If t.Error was called within the await
-	if t.Failed() {
-		return
+	fixture.UpsertSvc(t, svcA)
+	svcA = fixture.GetSvc("default", "service-a")
+
+	if len(svcA.Status.LoadBalancer.Ingress) != 1 {
+		t.Error("Expected service to receive exactly one ingress IP")
 	}
 
-	await = fixture.AwaitService(func(action k8s_testing.Action) bool {
-		if action.GetResource() != servicesResource || action.GetVerb() != "patch" {
-			return false
-		}
-
-		svc := fixture.PatchedSvc(action)
-
-		if len(svc.Status.LoadBalancer.Ingress) != 0 {
-			t.Error("Expected service to receive exactly zero ingress IPs")
-			return true
-		}
-
-		return true
-	}, time.Second)
-
+	poolA = fixture.GetPool("pool-a")
 	poolA.Spec.ServiceSelector.MatchLabels = map[string]string{"color": "green"}
+	fixture.UpsertPool(t, poolA)
 
-	_, err := fixture.poolClient.Update(context.Background(), poolA, meta_v1.UpdateOptions{})
-	if err != nil {
-		t.Fatal(err)
+	svcA = fixture.GetSvc("default", "service-a")
+	if len(svcA.Status.LoadBalancer.Ingress) != 0 {
+		t.Error("Expected service to receive exactly zero ingress IPs")
+	}
+}
+
+func TestRangeFromPrefix(t *testing.T) {
+	type test struct {
+		name   string
+		prefix string
+		from   string
+		to     string
 	}
 
-	if await.Block() {
-		t.Fatal("Expected service status update")
+	tests := []test{
+		{
+			name:   "/24",
+			prefix: "10.0.0.0/24",
+			from:   "10.0.0.0",
+			to:     "10.0.0.255",
+		},
+		{
+			name:   "/25",
+			prefix: "10.0.0.0/25",
+			from:   "10.0.0.0",
+			to:     "10.0.0.127",
+		},
+		{
+			name:   "offset prefix",
+			prefix: "10.0.0.12/24",
+			from:   "10.0.0.0",
+			to:     "10.0.0.255",
+		},
+		{
+			name:   "ipv6",
+			prefix: "::0000/112",
+			from:   "::0000",
+			to:     "::FFFF",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(tt *testing.T) {
+			prefix, err := netip.ParsePrefix(test.prefix)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			expectedTo, err := netip.ParseAddr(test.to)
+			if err != nil {
+				tt.Fatal(err)
+			}
+
+			expectedFrom, err := netip.ParseAddr(test.from)
+			if err != nil {
+				tt.Fatal(err)
+			}
+
+			from, to := rangeFromPrefix(prefix)
+			if to.Compare(expectedTo) != 0 {
+				tt.Fatalf("expected '%s', got '%s'", expectedTo, to)
+			}
+			if from.Compare(expectedFrom) != 0 {
+				tt.Fatalf("expected '%s', got '%s'", expectedFrom, from)
+			}
+		})
 	}
 }

@@ -43,6 +43,8 @@ var Cell = cell.Module(
 
 	// Invoke forces the instantiation of the identity gc
 	cell.Invoke(registerGC),
+
+	cell.Metric(NewMetrics),
 )
 
 // Config contains the configuration for the identity-gc.
@@ -78,17 +80,4 @@ func (def Config) Flags(flags *pflag.FlagSet) {
 type SharedConfig struct {
 	// IdentityAllocationMode specifies what mode to use for identity allocation
 	IdentityAllocationMode string
-
-	// EnableMetrics enables prometheus metrics
-	EnableMetrics bool
-
-	// ClusterName is the name of the cluster
-	ClusterName string
-
-	// K8sNamespace is the name of the namespace in which Cilium is
-	// deployed in when running in Kubernetes mode
-	K8sNamespace string
-
-	// ClusterID is the unique identifier of the cluster
-	ClusterID uint32
 }

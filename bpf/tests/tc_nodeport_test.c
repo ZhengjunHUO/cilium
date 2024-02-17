@@ -33,6 +33,11 @@ mock_ctx_redirect_peer(const struct __sk_buff *ctx __maybe_unused, int ifindex _
 
 #include <bpf_lxc.c>
 
+#include "lib/endpoint.h"
+#include "lib/ipcache.h"
+#include "lib/lb.h"
+#include "lib/policy.h"
+
 struct {
 	__uint(type, BPF_MAP_TYPE_PROG_ARRAY);
 	__uint(key_size, sizeof(__u32));
@@ -41,6 +46,7 @@ struct {
 } entry_call_map __section(".maps") = {
 	.values = {
 		[0] = &cil_from_container,
+		[1] = &cil_to_container,
 	},
 };
 
@@ -57,37 +63,18 @@ static __always_inline int build_packet(struct __ctx_buff *ctx)
 	struct pktgen builder;
 	volatile const __u8 *src = mac_one;
 	volatile const __u8 *dst = mac_two;
-	struct ethhdr *l2;
-	struct iphdr *l3;
 	struct tcphdr *l4;
 	void *data;
 
 	/* Init packet builder */
 	pktgen__init(&builder, ctx);
 
-	/* Push ethernet header */
-	l2 = pktgen__push_ethhdr(&builder);
-
-	if (!l2)
-		return TEST_ERROR;
-
-	ethhdr__set_macs(l2, (__u8 *)src, (__u8 *)dst);
-
-	/* Push IPv4 header */
-	l3 = pktgen__push_default_iphdr(&builder);
-
-	if (!l3)
-		return TEST_ERROR;
-	l3->saddr = v4_pod_one;
-	l3->daddr = v4_svc_one;
-
-	/* Push TCP header */
-	l4 = pktgen__push_default_tcphdr(&builder);
-
+	l4 = pktgen__push_ipv4_tcp_packet(&builder,
+					  (__u8 *)src, (__u8 *)dst,
+					  v4_pod_one, v4_svc_one,
+					  tcp_src_one, tcp_svc_one);
 	if (!l4)
 		return TEST_ERROR;
-	l4->source = tcp_src_one;
-	l4->dest = tcp_svc_one;
 
 	data = pktgen__push_data(&builder, default_data, sizeof(default_data));
 
@@ -113,58 +100,15 @@ SETUP("tc", "hairpin_flow_1_forward_v4")
 int hairpin_flow_forward_setup(struct __ctx_buff *ctx)
 {
 	__u16 revnat_id = 1;
-	struct lb4_key lb_svc_key = {};
-	struct lb4_service lb_svc_value = {};
-	struct lb4_reverse_nat revnat_value = {};
-	struct lb4_backend backend = {};
-	struct ipcache_key cache_key = {};
-	struct remote_endpoint_info cache_value = {};
-	struct endpoint_key ep_key = {};
-	struct endpoint_info ep_value = {};
 
-	/* Register a fake LB backend with endpoint ID 124 for our service */
-	lb_svc_key.address = v4_svc_one;
-	lb_svc_key.dport = tcp_svc_one;
-	lb_svc_key.scope = LB_LOOKUP_SCOPE_EXT;
-
-	/* Create a service with only one backend */
-	lb_svc_value.count = 1;
-	lb_svc_value.flags = SVC_FLAG_ROUTABLE;
-	lb_svc_value.rev_nat_index = revnat_id;
-	map_update_elem(&LB4_SERVICES_MAP_V2, &lb_svc_key, &lb_svc_value, BPF_ANY);
-
-	/* Insert a reverse NAT entry for the above service */
-	revnat_value.address = v4_svc_one;
-	revnat_value.port = tcp_svc_one;
-	map_update_elem(&LB4_REVERSE_NAT_MAP, &revnat_id, &revnat_value, BPF_ANY);
-
-	/* A backend between 1 and .count is chosen, since we have only one backend
-	 * it is always backend_slot 1. Point it to backend_id 124.
-	 */
-	lb_svc_key.backend_slot = 1;
-	lb_svc_value.backend_id = 124;
-	map_update_elem(&LB4_SERVICES_MAP_V2, &lb_svc_key, &lb_svc_value, BPF_ANY);
-
-	/* Create backend id 124 which contains the IP and port to send the
-	 * packet to.
-	 */
-	backend.address = v4_pod_one;
-	backend.port = tcp_svc_one;
-	backend.proto = IPPROTO_TCP;
-	backend.flags = 0;
-	map_update_elem(&LB4_BACKEND_MAP, &lb_svc_value.backend_id, &backend, BPF_ANY);
+	lb_v4_add_service(v4_svc_one, tcp_svc_one, 1, revnat_id);
+	lb_v4_add_backend(v4_svc_one, tcp_svc_one, 1, 124,
+			  v4_pod_one, tcp_dst_one, IPPROTO_TCP, 0);
 
 	/* Add an IPCache entry for pod 1 */
-	cache_key.lpm_key.prefixlen = 32;
-	cache_key.family = ENDPOINT_KEY_IPV4;
-	cache_key.ip4 = v4_pod_one;
-	/* a random sec id for the pod */
-	cache_value.sec_identity = 112233;
-	map_update_elem(&IPCACHE_MAP, &cache_key, &cache_value, BPF_ANY);
+	ipcache_v4_add_entry(v4_pod_one, 0, 112233, 0, 0);
 
-	ep_key.ip4 = v4_pod_one;
-	ep_key.family = ENDPOINT_KEY_IPV4;
-	map_update_elem(&ENDPOINTS_MAP, &ep_key, &ep_value, BPF_ANY);
+	endpoint_v4_add_entry(v4_pod_one, 0, 0, 0, NULL, NULL);
 
 	/* Jump into the entrypoint */
 	tail_call_static(ctx, &entry_call_map, 0);
@@ -212,51 +156,173 @@ int hairpin_flow_forward_check(__maybe_unused const struct __ctx_buff *ctx)
 	if (l4->source != tcp_src_one)
 		test_fatal("src TCP port was changed");
 
-	if (l4->dest != tcp_svc_one)
+	if (l4->dest != tcp_dst_one)
 		test_fatal("dst TCP port incorrect");
+
+	struct ipv4_ct_tuple tuple = {};
+	struct ct_entry *ct_entry;
+
+	/* Match the packet headers: */
+	tuple.flags = TUPLE_F_SERVICE;
+	tuple.nexthdr = IPPROTO_TCP;
+	tuple.saddr = v4_pod_one;
+	tuple.sport = tcp_src_one;
+	tuple.daddr = v4_svc_one;
+	tuple.dport = tcp_svc_one;
+
+	/* Ports are stored in reverse order: */
+	ipv4_ct_tuple_swap_ports(&tuple);
+
+	ct_entry = map_lookup_elem(get_ct_map4(&tuple), &tuple);
+	if (!ct_entry)
+		test_fatal("no CT_SERVICE entry found");
+
+	/* Match the packet headers: */
+	tuple.flags = TUPLE_F_OUT;
+	tuple.nexthdr = IPPROTO_TCP;
+	tuple.saddr = IPV4_LOOPBACK;
+	tuple.sport = tcp_src_one;
+	tuple.daddr = v4_pod_one;
+	tuple.dport = tcp_dst_one;
+
+	/* Addrs are stored in reverse order: */
+	ipv4_ct_tuple_swap_addrs(&tuple);
+
+	ct_entry = map_lookup_elem(get_ct_map4(&tuple), &tuple);
+	if (!ct_entry)
+		test_fatal("no CT_EGRESS entry found");
+	if (!ct_entry->lb_loopback)
+		test_fatal("CT_EGRESS entry doesn't have loopback flag");
 
 	test_finish();
 }
 
-PKTGEN("tc", "hairpin_flow_2_reverse_v4")
-int hairpin_flow_reverse_pktgen(struct __ctx_buff *ctx)
+/* Let backend's ingress path create its own CT entry: */
+PKTGEN("tc", "hairpin_flow_2_forward_ingress_v4")
+int hairpin_flow_forward_ingress_pktgen(struct __ctx_buff *ctx)
 {
 	struct pktgen builder;
-	struct ethhdr *l2;
 	volatile const __u8 *src = mac_one;
 	volatile const __u8 *dst = mac_two;
-	struct iphdr *l3;
 	struct tcphdr *l4;
 	void *data;
 
 	/* Init packet builder */
 	pktgen__init(&builder, ctx);
 
-	/* Push ethernet header */
-	l2 = pktgen__push_ethhdr(&builder);
-
-	if (!l2)
-		return TEST_ERROR;
-
-	ethhdr__set_macs(l2, (__u8 *)src, (__u8 *)dst);
-
-	/* Push IPv4 header */
-	l3 = pktgen__push_default_iphdr(&builder);
-
-	if (!l3)
-		return TEST_ERROR;
-
-	l3->saddr = v4_pod_one;
-	l3->daddr = IPV4_LOOPBACK;
-
-	/* Push TCP header */
-	l4 = pktgen__push_default_tcphdr(&builder);
-
+	l4 = pktgen__push_ipv4_tcp_packet(&builder,
+					  (__u8 *)src, (__u8 *)dst,
+					  IPV4_LOOPBACK, v4_pod_one,
+					  tcp_src_one, tcp_dst_one);
 	if (!l4)
 		return TEST_ERROR;
 
-	l4->source = tcp_svc_one;
-	l4->dest = tcp_src_one;
+	data = pktgen__push_data(&builder, default_data, sizeof(default_data));
+
+	if (!data)
+		return TEST_ERROR;
+
+	/* Calc lengths, set protocol fields and calc checksums */
+	pktgen__finish(&builder);
+
+	return 0;
+}
+
+/* Test that a packet in the forward direction is good. */
+SETUP("tc", "hairpin_flow_2_forward_ingress_v4")
+int hairpin_flow_forward_ingress_setup(struct __ctx_buff *ctx)
+{
+	/* Jump into the entrypoint */
+	tail_call_static(ctx, &entry_call_map, 1);
+	/* Fail if we didn't jump */
+	return TEST_ERROR;
+}
+
+CHECK("tc", "hairpin_flow_2_forward_ingress_v4")
+int hairpin_flow_forward_ingress_check(__maybe_unused const struct __ctx_buff *ctx)
+{
+	void *data;
+	void *data_end;
+	__u32 *status_code;
+	struct iphdr *l3;
+	struct tcphdr *l4;
+
+	test_init();
+
+	data = (void *)(long)ctx->data;
+	data_end = (void *)(long)ctx->data_end;
+
+	if (data + sizeof(__u32) > data_end)
+		test_fatal("status code out of bounds");
+
+	status_code = data;
+
+	assert(*status_code == TC_ACT_OK);
+
+	l3 = data + sizeof(__u32) + sizeof(struct ethhdr);
+
+	if ((void *)l3 + sizeof(struct iphdr) > data_end)
+		test_fatal("l3 out of bounds");
+
+	if (l3->saddr != IPV4_LOOPBACK)
+		test_fatal("src IP changed");
+
+	if (l3->daddr != v4_pod_one)
+		test_fatal("dest IP changed");
+
+	l4 = (void *)l3 + sizeof(struct iphdr);
+
+	if ((void *)l4 + sizeof(struct tcphdr) > data_end)
+		test_fatal("l4 out of bounds");
+
+	if (l4->source != tcp_src_one)
+		test_fatal("src TCP port changed");
+
+	if (l4->dest != tcp_dst_one)
+		test_fatal("dst TCP port changed");
+
+	struct ipv4_ct_tuple tuple = {};
+	struct ct_entry *ct_entry;
+
+	/* Match the packet headers: */
+	tuple.flags = TUPLE_F_IN;
+	tuple.nexthdr = IPPROTO_TCP;
+	tuple.saddr = IPV4_LOOPBACK;
+	tuple.sport = tcp_src_one;
+	tuple.daddr = v4_pod_one;
+	tuple.dport = tcp_dst_one;
+
+	/* Addrs are stored in reverse order: */
+	ipv4_ct_tuple_swap_addrs(&tuple);
+
+	ct_entry = map_lookup_elem(get_ct_map4(&tuple), &tuple);
+	if (!ct_entry)
+		test_fatal("no CT_INGRESS entry found");
+	if (!ct_entry->lb_loopback)
+		test_fatal("CT_INGRESS entry doesn't have loopback flag");
+
+	test_finish();
+}
+
+PKTGEN("tc", "hairpin_flow_3_reverse_v4")
+int hairpin_flow_reverse_pktgen(struct __ctx_buff *ctx)
+{
+	struct pktgen builder;
+	volatile const __u8 *src = mac_one;
+	volatile const __u8 *dst = mac_two;
+	struct tcphdr *l4;
+	void *data;
+
+	/* Init packet builder */
+	pktgen__init(&builder, ctx);
+
+	l4 = pktgen__push_ipv4_tcp_packet(&builder,
+					  (__u8 *)src, (__u8 *)dst,
+					  v4_pod_one, IPV4_LOOPBACK,
+					  tcp_dst_one, tcp_src_one);
+	if (!l4)
+		return TEST_ERROR;
+
 	l4->ack = 1;
 
 	data = pktgen__push_data(&builder, default_data, sizeof(default_data));
@@ -271,7 +337,7 @@ int hairpin_flow_reverse_pktgen(struct __ctx_buff *ctx)
 }
 
 /* Test that a packet in the reverse direction gets translated back. */
-SETUP("tc", "hairpin_flow_2_reverse_v4")
+SETUP("tc", "hairpin_flow_3_reverse_v4")
 int hairpin_flow_rev_setup(struct __ctx_buff *ctx)
 {
 	/* Jump into the entrypoint */
@@ -280,7 +346,7 @@ int hairpin_flow_rev_setup(struct __ctx_buff *ctx)
 	return TEST_ERROR;
 }
 
-CHECK("tc", "hairpin_flow_2_reverse_v4")
+CHECK("tc", "hairpin_flow_3_reverse_v4")
 int hairpin_flow_rev_check(__maybe_unused const struct __ctx_buff *ctx)
 {
 	void *data;
@@ -330,36 +396,16 @@ int hairpin_flow_rev_check(__maybe_unused const struct __ctx_buff *ctx)
 SETUP("tc", "tc_drop_no_backend")
 int tc_drop_no_backend_setup(struct __ctx_buff *ctx)
 {
-	/* Fake Service matching our packet. */
-	struct lb4_key lb_svc_key = {
-		.address = v4_svc_one,
-		.dport = tcp_svc_one,
-		.scope = LB_LOOKUP_SCOPE_EXT
-	};
-	/* Service with no backends */
-	struct lb4_service lb_svc_value = {
-		.count = 0,
-		.flags = SVC_FLAG_ROUTABLE,
-	};
-	struct policy_key policy_key = {
-		.egress = 1,
-	};
-	struct policy_entry policy_value = {
-		.deny = 0,
-	};
-
 	int ret;
 
 	ret = build_packet(ctx);
 	if (ret)
 		return ret;
 
-	map_update_elem(&LB4_SERVICES_MAP_V2, &lb_svc_key, &lb_svc_value, BPF_ANY);
-	lb_svc_key.scope = LB_LOOKUP_SCOPE_INT;
-	map_update_elem(&LB4_SERVICES_MAP_V2, &lb_svc_key, &lb_svc_value, BPF_ANY);
+	lb_v4_add_service(v4_svc_one, tcp_svc_one, 0, 1);
 
 	/* avoid policy drop */
-	map_update_elem(&POLICY_MAP, &policy_key, &policy_value, BPF_ANY);
+	policy_add_egress_allow_all_entry();
 
 	/* Jump into the entrypoint */
 	tail_call_static(ctx, &entry_call_map, 0);

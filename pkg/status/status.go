@@ -10,7 +10,6 @@ import (
 	"os"
 	"runtime/pprof"
 	"sync/atomic"
-	"time"
 
 	"github.com/sirupsen/logrus"
 
@@ -19,6 +18,7 @@ import (
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/cilium/pkg/logging/logfields"
+	"github.com/cilium/cilium/pkg/time"
 )
 
 const (
@@ -115,7 +115,6 @@ func NewCollector(probes []Probe, config Config) *Collector {
 }
 
 // Close exits all probes and shuts down the collector
-// TODO(brb): call it when daemon exits (after GH#6248).
 func (c *Collector) Close() {
 	close(c.stop)
 }

@@ -4,16 +4,13 @@
 package ctmap
 
 import (
-	"strings"
 	"testing"
 	"time"
-	"unsafe"
 
-	. "gopkg.in/check.v1"
+	. "github.com/cilium/checkmate"
 
 	"github.com/cilium/cilium/pkg/defaults"
 	"github.com/cilium/cilium/pkg/option"
-	"github.com/cilium/cilium/pkg/tuple"
 )
 
 // Hook up gocheck into the "go test" runner.
@@ -22,44 +19,16 @@ type CTMapTestSuite struct{}
 var _ = Suite(&CTMapTestSuite{})
 
 func init() {
-	InitMapInfo(option.CTMapEntriesGlobalTCPDefault, option.CTMapEntriesGlobalAnyDefault, true, true, true)
+	InitMapInfo(true, true, true)
 }
 
 func Test(t *testing.T) {
 	TestingT(t)
 }
 
-func (t *CTMapTestSuite) TestInit(c *C) {
-	InitMapInfo(option.CTMapEntriesGlobalTCPDefault, option.CTMapEntriesGlobalAnyDefault, true, true, true)
-	for mapType := mapType(0); mapType < mapTypeMax; mapType++ {
-		info := mapInfo[mapType]
-		if mapType.isIPv6() {
-			c.Assert(info.keySize, Equals, int(unsafe.Sizeof(tuple.TupleKey6{})))
-			c.Assert(strings.Contains(info.bpfDefine, "6"), Equals, true)
-		}
-		if mapType.isIPv4() {
-			c.Assert(info.keySize, Equals, int(unsafe.Sizeof(tuple.TupleKey4{})))
-			c.Assert(strings.Contains(info.bpfDefine, "4"), Equals, true)
-		}
-		if mapType.isTCP() {
-			c.Assert(strings.Contains(info.bpfDefine, "TCP"), Equals, true)
-		} else {
-			c.Assert(strings.Contains(info.bpfDefine, "ANY"), Equals, true)
-		}
-		if mapType.isLocal() {
-			c.Assert(info.maxEntries, Equals, mapNumEntriesLocal)
-		}
-		if mapType.isGlobal() {
-			if mapType.isTCP() {
-				c.Assert(info.maxEntries, Equals, option.CTMapEntriesGlobalTCPDefault)
-			} else {
-				c.Assert(info.maxEntries, Equals, option.CTMapEntriesGlobalAnyDefault)
-			}
-		}
-	}
-}
-
 func (t *CTMapTestSuite) TestCalculateInterval(c *C) {
+	cachedGCInterval = time.Duration(0)
+
 	c.Assert(calculateInterval(time.Minute, 0.1), Equals, time.Minute)  // no change
 	c.Assert(calculateInterval(time.Minute, 0.2), Equals, time.Minute)  // no change
 	c.Assert(calculateInterval(time.Minute, 0.25), Equals, time.Minute) // no change
@@ -73,6 +42,27 @@ func (t *CTMapTestSuite) TestCalculateInterval(c *C) {
 	c.Assert(calculateInterval(1*time.Second, 0.9), Equals, defaults.ConntrackGCMinInterval)
 
 	c.Assert(calculateInterval(24*time.Hour, 0.01), Equals, defaults.ConntrackGCMaxLRUInterval)
+}
+
+func (t *CTMapTestSuite) TestGetInterval(c *C) {
+	cachedGCInterval = time.Minute
+	c.Assert(GetInterval(0.1), Equals, time.Minute)
+
+	// Setting ConntrackGCInterval overrides the calculation
+	oldInterval := option.Config.ConntrackGCInterval
+	option.Config.ConntrackGCInterval = 10 * time.Second
+	c.Assert(GetInterval(0.1), Equals, 10*time.Second)
+	option.Config.ConntrackGCInterval = oldInterval
+	c.Assert(GetInterval(0.1), Equals, time.Minute)
+
+	// Setting ConntrackGCMaxInterval limits the maximum interval
+	oldMaxInterval := option.Config.ConntrackGCMaxInterval
+	option.Config.ConntrackGCMaxInterval = 20 * time.Second
+	c.Assert(GetInterval(0.1), Equals, 20*time.Second)
+	option.Config.ConntrackGCMaxInterval = oldMaxInterval
+	c.Assert(GetInterval(0.1), Equals, time.Minute)
+
+	cachedGCInterval = time.Duration(0)
 }
 
 func (t *CTMapTestSuite) TestFilterMapsByProto(c *C) {

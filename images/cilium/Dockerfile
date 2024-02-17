@@ -1,12 +1,13 @@
 # Copyright Authors of Cilium
 # SPDX-License-Identifier: Apache-2.0
 
-ARG CILIUM_BUILDER_IMAGE=quay.io/cilium/cilium-builder:099e8a115fae92649a03ef22aa53d6d9e4485f08@sha256:016e3d8d7c471c491817d0ccb8abc261168640b38e4de1772ef37c6d1f3caff6
-ARG CILIUM_RUNTIME_IMAGE=quay.io/cilium/cilium-runtime:b32efb0e682e74311b628df328dfd768108b92c2@sha256:0873607c0fc991c884bc7d39ea774c8ebd7df2be35f4b69b6d16b33ce871427b
+ARG CILIUM_BUILDER_IMAGE=quay.io/cilium/cilium-builder:5546dd5e5d07b1c15b5512b964ae3d9d5a680c0e@sha256:510720977bf81652344ebc5e42fc79a5c1ee64e4120612512af1ee43ca737bf1
+ARG CILIUM_RUNTIME_IMAGE=quay.io/cilium/cilium-runtime:0e364ad77a070f6a092329653d648ae57afd118c@sha256:4a378ea20ecc65d69b295315879f73d64ee0295ee59e19865b76cf2547b9e77d
+ARG CILIUM_ENVOY_IMAGE=quay.io/cilium/cilium-envoy:v1.28.1-e62af1059e691fe025d97b53b56ed4e8afa366dc@sha256:663a71073bfebde735bdde2d7afeb565ef7e5c37de1bf962afbb432f1062559f
 
 # cilium-envoy from github.com/cilium/proxy
 #
-FROM quay.io/cilium/cilium-envoy:v1.25-3d6c80b860b9b39c616f835d9bdac281a81139ae@sha256:133c265411fda96395c8c4ecb27f2753713b11b45319e3458af2ec9d275750fd as cilium-envoy
+FROM ${CILIUM_ENVOY_IMAGE} as cilium-envoy
 
 #
 # Hubble CLI
@@ -79,7 +80,8 @@ ARG TARGETOS
 ARG TARGETARCH
 LABEL maintainer="maintainer@cilium.io"
 RUN echo ". /etc/profile.d/bash_completion.sh" >> /etc/bash.bashrc
-COPY --from=cilium-envoy / /
+COPY --from=cilium-envoy /usr/lib/libcilium.so /usr/lib/libcilium.so
+COPY --from=cilium-envoy /usr/bin/cilium-envoy /usr/bin/cilium-envoy-starter /usr/bin/
 # When used within the Cilium container, Hubble CLI should target the
 # local unix domain socket instead of Hubble Relay.
 ENV HUBBLE_SERVER=unix:///var/run/cilium/hubble.sock
@@ -90,7 +92,7 @@ COPY --from=builder /tmp/install/${TARGETOS}/${TARGETARCH} /
 WORKDIR /home/cilium
 
 ENV INITSYSTEM="SYSTEMD"
-CMD ["/usr/bin/cilium"]
+CMD ["/usr/bin/cilium-dbg"]
 
 #
 # Cilium debug image.

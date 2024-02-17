@@ -4,10 +4,12 @@
 package types
 
 import (
+	"fmt"
 	"net"
 	"testing"
 
-	. "gopkg.in/check.v1"
+	. "github.com/cilium/checkmate"
+	"github.com/stretchr/testify/assert"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/cilium/cilium/pkg/annotation"
@@ -197,6 +199,9 @@ func (s *NodeSuite) TestNode_ToCiliumNode(c *C) {
 		IPv6IngressIP:           net.ParseIP("c0de::2"),
 		NodeIdentity:            uint32(12345),
 		WireguardPubKey:         "6kiIGGPvMiadJ1brWTVfSGXheE3e3k5GjDTxfjMLYx8=",
+		Annotations: map[string]string{
+			annotation.BGPVRouterAnnoPrefix + "64512": "router-id=172.0.0.3",
+		},
 	}
 
 	n := nodeResource.ToCiliumNode()
@@ -205,7 +210,7 @@ func (s *NodeSuite) TestNode_ToCiliumNode(c *C) {
 			Name:      "foo",
 			Namespace: "",
 			Annotations: map[string]string{
-				annotation.WireguardPubKey: "6kiIGGPvMiadJ1brWTVfSGXheE3e3k5GjDTxfjMLYx8=",
+				annotation.BGPVRouterAnnoPrefix + "64512": "router-id=172.0.0.3",
 			},
 		},
 		Spec: ciliumv2.NodeSpec{
@@ -237,4 +242,146 @@ func (s *NodeSuite) TestNode_ToCiliumNode(c *C) {
 			NodeIdentity: uint64(12345),
 		},
 	})
+}
+
+func TestClusterServiceValidate(t *testing.T) {
+	tests := []struct {
+		name   string
+		node   Node
+		assert assert.ErrorAssertionFunc
+	}{
+		{
+			name:   "empty cluster ID",
+			node:   Node{},
+			assert: assert.NoError,
+		},
+		{
+			name:   "valid cluster ID",
+			node:   Node{ClusterID: 99},
+			assert: assert.NoError,
+		},
+		{
+			name:   "invalid cluster ID",
+			node:   Node{ClusterID: 260},
+			assert: assert.Error,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.assert(t, tt.node.validate())
+		})
+	}
+}
+
+func TestGetIPv4AllocCIDRs(t *testing.T) {
+	var (
+		cidr1 = cidr.MustParseCIDR("1.0.0.0/24")
+		cidr2 = cidr.MustParseCIDR("2.0.0.0/24")
+		cidr3 = cidr.MustParseCIDR("3.0.0.0/24")
+	)
+
+	var tests = []struct {
+		// name of test
+		name string
+		// primary ipv4 allocation cidr
+		allocCIDR *cidr.CIDR
+		// secondary ipv4 allocation cidrs
+		secAllocCIDRs []*cidr.CIDR
+		// expected ipv4 cidrs
+		expectedCIDRs []*cidr.CIDR
+	}{
+		{
+			name:          "nil cidrs",
+			allocCIDR:     nil,
+			secAllocCIDRs: nil,
+			expectedCIDRs: make([]*cidr.CIDR, 0),
+		},
+		{
+			name:          "one primary and no secondary cidrs",
+			allocCIDR:     cidr1,
+			secAllocCIDRs: nil,
+			expectedCIDRs: []*cidr.CIDR{cidr1},
+		},
+		{
+			name:          "one primary and one secondary cidr",
+			allocCIDR:     cidr1,
+			secAllocCIDRs: []*cidr.CIDR{cidr2},
+			expectedCIDRs: []*cidr.CIDR{cidr1, cidr2},
+		},
+		{
+			name:          "one primary and multiple secondary cidrs",
+			allocCIDR:     cidr1,
+			secAllocCIDRs: []*cidr.CIDR{cidr2, cidr3},
+			expectedCIDRs: []*cidr.CIDR{cidr1, cidr2, cidr3},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			n := Node{
+				Name:                    fmt.Sprintf("node-%s", tt.name),
+				IPv4AllocCIDR:           tt.allocCIDR,
+				IPv4SecondaryAllocCIDRs: tt.secAllocCIDRs,
+			}
+
+			actual := n.GetIPv4AllocCIDRs()
+			assert.Equal(t, actual, tt.expectedCIDRs)
+		})
+	}
+}
+
+func TestGetIPv6AllocCIDRs(t *testing.T) {
+	var (
+		cidr2001 = cidr.MustParseCIDR("2001:db8::/32")
+		cidr2002 = cidr.MustParseCIDR("2002:db8::/32")
+		cidr2003 = cidr.MustParseCIDR("2003:db8::/32")
+	)
+
+	var tests = []struct {
+		// name of test
+		name string
+		// primary ipv6 allocation cidr
+		allocCIDR *cidr.CIDR
+		// secondary ipv6 allocation cidrs
+		secAllocCIDRs []*cidr.CIDR
+		// expected ipv6 cidrs
+		expectedCIDRs []*cidr.CIDR
+	}{
+		{
+			name:          "nil cidrs",
+			allocCIDR:     nil,
+			secAllocCIDRs: nil,
+			expectedCIDRs: make([]*cidr.CIDR, 0),
+		},
+		{
+			name:          "one primary and no secondary cidrs",
+			allocCIDR:     cidr2001,
+			secAllocCIDRs: nil,
+			expectedCIDRs: []*cidr.CIDR{cidr2001},
+		},
+		{
+			name:          "one primary and one secondary cidr",
+			allocCIDR:     cidr2001,
+			secAllocCIDRs: []*cidr.CIDR{cidr2002},
+			expectedCIDRs: []*cidr.CIDR{cidr2001, cidr2002},
+		},
+		{
+			name:          "one primary and multiple secondary cidrs",
+			allocCIDR:     cidr2001,
+			secAllocCIDRs: []*cidr.CIDR{cidr2002, cidr2003},
+			expectedCIDRs: []*cidr.CIDR{cidr2001, cidr2002, cidr2003},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			n := Node{
+				Name:                    fmt.Sprintf("node-%s", tt.name),
+				IPv6AllocCIDR:           tt.allocCIDR,
+				IPv6SecondaryAllocCIDRs: tt.secAllocCIDRs,
+			}
+
+			actual := n.GetIPv6AllocCIDRs()
+			assert.Equal(t, actual, tt.expectedCIDRs)
+		})
+	}
 }

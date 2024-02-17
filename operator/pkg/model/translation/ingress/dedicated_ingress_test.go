@@ -6,11 +6,14 @@ package ingress
 import (
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/testing/protocmp"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/cilium/cilium/operator/pkg/model"
+	"github.com/cilium/cilium/operator/pkg/model/translation"
 	ciliumv2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 )
 
@@ -36,6 +39,7 @@ func Test_getService(t *testing.T) {
 						Kind:       "Ingress",
 						Name:       "dummy-ingress",
 						UID:        "d4bd3dc3-2ac5-4ab4-9dca-89c62c60177e",
+						Controller: model.AddressOf(true),
 					},
 				},
 			},
@@ -72,6 +76,7 @@ func Test_getService(t *testing.T) {
 						Kind:       "Ingress",
 						Name:       "dummy-ingress",
 						UID:        "d4bd3dc3-2ac5-4ab4-9dca-89c62c60177e",
+						Controller: model.AddressOf(true),
 					},
 				},
 			},
@@ -112,6 +117,7 @@ func Test_getService(t *testing.T) {
 						Kind:       "Ingress",
 						Name:       "dummy-ingress",
 						UID:        "d4bd3dc3-2ac5-4ab4-9dca-89c62c60177e",
+						Controller: model.AddressOf(true),
 					},
 				},
 			},
@@ -156,6 +162,7 @@ func Test_getEndpointForIngress(t *testing.T) {
 					Kind:       "Ingress",
 					Name:       "dummy-ingress",
 					UID:        "d4bd3dc3-2ac5-4ab4-9dca-89c62c60177e",
+					Controller: model.AddressOf(true),
 				},
 			},
 		},
@@ -170,8 +177,8 @@ func Test_getEndpointForIngress(t *testing.T) {
 
 func Test_translator_Translate(t *testing.T) {
 	type args struct {
-		m            *model.Model
-		enforceHTTPs bool
+		m                *model.Model
+		useProxyProtocol bool
 	}
 	tests := []struct {
 		name    string
@@ -185,7 +192,6 @@ func Test_translator_Translate(t *testing.T) {
 				m: &model.Model{
 					HTTP: defaultBackendListeners,
 				},
-				enforceHTTPs: true,
 			},
 			want: defaultBackendListenersCiliumEnvoyConfig,
 		},
@@ -193,9 +199,17 @@ func Test_translator_Translate(t *testing.T) {
 			name: "Conformance/HostRules",
 			args: args{
 				m: &model.Model{
+					HTTP: hostRulesListenersEnforceHTTPS,
+				},
+			},
+			want: hostRulesListenersEnforceHTTPSCiliumEnvoyConfig,
+		},
+		{
+			name: "Conformance/HostRules,no Force HTTPS",
+			args: args{
+				m: &model.Model{
 					HTTP: hostRulesListeners,
 				},
-				enforceHTTPs: true,
 			},
 			want: hostRulesListenersCiliumEnvoyConfig,
 		},
@@ -205,22 +219,33 @@ func Test_translator_Translate(t *testing.T) {
 				m: &model.Model{
 					HTTP: pathRulesListeners,
 				},
-				enforceHTTPs: true,
 			},
 			want: pathRulesListenersCiliumEnvoyConfig,
+		},
+		{
+			name: "Conformance/ProxyProtocol",
+			args: args{
+				m: &model.Model{
+					HTTP: proxyProtocolListeners,
+				},
+				useProxyProtocol: true,
+			},
+			want: proxyProtoListenersCiliumEnvoyConfig,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			trans := &DedicatedIngressTranslator{
-				secretsNamespace: "cilium-secrets",
-				enforceHTTPs:     tt.args.enforceHTTPs,
+			trans := &dedicatedIngressTranslator{
+				cecTranslator: translation.NewCECTranslator("cilium-secrets", tt.args.useProxyProtocol, false, 60),
 			}
 
 			cec, _, _, err := trans.Translate(tt.args.m)
 			require.Equal(t, tt.wantErr, err != nil, "Error mismatch")
-			require.Equal(t, tt.want, cec, "CiliumEnvoyConfig did not match")
+			diffOutput := cmp.Diff(tt.want, cec, protocmp.Transform())
+			if len(diffOutput) != 0 {
+				t.Errorf("CiliumEnvoyConfigs did not match:\n%s\n", diffOutput)
+			}
 		})
 	}
 }

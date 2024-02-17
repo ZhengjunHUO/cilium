@@ -1,4 +1,4 @@
-name: build-commits
+name: Build Commits
 
 # Any change in triggers needs to be reflected in the concurrency group.
 on: [pull_request]
@@ -21,10 +21,10 @@ jobs:
           git config --global user.email "github-actions@users.noreply.github.com"
 
       - name: Install Go
-        uses: actions/setup-go@4d34df0c2316fe8122ab82dc22947d607c0c91f9 # v4.0.0
+        uses: actions/setup-go@0c52d547c9bc32b1aa3301fd7a9cb496313a4491 # v5.0.0
         with:
           # renovate: datasource=golang-version depName=go
-          go-version: 1.20.3
+          go-version: 1.21.6
 
       - name: Set clang directory
         id: set_clang_dir
@@ -32,7 +32,7 @@ jobs:
 
       - name: Cache LLVM and Clang
         id: cache-llvm
-        uses: actions/cache@88522ab9f39a2ea568f7027eddc7d8d8bc9d59c8 # v3.3.1
+        uses: actions/cache@13aacd865c20de90d75de3b17ebe84f7a17d57d2 # v4.0.0
         with:
           path: ${{ steps.set_clang_dir.outputs.clang_dir }}
           key: llvm-10.0
@@ -43,7 +43,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends libtinfo5
 
       - name: Install LLVM and Clang
-        uses: KyleMayes/install-llvm-action@13d5d77cbf0bd7e35cb02a8f9ed4bb85bed3393b # v1.8.0
+        uses: KyleMayes/install-llvm-action@be40c5af3a4adc3e4a03199995ab73aa37536712 # v1.9.0
         with:
           version: "10.0"
           directory: ${{ steps.set_clang_dir.outputs.clang_dir }}
@@ -54,7 +54,7 @@ jobs:
           go install github.com/onsi/ginkgo/ginkgo@cc0216944b25a88d3259699a029d4e601fb8a222 # v1.12.1
 
       - name: Checkout code
-        uses: actions/checkout@8e5e7e5ab8b370d6c329ec480221332ada57f0ab # v3.5.2
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
         with:
           persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha }}
@@ -71,7 +71,7 @@ jobs:
           git rebase --exec "make build -j $(nproc)" $PR_PARENT_SHA
 
       - name: Check bpf code changes
-        uses: dorny/paths-filter@4512585405083f25c027a35db413c2b3b9006d50 # v2.11.1
+        uses: dorny/paths-filter@0bc4621a3135347011ad047f9ecf449bf72ce2bd # v3.0.0
         id: bpf-tree
         with:
           filters: |
@@ -91,11 +91,12 @@ jobs:
           git rebase --exec "make -C bpf build_all -j $(nproc)" $PR_PARENT_SHA
 
       - name: Check test code changes
-        uses: dorny/paths-filter@4512585405083f25c027a35db413c2b3b9006d50 # v2.11.1
+        uses: dorny/paths-filter@0bc4621a3135347011ad047f9ecf449bf72ce2bd # v3.0.0
         id: test-tree
         with:
           filters: |
             src:
+              - 'pkg/**'
               - 'test/**'
 
       # Runs only if code under test/ is changed.

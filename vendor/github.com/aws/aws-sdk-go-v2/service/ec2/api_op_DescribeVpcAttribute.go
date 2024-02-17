@@ -4,6 +4,7 @@ package ec2
 
 import (
 	"context"
+	"fmt"
 	awsmiddleware "github.com/aws/aws-sdk-go-v2/aws/middleware"
 	"github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
@@ -11,8 +12,8 @@ import (
 	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
-// Describes the specified attribute of the specified VPC. You can specify only one
-// attribute at a time.
+// Describes the specified attribute of the specified VPC. You can specify only
+// one attribute at a time.
 func (c *Client) DescribeVpcAttribute(ctx context.Context, params *DescribeVpcAttributeInput, optFns ...func(*Options)) (*DescribeVpcAttributeOutput, error) {
 	if params == nil {
 		params = &DescribeVpcAttributeInput{}
@@ -42,8 +43,8 @@ type DescribeVpcAttributeInput struct {
 
 	// Checks whether you have the required permissions for the action, without
 	// actually making the request, and provides an error response. If you have the
-	// required permissions, the error response is DryRunOperation. Otherwise, it is
-	// UnauthorizedOperation.
+	// required permissions, the error response is DryRunOperation . Otherwise, it is
+	// UnauthorizedOperation .
 	DryRun *bool
 
 	noSmithyDocumentSerde
@@ -52,12 +53,12 @@ type DescribeVpcAttributeInput struct {
 type DescribeVpcAttributeOutput struct {
 
 	// Indicates whether the instances launched in the VPC get DNS hostnames. If this
-	// attribute is true, instances in the VPC get DNS hostnames; otherwise, they do
+	// attribute is true , instances in the VPC get DNS hostnames; otherwise, they do
 	// not.
 	EnableDnsHostnames *types.AttributeBooleanValue
 
 	// Indicates whether DNS resolution is enabled for the VPC. If this attribute is
-	// true, the Amazon DNS server resolves DNS hostnames for your instances to their
+	// true , the Amazon DNS server resolves DNS hostnames for your instances to their
 	// corresponding IP addresses; otherwise, it does not.
 	EnableDnsSupport *types.AttributeBooleanValue
 
@@ -74,12 +75,22 @@ type DescribeVpcAttributeOutput struct {
 }
 
 func (c *Client) addOperationDescribeVpcAttributeMiddlewares(stack *middleware.Stack, options Options) (err error) {
+	if err := stack.Serialize.Add(&setOperationInputMiddleware{}, middleware.After); err != nil {
+		return err
+	}
 	err = stack.Serialize.Add(&awsEc2query_serializeOpDescribeVpcAttribute{}, middleware.After)
 	if err != nil {
 		return err
 	}
 	err = stack.Deserialize.Add(&awsEc2query_deserializeOpDescribeVpcAttribute{}, middleware.After)
 	if err != nil {
+		return err
+	}
+	if err := addProtocolFinalizerMiddlewares(stack, options, "DescribeVpcAttribute"); err != nil {
+		return fmt.Errorf("add protocol finalizers: %v", err)
+	}
+
+	if err = addlegacyEndpointContextSetter(stack, options); err != nil {
 		return err
 	}
 	if err = addSetLoggerMiddleware(stack, options); err != nil {
@@ -100,16 +111,13 @@ func (c *Client) addOperationDescribeVpcAttributeMiddlewares(stack *middleware.S
 	if err = addRetryMiddlewares(stack, options); err != nil {
 		return err
 	}
-	if err = addHTTPSignerV4Middleware(stack, options); err != nil {
-		return err
-	}
 	if err = awsmiddleware.AddRawResponseToMetadata(stack); err != nil {
 		return err
 	}
 	if err = awsmiddleware.AddRecordResponseTiming(stack); err != nil {
 		return err
 	}
-	if err = addClientUserAgent(stack); err != nil {
+	if err = addClientUserAgent(stack, options); err != nil {
 		return err
 	}
 	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
@@ -118,10 +126,16 @@ func (c *Client) addOperationDescribeVpcAttributeMiddlewares(stack *middleware.S
 	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
 		return err
 	}
+	if err = addSetLegacyContextSigningOptionsMiddleware(stack); err != nil {
+		return err
+	}
 	if err = addOpDescribeVpcAttributeValidationMiddleware(stack); err != nil {
 		return err
 	}
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opDescribeVpcAttribute(options.Region), middleware.Before); err != nil {
+		return err
+	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
@@ -133,6 +147,9 @@ func (c *Client) addOperationDescribeVpcAttributeMiddlewares(stack *middleware.S
 	if err = addRequestResponseLogging(stack, options); err != nil {
 		return err
 	}
+	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -140,7 +157,6 @@ func newServiceMetadataMiddleware_opDescribeVpcAttribute(region string) *awsmidd
 	return &awsmiddleware.RegisterServiceMetadata{
 		Region:        region,
 		ServiceID:     ServiceID,
-		SigningName:   "ec2",
 		OperationName: "DescribeVpcAttribute",
 	}
 }

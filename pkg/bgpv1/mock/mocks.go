@@ -7,7 +7,9 @@ import (
 	"context"
 
 	"github.com/cilium/cilium/api/v1/models"
+	restapi "github.com/cilium/cilium/api/v1/server/restapi/bgp"
 	"github.com/cilium/cilium/pkg/bgpv1/agent"
+	v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 	"github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2alpha1"
 
 	v1 "k8s.io/api/core/v1"
@@ -34,14 +36,29 @@ func (m *MockNodeLister) Get(name string) (*v1.Node, error) {
 var _ agent.BGPRouterManager = (*MockBGPRouterManager)(nil)
 
 type MockBGPRouterManager struct {
-	ConfigurePeers_ func(ctx context.Context, policy *v2alpha1.CiliumBGPPeeringPolicy, cstate *agent.ControlPlaneState) error
-	GetPeers_       func(ctx context.Context) ([]*models.BgpPeer, error)
+	ConfigurePeers_   func(ctx context.Context, policy *v2alpha1.CiliumBGPPeeringPolicy, ciliumNode *v2.CiliumNode) error
+	GetPeers_         func(ctx context.Context) ([]*models.BgpPeer, error)
+	GetRoutes_        func(ctx context.Context, params restapi.GetBgpRoutesParams) ([]*models.BgpRoute, error)
+	GetRoutePolicies_ func(ctx context.Context, params restapi.GetBgpRoutePoliciesParams) ([]*models.BgpRoutePolicy, error)
+	Stop_             func()
 }
 
-func (m *MockBGPRouterManager) ConfigurePeers(ctx context.Context, policy *v2alpha1.CiliumBGPPeeringPolicy, cstate *agent.ControlPlaneState) error {
-	return m.ConfigurePeers_(ctx, policy, cstate)
+func (m *MockBGPRouterManager) ConfigurePeers(ctx context.Context, policy *v2alpha1.CiliumBGPPeeringPolicy, ciliumNode *v2.CiliumNode) error {
+	return m.ConfigurePeers_(ctx, policy, ciliumNode)
 }
 
 func (m *MockBGPRouterManager) GetPeers(ctx context.Context) ([]*models.BgpPeer, error) {
 	return m.GetPeers_(ctx)
+}
+
+func (m *MockBGPRouterManager) GetRoutes(ctx context.Context, params restapi.GetBgpRoutesParams) ([]*models.BgpRoute, error) {
+	return m.GetRoutes_(ctx, params)
+}
+
+func (m *MockBGPRouterManager) GetRoutePolicies(ctx context.Context, params restapi.GetBgpRoutePoliciesParams) ([]*models.BgpRoutePolicy, error) {
+	return m.GetRoutePolicies_(ctx, params)
+}
+
+func (m *MockBGPRouterManager) Stop() {
+	m.Stop_()
 }

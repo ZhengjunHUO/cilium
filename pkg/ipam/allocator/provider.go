@@ -5,10 +5,10 @@ package allocator
 
 import (
 	"context"
-	"time"
 
 	"github.com/cilium/cilium/pkg/ipam"
 	v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
+	"github.com/cilium/cilium/pkg/time"
 )
 
 // AllocatorProvider defines the functions of IPAM provider front-end
@@ -20,8 +20,7 @@ type AllocatorProvider interface {
 
 // NodeEventHandler should implement the behavior to handle CiliumNode
 type NodeEventHandler interface {
-	Create(resource *v2.CiliumNode) bool
-	Update(resource *v2.CiliumNode) bool
+	Upsert(resource *v2.CiliumNode)
 	Delete(resource *v2.CiliumNode)
 	Resync(context.Context, time.Time)
 }

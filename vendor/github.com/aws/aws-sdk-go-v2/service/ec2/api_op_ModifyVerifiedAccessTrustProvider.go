@@ -12,6 +12,8 @@ import (
 	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
+// Modifies the configuration of the specified Amazon Web Services Verified Access
+// trust provider.
 func (c *Client) ModifyVerifiedAccessTrustProvider(ctx context.Context, params *ModifyVerifiedAccessTrustProviderInput, optFns ...func(*Options)) (*ModifyVerifiedAccessTrustProviderOutput, error) {
 	if params == nil {
 		params = &ModifyVerifiedAccessTrustProviderInput{}
@@ -29,21 +31,41 @@ func (c *Client) ModifyVerifiedAccessTrustProvider(ctx context.Context, params *
 
 type ModifyVerifiedAccessTrustProviderInput struct {
 
+	// The ID of the Verified Access trust provider.
+	//
 	// This member is required.
 	VerifiedAccessTrustProviderId *string
 
+	// A unique, case-sensitive token that you provide to ensure idempotency of your
+	// modification request. For more information, see Ensuring Idempotency (https://docs.aws.amazon.com/AWSEC2/latest/APIReference/Run_Instance_Idempotency.html)
+	// .
 	ClientToken *string
 
+	// A description for the Verified Access trust provider.
 	Description *string
 
+	// The options for a device-based trust provider. This parameter is required when
+	// the provider type is device .
+	DeviceOptions *types.ModifyVerifiedAccessTrustProviderDeviceOptions
+
+	// Checks whether you have the required permissions for the action, without
+	// actually making the request, and provides an error response. If you have the
+	// required permissions, the error response is DryRunOperation . Otherwise, it is
+	// UnauthorizedOperation .
 	DryRun *bool
 
+	// The options for an OpenID Connect-compatible user-identity trust provider.
 	OidcOptions *types.ModifyVerifiedAccessTrustProviderOidcOptions
+
+	// The options for server side encryption.
+	SseSpecification *types.VerifiedAccessSseSpecificationRequest
 
 	noSmithyDocumentSerde
 }
 
 type ModifyVerifiedAccessTrustProviderOutput struct {
+
+	// Details about the Verified Access trust provider.
 	VerifiedAccessTrustProvider *types.VerifiedAccessTrustProvider
 
 	// Metadata pertaining to the operation's result.
@@ -53,12 +75,22 @@ type ModifyVerifiedAccessTrustProviderOutput struct {
 }
 
 func (c *Client) addOperationModifyVerifiedAccessTrustProviderMiddlewares(stack *middleware.Stack, options Options) (err error) {
+	if err := stack.Serialize.Add(&setOperationInputMiddleware{}, middleware.After); err != nil {
+		return err
+	}
 	err = stack.Serialize.Add(&awsEc2query_serializeOpModifyVerifiedAccessTrustProvider{}, middleware.After)
 	if err != nil {
 		return err
 	}
 	err = stack.Deserialize.Add(&awsEc2query_deserializeOpModifyVerifiedAccessTrustProvider{}, middleware.After)
 	if err != nil {
+		return err
+	}
+	if err := addProtocolFinalizerMiddlewares(stack, options, "ModifyVerifiedAccessTrustProvider"); err != nil {
+		return fmt.Errorf("add protocol finalizers: %v", err)
+	}
+
+	if err = addlegacyEndpointContextSetter(stack, options); err != nil {
 		return err
 	}
 	if err = addSetLoggerMiddleware(stack, options); err != nil {
@@ -79,22 +111,22 @@ func (c *Client) addOperationModifyVerifiedAccessTrustProviderMiddlewares(stack 
 	if err = addRetryMiddlewares(stack, options); err != nil {
 		return err
 	}
-	if err = addHTTPSignerV4Middleware(stack, options); err != nil {
-		return err
-	}
 	if err = awsmiddleware.AddRawResponseToMetadata(stack); err != nil {
 		return err
 	}
 	if err = awsmiddleware.AddRecordResponseTiming(stack); err != nil {
 		return err
 	}
-	if err = addClientUserAgent(stack); err != nil {
+	if err = addClientUserAgent(stack, options); err != nil {
 		return err
 	}
 	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
 		return err
 	}
 	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
+		return err
+	}
+	if err = addSetLegacyContextSigningOptionsMiddleware(stack); err != nil {
 		return err
 	}
 	if err = addIdempotencyToken_opModifyVerifiedAccessTrustProviderMiddleware(stack, options); err != nil {
@@ -106,6 +138,9 @@ func (c *Client) addOperationModifyVerifiedAccessTrustProviderMiddlewares(stack 
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opModifyVerifiedAccessTrustProvider(options.Region), middleware.Before); err != nil {
 		return err
 	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
+		return err
+	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
 		return err
 	}
@@ -113,6 +148,9 @@ func (c *Client) addOperationModifyVerifiedAccessTrustProviderMiddlewares(stack 
 		return err
 	}
 	if err = addRequestResponseLogging(stack, options); err != nil {
+		return err
+	}
+	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
 		return err
 	}
 	return nil
@@ -155,7 +193,6 @@ func newServiceMetadataMiddleware_opModifyVerifiedAccessTrustProvider(region str
 	return &awsmiddleware.RegisterServiceMetadata{
 		Region:        region,
 		ServiceID:     ServiceID,
-		SigningName:   "ec2",
 		OperationName: "ModifyVerifiedAccessTrustProvider",
 	}
 }

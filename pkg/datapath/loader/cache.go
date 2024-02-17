@@ -10,75 +10,70 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/fsnotify/fsnotify"
 	"github.com/sirupsen/logrus"
 
 	"github.com/cilium/cilium/pkg/common"
-	"github.com/cilium/cilium/pkg/controller"
 	"github.com/cilium/cilium/pkg/datapath/loader/metrics"
 	datapath "github.com/cilium/cilium/pkg/datapath/types"
 	"github.com/cilium/cilium/pkg/defaults"
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/option"
-	"github.com/cilium/cilium/pkg/serializer"
 )
 
-const templateWatcherQueueSize = 10
-
 var ignoredELFPrefixes = []string{
-	"2/",                         // Calls within the endpoint
-	"HOST_IP",                    // Global
-	"IPV6_NODEPORT",              // Global
-	"ROUTER_IP",                  // Global
-	"SNAT_IPV6_EXTERNAL",         // Global
-	"cilium_auth_map",            // Global
-	"cilium_call_policy",         // Global
-	"cilium_egresscall_policy",   // Global
-	"cilium_capture",             // Global
-	"cilium_ct",                  // All CT maps, including local
-	"cilium_encrypt_state",       // Global
-	"cilium_events",              // Global
-	"cilium_ipcache",             // Global
-	"cilium_ktime",               // Global
-	"cilium_lb",                  // Global
-	"cilium_lxc",                 // Global
-	"cilium_metrics",             // Global
-	"cilium_nodeport_neigh",      // All nodeport neigh maps
-	"cilium_node_map",            // Global
-	"cilium_policy",              // All policy maps
-	"cilium_proxy",               // Global
-	"cilium_runtime_config",      // Global
-	"cilium_signals",             // Global
-	"cilium_snat",                // All SNAT maps
-	"cilium_tail_call_buffer",    // Global
-	"cilium_tunnel",              // Global
-	"cilium_ipv4_frag_datagrams", // Global
-	"cilium_ipmasq",              // Global
-	"cilium_throttle",            // Global
-	"cilium_egress_gw_policy_v4", // Global
-	"cilium_srv6_policy_v4",      // Global
-	"cilium_srv6_policy_v6",      // Global
-	"cilium_srv6_vrf_v4",         // Global
-	"cilium_srv6_vrf_v6",         // Global
-	"cilium_srv6_state_v4",       // Global
-	"cilium_srv6_state_v6",       // Global
-	"cilium_srv6_sid",            // Global
-	"cilium_vtep_map",            // Global
-	"cilium_per_cluster_ct",      // Global
-	"from-container",             // Prog name
-	"to-container",               // Prog name
-	"from-netdev",                // Prog name
-	"from-host",                  // Prog name
-	"to-netdev",                  // Prog name
-	"to-host",                    // Prog name
-	".BTF",                       // Debug
-	".BTF.ext",                   // Debug
-	".debug_ranges",              // Debug
-	".debug_info",                // Debug
-	".debug_line",                // Debug
-	".debug_frame",               // Debug
-	".debug_loc",                 // Debug
+	"2/",                          // Calls within the endpoint
+	"HOST_IP",                     // Global
+	"IPV6_NODEPORT",               // Global
+	"ROUTER_IP",                   // Global
+	"SNAT_IPV6_EXTERNAL",          // Global
+	"cilium_auth_map",             // Global
+	"cilium_call_policy",          // Global
+	"cilium_egresscall_policy",    // Global
+	"cilium_capture",              // Global
+	"cilium_ct",                   // All CT maps, including local
+	"cilium_encrypt_state",        // Global
+	"cilium_events",               // Global
+	"cilium_ipcache",              // Global
+	"cilium_ktime",                // Global
+	"cilium_lb",                   // Global
+	"cilium_lxc",                  // Global
+	"cilium_metrics",              // Global
+	"cilium_nodeport_neigh",       // All nodeport neigh maps
+	"cilium_node_map",             // Global
+	"cilium_policy",               // All policy maps
+	"cilium_proxy",                // Global
+	"cilium_runtime_config",       // Global
+	"cilium_signals",              // Global
+	"cilium_snat",                 // All SNAT maps
+	"cilium_tail_call_buffer",     // Global
+	"cilium_tunnel",               // Global
+	"cilium_ipv4_frag_datagrams",  // Global
+	"cilium_ipmasq",               // Global
+	"cilium_throttle",             // Global
+	"cilium_egress_gw_policy_v4",  // Global
+	"cilium_srv6_policy_v4",       // Global
+	"cilium_srv6_policy_v6",       // Global
+	"cilium_srv6_vrf_v4",          // Global
+	"cilium_srv6_vrf_v6",          // Global
+	"cilium_srv6_state_v4",        // Global
+	"cilium_srv6_state_v6",        // Global
+	"cilium_srv6_sid",             // Global
+	"cilium_vtep_map",             // Global
+	"cilium_per_cluster_ct",       // Global
+	"cilium_world_cidrs4",         // Global
+	"cilium_l2_responder_v4",      // Global
+	"cilium_ratelimit",            // Global
+	"cilium_mcast_group_v4_outer", // Global
+	"tc",                          // Program Section
+	"xdp",                         // Program Section
+	".BTF",                        // Debug
+	".BTF.ext",                    // Debug
+	".debug_ranges",               // Debug
+	".debug_info",                 // Debug
+	".debug_line",                 // Debug
+	".debug_frame",                // Debug
+	".debug_loc",                  // Debug
 	// Endpoint IPv6 address. It's possible for the template object to have
 	// these symbols while the endpoint doesn't, if IPv6 was just enabled and
 	// the endpoint restored.
@@ -86,11 +81,14 @@ var ignoredELFPrefixes = []string{
 	// The default val (14) is used for all devices except for L2-less devices
 	// for which we set ETH_HLEN=0 during load time.
 	"ETH_HLEN",
+	// identity_length is global configuration value that is used to set the bit-length of identity
+	// in a numeric identity.
+	"identity_length",
 }
 
 // RestoreTemplates populates the object cache from templates on the filesystem
 // at the specified path.
-func RestoreTemplates(stateDir string) error {
+func (l *loader) RestoreTemplates(stateDir string) error {
 	// Simplest implementation: Just garbage-collect everything.
 	// In future we should make this smarter.
 	path := filepath.Join(stateDir, defaults.TemplatesDir)
@@ -114,41 +112,28 @@ type objectCache struct {
 	workingDirectory string
 	baseHash         *datapathHash
 
-	// newTemplates is notified whenever template is added to the objectCache.
-	newTemplates        chan string
-	templateWatcherDone chan struct{}
-
-	// toPath maps a hash to the filesystem path of the corresponding object.
-	toPath map[string]string
-
-	// compileQueue maps a hash to a queue which ensures that only one
+	// objects maps a hash to a queue which ensures that only one
 	// attempt is made concurrently to compile the corresponding template.
-	compileQueue map[string]*serializer.FunctionQueue
+	objects map[string]*cachedObject
+}
+
+type cachedObject struct {
+	// Protects state in cachedObject. Also used to serialize compilation attempts.
+	lock.Mutex
+
+	// The path at which the object is cached. May be empty if there hasn't
+	// been a successful compile yet.
+	path string
 }
 
 func newObjectCache(c datapath.ConfigWriter, nodeCfg *datapath.LocalNodeConfiguration, workingDir string) *objectCache {
 	oc := &objectCache{
-		ConfigWriter:        c,
-		workingDirectory:    workingDir,
-		newTemplates:        make(chan string, templateWatcherQueueSize),
-		templateWatcherDone: make(chan struct{}),
-		toPath:              make(map[string]string),
-		compileQueue:        make(map[string]*serializer.FunctionQueue),
+		ConfigWriter:     c,
+		workingDirectory: workingDir,
+		objects:          make(map[string]*cachedObject),
 	}
 	oc.Update(nodeCfg)
-	controller.NewManager().UpdateController("template-dir-watcher",
-		controller.ControllerParams{
-			DoFunc: oc.watchTemplatesDirectory,
-			// No run interval but needs to re-run on errors.
-		})
-
 	return oc
-}
-
-// NewObjectCache creates a new cache for datapath objects, basing the hash
-// upon the configuration of the datapath and the specified node configuration.
-func NewObjectCache(c datapath.ConfigWriter, nodeCfg *datapath.LocalNodeConfiguration) *objectCache {
-	return newObjectCache(c, nodeCfg, option.Config.StateDir)
 }
 
 // Update may be called to update the base hash for configuration of datapath
@@ -161,100 +146,58 @@ func (o *objectCache) Update(nodeCfg *datapath.LocalNodeConfiguration) {
 	o.baseHash = newHash
 }
 
-// serialize finds the channel that serializes builds against the same hash.
-// Returns the channel and whether or not the caller needs to compile the
-// datapath for this hash.
-func (o *objectCache) serialize(hash string) (fq *serializer.FunctionQueue, found bool) {
+// serialize access to an abitrary key.
+//
+// Lock the returned object to ensure mutual exclusion.
+func (o *objectCache) serialize(key string) *cachedObject {
 	o.Lock()
 	defer o.Unlock()
 
-	fq, compiled := o.compileQueue[hash]
-	if !compiled {
-		fq = serializer.NewFunctionQueue()
-		o.compileQueue[hash] = fq
+	obj, ok := o.objects[key]
+	if !ok {
+		obj = new(cachedObject)
+		o.objects[key] = obj
 	}
-	return fq, compiled
-}
-
-func (o *objectCache) lookup(hash string) (string, bool) {
-	o.Lock()
-	defer o.Unlock()
-	path, exists := o.toPath[hash]
-	return path, exists
-}
-
-func (o *objectCache) insert(hash, objectPath string) error {
-	o.Lock()
-	defer o.Unlock()
-	o.toPath[hash] = objectPath
-
-	scopedLog := log.WithField(logfields.Path, objectPath)
-	select {
-	case o.newTemplates <- objectPath:
-	case <-o.templateWatcherDone:
-		// This means that the controller was stopped and Cilium is
-		// shutting down; don't bother complaining too loudly.
-		scopedLog.Debug("Failed to watch for template filesystem changes")
-	default:
-		// Unusual case; send on channel was blocked.
-		scopedLog.Warn("Failed to watch for template filesystem changes")
-	}
-	return nil
-}
-
-func (o *objectCache) delete(hash string) {
-	o.Lock()
-	defer o.Unlock()
-	delete(o.toPath, hash)
-	delete(o.compileQueue, hash)
+	return obj
 }
 
 // build attempts to compile and cache a datapath template object file
 // corresponding to the specified endpoint configuration.
-func (o *objectCache) build(ctx context.Context, cfg *templateCfg, hash string) error {
+func (o *objectCache) build(ctx context.Context, cfg *templateCfg, hash string) (string, error) {
 	isHost := cfg.IsHost()
 	templatePath := filepath.Join(o.workingDirectory, defaults.TemplatesDir, hash)
-	headerPath := filepath.Join(templatePath, common.CHeaderFileName)
-	epObj := endpointObj
+	dir := &directoryInfo{
+		Library: option.Config.BpfDir,
+		Runtime: option.Config.StateDir,
+		Output:  templatePath,
+		State:   templatePath,
+	}
+	prog := epProg
 	if isHost {
-		epObj = hostEndpointObj
-	}
-	objectPath := filepath.Join(templatePath, epObj)
-
-	if err := os.MkdirAll(templatePath, defaults.StateDirRights); err != nil {
-		return &os.PathError{
-			Op:   "failed to create template directory",
-			Path: templatePath,
-			Err:  err,
-		}
+		prog = hostEpProg
 	}
 
+	objectPath := prog.AbsoluteOutput(dir)
+
+	if err := os.MkdirAll(dir.Output, defaults.StateDirRights); err != nil {
+		return "", fmt.Errorf("failed to create template directory: %w", err)
+	}
+
+	headerPath := filepath.Join(dir.State, common.CHeaderFileName)
 	f, err := os.Create(headerPath)
 	if err != nil {
-		return &os.PathError{
-			Op:   "failed to open template header for writing",
-			Path: headerPath,
-			Err:  err,
-		}
+		return "", fmt.Errorf("failed to open template header for writing: %w", err)
 	}
 	defer f.Close()
 	if err = o.ConfigWriter.WriteEndpointConfig(f, cfg); err != nil {
-		return &os.PathError{
-			Op:   "failed to write template header",
-			Path: headerPath,
-			Err:  err,
-		}
+		return "", fmt.Errorf("failed to write template header: %w", err)
 	}
 
 	cfg.stats.BpfCompilation.Start()
-	err = compileTemplate(ctx, templatePath, isHost)
+	err = compileDatapath(ctx, dir, isHost, log)
 	cfg.stats.BpfCompilation.End(err == nil)
 	if err != nil {
-		return &os.PathError{
-			Op:   "failed to compile template program",
-			Path: templatePath,
-			Err:  err,
-		}
+		return "", fmt.Errorf("failed to compile template program: %w", err)
 	}
 
 	log.WithFields(logrus.Fields{
@@ -262,8 +205,7 @@ func (o *objectCache) build(ctx context.Context, cfg *templateCfg, hash string) 
 		logfields.BPFCompilationTime: cfg.stats.BpfCompilation.Total(),
 	}).Info("Compiled new BPF template")
 
-	o.insert(hash, objectPath)
-	return nil
+	return objectPath, nil
 }
 
 // fetchOrCompile attempts to fetch the path to the datapath object
@@ -274,11 +216,11 @@ func (o *objectCache) build(ctx context.Context, cfg *templateCfg, hash string) 
 //
 // Returns the path to the compiled template datapath object and whether the
 // object was compiled, or an error.
-func (o *objectCache) fetchOrCompile(ctx context.Context, cfg datapath.EndpointConfiguration, stats *metrics.SpanStat) (path string, compiled bool, err error) {
+func (o *objectCache) fetchOrCompile(ctx context.Context, cfg datapath.EndpointConfiguration, stats *metrics.SpanStat) (file *os.File, compiled bool, err error) {
 	var hash string
 	hash, err = o.baseHash.sumEndpoint(o, cfg, false)
 	if err != nil {
-		return "", false, err
+		return nil, false, err
 	}
 
 	// Capture the time spent waiting for the template to compile.
@@ -292,83 +234,36 @@ func (o *objectCache) fetchOrCompile(ctx context.Context, cfg datapath.EndpointC
 
 	scopedLog := log.WithField(logfields.BPFHeaderfileHash, hash)
 
-	// Serializes attempts to compile this cfg.
-	// TODO(tb): replace with sync.Once.
-	fq, compiled := o.serialize(hash)
-	if !compiled {
-		fq.Enqueue(func() error {
-			templateCfg := wrap(cfg, stats)
-			if err := o.build(ctx, templateCfg, hash); err != nil {
-				if !errors.Is(err, context.Canceled) {
-					scopedLog.WithError(err).Error("BPF template object creation failed")
-				}
+	obj := o.serialize(hash)
 
-				o.Lock()
-				delete(o.compileQueue, hash)
-				o.Unlock()
+	// Only allow a single concurrent compilation.
+	obj.Lock()
+	defer obj.Unlock()
 
-				return err
-			}
-
-			return nil
-		})
-	}
-
-	// Wait until the build completes.
-	if err := fq.Wait(); err != nil {
-		return "", false, fmt.Errorf("BPF template compilation failed: %w", err)
-	}
-
-	// Fetch the result of the compilation.
-	path, ok := o.lookup(hash)
-	if !ok {
-		err := errors.New("Could not locate previously compiled BPF template")
-		scopedLog.WithError(err).Warning("BPF template compilation unsuccessful")
-		return "", false, err
-	}
-
-	return path, !compiled, nil
-}
-
-func (o *objectCache) watchTemplatesDirectory(ctx context.Context) error {
-	templateWatcher, err := fsnotify.NewWatcher()
-	if err != nil {
-		return err
-	}
-	defer func() {
-		close(o.templateWatcherDone)
-		templateWatcher.Close()
-	}()
-
-	for {
-		select {
-		// Watch for new templates being compiled and add to the filesystem watcher
-		case templatePath := <-o.newTemplates:
-			if err = templateWatcher.Add(templatePath); err != nil {
-				log.WithFields(logrus.Fields{
-					logfields.Path: templatePath,
-				}).WithError(err).Warning("Failed to watch templates directory")
-			} else {
-				log.WithFields(logrus.Fields{
-					logfields.Path: templatePath,
-				}).Debug("Watching template path")
-			}
-		// Handle filesystem deletes for current templates
-		case event, open := <-templateWatcher.Events:
-			if !open {
-				break
-			}
-			if event.Has(fsnotify.Remove) {
-				log.WithField(logfields.Path, event.Name).Debug("Detected template removal")
-				templateHash := filepath.Base(filepath.Dir(event.Name))
-				o.delete(templateHash)
-			} else {
-				log.WithField("event", event).Debug("Ignoring template FS event")
-			}
-		case err, _ = <-templateWatcher.Errors:
-			return err
-		case <-ctx.Done():
-			return ctx.Err()
+	if obj.path != "" {
+		// Only attempt to use a cached object if we previously built this object.
+		// Otherwise we risk reusing a previous process' output since we're not
+		// guaranteed an empty working directory.
+		if cached, err := os.Open(obj.path); err == nil {
+			return cached, false, nil
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, false, err
 		}
 	}
+
+	path, err := o.build(ctx, wrap(cfg, stats), hash)
+	if err != nil {
+		if !errors.Is(err, context.Canceled) {
+			scopedLog.WithError(err).Error("BPF template object creation failed")
+		}
+		return nil, false, err
+	}
+
+	output, err := os.Open(path)
+	if err != nil {
+		return nil, false, err
+	}
+
+	obj.path = path
+	return output, !compiled, nil
 }

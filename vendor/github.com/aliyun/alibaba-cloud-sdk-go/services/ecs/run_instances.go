@@ -112,6 +112,7 @@ type RunInstancesRequest struct {
 	DedicatedHostId                          string                          `position:"Query" name:"DedicatedHostId"`
 	SpotDuration                             requests.Integer                `position:"Query" name:"SpotDuration"`
 	SecurityGroupIds                         *[]string                       `position:"Query" name:"SecurityGroupIds"  type:"Repeated"`
+	NetworkOptions                           RunInstancesNetworkOptions      `position:"Query" name:"NetworkOptions"  type:"Struct"`
 	SystemDiskSize                           string                          `position:"Query" name:"SystemDisk.Size"`
 	ImageFamily                              string                          `position:"Query" name:"ImageFamily"`
 	LaunchTemplateName                       string                          `position:"Query" name:"LaunchTemplateName"`
@@ -121,6 +122,7 @@ type RunInstancesRequest struct {
 	Isp                                      string                          `position:"Query" name:"Isp"`
 	KeyPairName                              string                          `position:"Query" name:"KeyPairName"`
 	SpotPriceLimit                           requests.Float                  `position:"Query" name:"SpotPriceLimit"`
+	CpuOptionsTopologyType                   string                          `position:"Query" name:"CpuOptions.TopologyType"`
 	StorageSetPartitionNumber                requests.Integer                `position:"Query" name:"StorageSetPartitionNumber"`
 	Tag                                      *[]RunInstancesTag              `position:"Query" name:"Tag"  type:"Repeated"`
 	PrivatePoolOptionsId                     string                          `position:"Query" name:"PrivatePoolOptions.Id"`
@@ -147,6 +149,7 @@ type RunInstancesRequest struct {
 	DeploymentSetId                          string                          `position:"Query" name:"DeploymentSetId"`
 	NetworkInterface                         *[]RunInstancesNetworkInterface `position:"Query" name:"NetworkInterface"  type:"Repeated"`
 	Amount                                   requests.Integer                `position:"Query" name:"Amount"`
+	AutoPay                                  requests.Boolean                `position:"Query" name:"AutoPay"`
 	OwnerAccount                             string                          `position:"Query" name:"OwnerAccount"`
 	Tenancy                                  string                          `position:"Query" name:"Tenancy"`
 	RamRoleName                              string                          `position:"Query" name:"RamRoleName"`
@@ -189,6 +192,11 @@ type RunInstancesArn struct {
 	AssumeRoleFor string `name:"AssumeRoleFor"`
 }
 
+// RunInstancesNetworkOptions is a repeated param struct in RunInstancesRequest
+type RunInstancesNetworkOptions struct {
+	EnableJumboFrame string `name:"EnableJumboFrame"`
+}
+
 // RunInstancesTag is a repeated param struct in RunInstancesRequest
 type RunInstancesTag struct {
 	Key   string `name:"Key"`
@@ -210,6 +218,10 @@ type RunInstancesNetworkInterface struct {
 	Ipv6AddressCount            string    `name:"Ipv6AddressCount"`
 	Ipv6Address                 *[]string `name:"Ipv6Address" type:"Repeated"`
 	NetworkCardIndex            string    `name:"NetworkCardIndex"`
+	DeleteOnRelease             string    `name:"DeleteOnRelease"`
+	NetworkInterfaceId          string    `name:"NetworkInterfaceId"`
+	RxQueueSize                 string    `name:"RxQueueSize"`
+	TxQueueSize                 string    `name:"TxQueueSize"`
 }
 
 // RunInstancesDataDisk is a repeated param struct in RunInstancesRequest

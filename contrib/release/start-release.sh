@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
 # Copyright Authors of Cilium
 
@@ -22,18 +22,6 @@ usage() {
     logecho "--help     Print this help message"
 }
 
-# $1 - VERSION
-version_is_prerelease() {
-    case "$1" in
-        *rc*|*snapshot*)
-            return 0
-            ;;
-        *)
-            return 1
-            ;;
-    esac
-}
-
 handle_args() {
     if [ "$#" -gt 3 ]; then
         usage 2>&1
@@ -47,7 +35,7 @@ handle_args() {
 
     if ! echo "$1" | grep -q "$RELEASE_REGEX"; then
         usage 2>&1
-        common::exit 1 "Invalid VERSION ARG \"$1\"; Expected X.Y.Z"
+        common::exit 1 "Invalid VERSION ARG \"$1\"; $RELEASE_FORMAT_MSG"
     fi
 
     if ! echo "$2" | grep -q "^[0-9]\+" && ! version_is_prerelease "$1"; then
@@ -68,6 +56,10 @@ handle_args() {
         git status -s | grep -v "^??"
         common::exit 1 "Unmerged changes in tree prevent preparing release PR."
     fi
+
+    if ! gh auth status >/dev/null; then
+        common::exit 1 "Failed to authenticate with GitHub"
+    fi
 }
 
 main() {
@@ -84,7 +76,7 @@ main() {
     if [ "$branch" = "main" ]; then
         git checkout -b pr/prepare-$version $REMOTE/$branch
         if ! version_is_prerelease "$version"; then
-            old_version="$(git tag -l "$VERSION_GLOB" | grep -v 'rc\|snapshot' | sort -V | tail -n 1)"
+            old_version="$(git tag -l "$VERSION_GLOB" | grep -v 'pre\|rc\|snapshot' | sort -V | tail -n 1)"
         else
             old_version="$(git tag -l "$VERSION_GLOB" | sort -V | tail -n 1)"
         fi
@@ -123,8 +115,6 @@ main() {
     logecho "  * If this is a prerelease, create a revert commit"
     logecho "* Push the PR to Github for review ('submit-release.sh')"
     logecho "* (After PR merge) Use 'tag-release.sh' to prepare tags/release"
-
-    # Leave $version-changes.txt around for prep-release.sh usage later
 }
 
 main "$@"

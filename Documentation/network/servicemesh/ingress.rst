@@ -10,9 +10,9 @@
 Kubernetes Ingress Support
 **************************
 
-Cilium uses the standard Kubernetes Ingress resource definition, with
+Cilium uses the standard `Kubernetes Ingress`_ resource definition, with
 an ``ingressClassName`` of ``cilium``. This can be used for path-based
-routing and for TLS termination. For backwards compatibility, the 
+routing and for TLS termination. For backwards compatibility, the
 ``kubernetes.io/ingress.class`` annotation with value of ``cilium``
 is also supported.
 
@@ -43,57 +43,120 @@ path prefix) between resources.
 This is a step-by-step guide on how to enable the Ingress Controller in
 an existing K8s cluster with Cilium installed.
 
+.. _Kubernetes Ingress: https://kubernetes.io/docs/concepts/services-networking/ingress/
+
 Prerequisites
 #############
 
-* Cilium must be configured with ``kubeProxyReplacement`` as partial
-  or strict. Please refer to :ref:`kube-proxy replacement <kubeproxy-free>`
-  for more details.
-* Cilium must be configured with the L7 proxy enabled using the ``--enable-l7-proxy`` flag (enabled by default).
-* The minimum supported Kubernetes version for Ingress is 1.19.
+* Cilium must be configured with NodePort enabled, using
+  ``nodePort.enabled=true`` or by enabling the kube-proxy replacement with
+  ``kubeProxyReplacement=true``. For more information, see :ref:`kube-proxy
+  replacement <kubeproxy-free>`.
+* Cilium must be configured with the L7 proxy enabled using ``l7Proxy=true``
+  (enabled by default).
 
 .. include:: installation.rst
 
 Supported Ingress Annotations
 #############################
 
-.. list-table:: 
-   :widths: 25 25 50
+.. list-table::
    :header-rows: 1
 
    * - Name
      - Description
      - Default Value
    * - ``ingress.cilium.io/loadbalancer-mode``
-     - The loadbalancer mode for the ingress. Applicable values are ``dedicated`` and ``shared``.
-     - Defaults to Helm option ``ingressController.loadbalancerMode`` value.
+     - | The loadbalancer mode for the ingress.
+       | Allows a per ingress override
+       | of the default set in the Helm value
+       | ``ingressController.loadbalancerMode``.
+       | Applicable values are ``dedicated`` and
+       | ``shared``.
+     - | ``dedicated``
+       | (from Helm chart)
    * - ``ingress.cilium.io/service-type``
-     - The Service type for dedicated Ingress. Applicable values are ``LoadBalancer`` and ``NodePort``.
-     - Defaults to ``LoadBalancer`` if unspecified.
+     - | The Service type for dedicated Ingress.
+       | Applicable values are ``LoadBalancer``
+       | and ``NodePort``.
+     - ``LoadBalancer``
    * - ``ingress.cilium.io/insecure-node-port``
-     - The NodePort to use for the HTTP Ingress. Applicable only if ``ingress.cilium.io/service-type`` is ``NodePort``.
-     - If unspecified, a random NodePort will be allocated by kubernetes.
+     - | The NodePort to use for the HTTP Ingress.
+       | Applicable only if ``ingress.cilium.io/service-type`` is ``NodePort``. If unspecified, a random
+       | NodePort will be allocated by kubernetes.
+     - unspecified
    * - ``ingress.cilium.io/secure-node-port``
-     - The NodePort to use for the HTTPS Ingress. Applicable only if ``ingress.cilium.io/service-type`` is ``NodePort``.
-     - If unspecified, a random NodePort will be allocated by kubernetes.
+     - | The NodePort to use for the HTTPS Ingress.
+       | Applicable only if ``ingress.cilium.io/service-type`` is ``NodePort``. If unspecified, a random
+       | NodePort will be allocated by kubernetes.
+     - unspecified
    * - ``ingress.cilium.io/tcp-keep-alive``
-     - Enable TCP keep-alive
-     - 1 (enabled)
+     - | Enable TCP keep-alive. Applicable values
+       | are ``enabled`` and ``disabled``.
+     - ``enabled``
    * - ``ingress.cilium.io/tcp-keep-alive-idle``
      - TCP keep-alive idle time (in seconds)
-     - 10s
+     - ``10``
    * - ``ingress.cilium.io/tcp-keep-alive-probe-interval``
      - TCP keep-alive probe intervals (in seconds)
-     - 5s
+     - ``5``
    * - ``ingress.cilium.io/tcp-keep-alive-probe-max-failures``
      - TCP keep-alive probe max failures
-     - 10
+     - ``10``
    * - ``ingress.cilium.io/websocket``
-     - Enable websocket
-     - disabled
+     - | Enable websocket passthrough support.
+       | Applicable values are ``enabled`` and ``disabled``.
+     - ``disabled``
+   * - ``ingress.cilium.io/tls-passthrough``
+     - | Enable TLS Passthrough mode for this Ingress.
+       | Applicable values are ``enabled`` and ``disabled``,
+       | although boolean-style values will also be
+       | accepted.
+       |
+       | Note that some conditions apply to TLS
+       | Passthrough Ingresses, due to how
+       | TLS Passthrough works:
+       | * A ``host`` field must be set in the Ingress
+       | * Default backends are ignored
+       | * Rules with paths other than ``/`` are ignored
+       | If all the rules in an Ingress are ignored for
+       | these reasons, no Envoy config will be generated
+       | and the Ingress will have no effect.
+       |
+       | Note that this annotation is analogous to
+       | the ``ssl-passthrough`` on other Ingress
+       | controllers.
+     - ``disabled``
+   * - ``ingress.cilium.io/force-https``
+     - | Enable enforced HTTPS redirects for this Ingress.
+       | Applicable values are ``enabled`` and ``disabled``,
+       | although boolean-style values will also be
+       | accepted.
+       |
+       | Note that if the annotation is not present, this
+       | behavior will be controlled by the ``enforce-ingress-https`` configuration
+       | file setting (or ``ingressController.enforceHttps`` in Helm).
+       | 
+       | Any host with TLS config will have redirects to HTTPS
+       | configured for each match specified in the Ingress.
+     - unspecified
 
 Additionally, cloud-provider specific annotations for the LoadBalancer service
-are supported. Please refer to the `Kubernetes documentation <https://kubernetes.io/docs/concepts/services-networking/service/#loadbalancer>`_
+are supported.
+
+By default, annotations with values beginning with:
+
+* ``service.beta.kubernetes.io``
+* ``service.kubernetes.io``
+* ``cloud.google.com``
+
+will be copied from an Ingress object to the generated LoadBalancer service objects.
+
+This setting is controlled by the Cilium Operator's ``ingress-lb-annotation-prefixes``
+config flag, and can be configured in Cilium's Helm ``values.yaml``
+using the ``ingressController.ingressLBAnnotationPrefixes`` setting.
+
+Please refer to the `Kubernetes documentation <https://kubernetes.io/docs/concepts/services-networking/service/#loadbalancer>`_
 for more details.
 
 Examples
@@ -109,3 +172,4 @@ Cilium's Ingress features:
    http
    grpc
    tls-termination
+   tls-default-certificate

@@ -4,45 +4,56 @@
 package gateway_api
 
 import (
+	"crypto/sha256"
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
+	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	"github.com/cilium/cilium/operator/pkg/model"
 	"github.com/cilium/cilium/operator/pkg/model/translation"
 	ciliumv2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 )
 
-var _ translation.Translator = (*translator)(nil)
+var _ translation.Translator = (*gatewayAPITranslator)(nil)
 
 const (
 	ciliumGatewayPrefix = "cilium-gateway-"
 	owningGatewayLabel  = "io.cilium.gateway/owning-gateway"
 )
 
-type translator struct {
-	secretsNamespace string
+type gatewayAPITranslator struct {
+	cecTranslator translation.CECTranslator
 }
 
 // NewTranslator returns a new translator for Gateway API.
-func NewTranslator(secretsNamespace string) translation.Translator {
-	return &translator{
-		secretsNamespace: secretsNamespace,
+func NewTranslator(cecTranslator translation.CECTranslator) translation.Translator {
+	return &gatewayAPITranslator{
+		cecTranslator: cecTranslator,
 	}
 }
 
-func (t *translator) Translate(m *model.Model) (*ciliumv2.CiliumEnvoyConfig, *corev1.Service, *corev1.Endpoints, error) {
-	if m == nil || len(m.HTTP) == 0 || len(m.HTTP[0].Sources) == 0 {
+func (t *gatewayAPITranslator) Translate(m *model.Model) (*ciliumv2.CiliumEnvoyConfig, *corev1.Service, *corev1.Endpoints, error) {
+	listeners := m.GetListeners()
+	if len(listeners) == 0 || len(listeners[0].GetSources()) == 0 {
 		return nil, nil, nil, fmt.Errorf("model source can't be empty")
 	}
 
-	name := ciliumGatewayPrefix + m.HTTP[0].Sources[0].Name
-	namespace := m.HTTP[0].Sources[0].Namespace
+	var source *model.FullyQualifiedResource
+	var ports []uint32
+	for _, l := range listeners {
+		source = &l.GetSources()[0]
 
-	cec, _, _, err := translation.NewTranslator(name, namespace, t.secretsNamespace, false, true).Translate(m)
+		ports = append(ports, l.GetPort())
+	}
+
+	if source == nil || source.Name == "" {
+		return nil, nil, nil, fmt.Errorf("model source name can't be empty")
+	}
+
+	cec, err := t.cecTranslator.Translate(source.Namespace, ciliumGatewayPrefix+source.Name, m)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -51,20 +62,27 @@ func (t *translator) Translate(m *model.Model) (*ciliumv2.CiliumEnvoyConfig, *co
 	cec.OwnerReferences = []metav1.OwnerReference{
 		{
 			APIVersion: gatewayv1beta1.GroupVersion.String(),
-			Kind:       m.HTTP[0].Sources[0].Kind,
-			Name:       m.HTTP[0].Sources[0].Name,
-			UID:        types.UID(m.HTTP[0].Sources[0].UID),
+			Kind:       source.Kind,
+			Name:       source.Name,
+			UID:        types.UID(source.UID),
+			Controller: model.AddressOf(true),
 		},
 	}
-	return cec, getService(m), getEndpoints(m.HTTP[0].Sources[0]), err
+
+	allLabels, allAnnotations := map[string]string{}, map[string]string{}
+	// Merge all the labels and annotations from the listeners.
+	// Normally, the labels and annotations are the same for all the listeners having same gateway.
+	for _, l := range listeners {
+		allAnnotations = mergeMap(allAnnotations, l.GetAnnotations())
+		allLabels = mergeMap(allLabels, l.GetLabels())
+	}
+	return cec, getService(source, ports, allLabels, allAnnotations), getEndpoints(*source), err
 }
 
-func getService(m *model.Model) *corev1.Service {
-	resource := m.HTTP[0].Sources[0]
-
+func getService(resource *model.FullyQualifiedResource, allPorts []uint32, labels, annotations map[string]string) *corev1.Service {
 	uniquePorts := map[uint32]struct{}{}
-	for _, l := range m.HTTP {
-		uniquePorts[l.Port] = struct{}{}
+	for _, p := range allPorts {
+		uniquePorts[p] = struct{}{}
 	}
 
 	ports := make([]corev1.ServicePort, 0, len(uniquePorts))
@@ -78,15 +96,17 @@ func getService(m *model.Model) *corev1.Service {
 
 	return &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      ciliumGatewayPrefix + resource.Name,
-			Namespace: resource.Namespace,
-			Labels:    map[string]string{owningGatewayLabel: resource.Name},
+			Name:        shorten(ciliumGatewayPrefix + resource.Name),
+			Namespace:   resource.Namespace,
+			Labels:      mergeMap(map[string]string{owningGatewayLabel: resource.Name}, labels),
+			Annotations: annotations,
 			OwnerReferences: []metav1.OwnerReference{
 				{
 					APIVersion: gatewayv1beta1.GroupVersion.String(),
 					Kind:       resource.Kind,
 					Name:       resource.Name,
 					UID:        types.UID(resource.UID),
+					Controller: model.AddressOf(true),
 				},
 			},
 		},
@@ -100,7 +120,7 @@ func getService(m *model.Model) *corev1.Service {
 func getEndpoints(resource model.FullyQualifiedResource) *corev1.Endpoints {
 	return &corev1.Endpoints{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      ciliumGatewayPrefix + resource.Name,
+			Name:      shorten(ciliumGatewayPrefix + resource.Name),
 			Namespace: resource.Namespace,
 			Labels:    map[string]string{owningGatewayLabel: resource.Name},
 			OwnerReferences: []metav1.OwnerReference{
@@ -109,6 +129,7 @@ func getEndpoints(resource model.FullyQualifiedResource) *corev1.Endpoints {
 					Kind:       resource.Kind,
 					Name:       resource.Name,
 					UID:        types.UID(resource.UID),
+					Controller: model.AddressOf(true),
 				},
 			},
 		},
@@ -118,8 +139,53 @@ func getEndpoints(resource model.FullyQualifiedResource) *corev1.Endpoints {
 				// to the lb map when the service has no backends.
 				// Related github issue https://github.com/cilium/cilium/issues/19262
 				Addresses: []corev1.EndpointAddress{{IP: "192.192.192.192"}}, // dummy
-				Ports:     []corev1.EndpointPort{{Port: 9999}},               //dummy
+				Ports:     []corev1.EndpointPort{{Port: 9999}},               // dummy
 			},
 		},
 	}
+}
+
+// shorten shortens the string to 63 characters.
+// this is the implicit required for all the resource naming in k8s.
+func shorten(s string) string {
+	if len(s) > 63 {
+		return s[:52] + "-" + encodeHash(hash(s))
+	}
+	return s
+}
+
+// encodeHash encodes the first 10 characters of the hex string.
+// https://github.com/kubernetes/kubernetes/blob/f0dcf0614036d8c3cd1c9f3b3cf8df4bb1d8e44e/staging/src/k8s.io/kubectl/pkg/util/hash/hash.go#L105
+func encodeHash(hex string) string {
+	enc := []rune(hex[:10])
+	for i := range enc {
+		switch enc[i] {
+		case '0':
+			enc[i] = 'g'
+		case '1':
+			enc[i] = 'h'
+		case '3':
+			enc[i] = 'k'
+		case 'a':
+			enc[i] = 'm'
+		case 'e':
+			enc[i] = 't'
+		}
+	}
+	return string(enc)
+}
+
+// hash hashes `data` with sha256 and returns the hex string
+func hash(data string) string {
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(data)))
+}
+
+func mergeMap(left, right map[string]string) map[string]string {
+	if left == nil {
+		return right
+	}
+	for key, value := range right {
+		left[key] = value
+	}
+	return left
 }

@@ -11,7 +11,7 @@
 #include "drop.h"
 #include "eps.h"
 
-#define ICMP6_TYPE_OFFSET (sizeof(struct ipv6hdr) + offsetof(struct icmp6hdr, icmp6_type))
+#define ICMP6_TYPE_OFFSET offsetof(struct icmp6hdr, icmp6_type)
 #define ICMP6_CSUM_OFFSET (sizeof(struct ipv6hdr) + offsetof(struct icmp6hdr, icmp6_cksum))
 #define ICMP6_ND_TARGET_OFFSET (sizeof(struct ipv6hdr) + sizeof(struct icmp6hdr))
 #define ICMP6_ND_OPTS (sizeof(struct ipv6hdr) + sizeof(struct icmp6hdr) + sizeof(struct in6_addr))
@@ -40,12 +40,9 @@
 #define ACTION_UNKNOWN_ICMP6_NS DROP_UNKNOWN_TARGET
 #endif
 
-static __always_inline __u8 icmp6_load_type(struct __ctx_buff *ctx, int nh_off)
+static __always_inline int icmp6_load_type(struct __ctx_buff *ctx, int l4_off, __u8 *type)
 {
-	__u8 type;
-
-	ctx_load_bytes(ctx, nh_off + ICMP6_TYPE_OFFSET, &type, sizeof(type));
-	return type;
+	return ctx_load_bytes(ctx, l4_off + ICMP6_TYPE_OFFSET, type, sizeof(*type));
 }
 
 static __always_inline int icmp6_send_reply(struct __ctx_buff *ctx, int nh_off)
@@ -266,10 +263,9 @@ __section_tail(CILIUM_MAP_CALLS, CILIUM_CALL_SEND_ICMP6_TIME_EXCEEDED)
 int tail_icmp6_send_time_exceeded(struct __ctx_buff *ctx __maybe_unused)
 {
 # ifdef HAVE_CHANGE_TAIL
-	int ret, nh_off = ctx_load_meta(ctx, 0);
+	int ret, nh_off = ctx_load_and_clear_meta(ctx, 0);
 	enum metric_dir direction  = (enum metric_dir)ctx_load_meta(ctx, 1);
 
-	ctx_store_meta(ctx, 0, 0);
 	ret = __icmp6_send_time_exceeded(ctx, nh_off);
 	if (IS_ERR(ret))
 		return send_drop_notify_error(ctx, 0, ret, CTX_ACT_DROP,
@@ -296,9 +292,7 @@ static __always_inline int icmp6_send_time_exceeded(struct __ctx_buff *ctx,
 	ctx_store_meta(ctx, 0, nh_off);
 	ctx_store_meta(ctx, 1, direction);
 
-	ep_tail_call(ctx, CILIUM_CALL_SEND_ICMP6_TIME_EXCEEDED);
-
-	return DROP_MISSED_TAIL_CALL;
+	return tail_call_internal(ctx, CILIUM_CALL_SEND_ICMP6_TIME_EXCEEDED, NULL);
 }
 
 static __always_inline int __icmp6_handle_ns(struct __ctx_buff *ctx, int nh_off)
@@ -314,7 +308,7 @@ static __always_inline int __icmp6_handle_ns(struct __ctx_buff *ctx, int nh_off)
 
 	BPF_V6(router, ROUTER_IP);
 
-	if (ipv6_addrcmp(&target, &router) == 0) {
+	if (ipv6_addr_equals(&target, &router)) {
 		union macaddr router_mac = NODE_MAC;
 
 		return send_icmp6_ndisc_adv(ctx, nh_off, &router_mac, true);
@@ -335,10 +329,9 @@ static __always_inline int __icmp6_handle_ns(struct __ctx_buff *ctx, int nh_off)
 __section_tail(CILIUM_MAP_CALLS, CILIUM_CALL_HANDLE_ICMP6_NS)
 int tail_icmp6_handle_ns(struct __ctx_buff *ctx)
 {
-	int ret, nh_off = ctx_load_meta(ctx, 0);
+	int ret, nh_off = ctx_load_and_clear_meta(ctx, 0);
 	enum metric_dir direction  = (enum metric_dir)ctx_load_meta(ctx, 1);
 
-	ctx_store_meta(ctx, 0, 0);
 	ret = __icmp6_handle_ns(ctx, nh_off);
 	if (IS_ERR(ret))
 		return send_drop_notify_error(ctx, 0, ret, CTX_ACT_DROP, direction);
@@ -351,39 +344,46 @@ int tail_icmp6_handle_ns(struct __ctx_buff *ctx)
  * @ctx:	socket buffer
  * @nh_off:	offset to the IPv6 header
  * @direction:  direction of packet(ingress or egress)
+ * @ext_err:	extended error value
  *
  * Respond to ICMPv6 Neighbour Solicitation
  *
  * NOTE: This is terminal function and will cause the BPF program to exit
  */
 static __always_inline int icmp6_handle_ns(struct __ctx_buff *ctx, int nh_off,
-					   enum metric_dir direction)
+					   enum metric_dir direction,
+					   __s8 *ext_err)
 {
 	ctx_store_meta(ctx, 0, nh_off);
 	ctx_store_meta(ctx, 1, direction);
 
-	ep_tail_call(ctx, CILIUM_CALL_HANDLE_ICMP6_NS);
-
-	return DROP_MISSED_TAIL_CALL;
+	return tail_call_internal(ctx, CILIUM_CALL_HANDLE_ICMP6_NS, ext_err);
 }
 
 static __always_inline bool
 is_icmp6_ndp(struct __ctx_buff *ctx, const struct ipv6hdr *ip6, int nh_off)
 {
-	__u8 type = icmp6_load_type(ctx, nh_off);
+	__u8 type;
+
+	if (icmp6_load_type(ctx, nh_off + sizeof(struct ipv6hdr), &type) < 0)
+		return false;
 
 	return ip6->nexthdr == IPPROTO_ICMPV6 &&
 	       (type == ICMP6_NS_MSG_TYPE || type == ICMP6_NA_MSG_TYPE);
 }
 
 static __always_inline int icmp6_ndp_handle(struct __ctx_buff *ctx, int nh_off,
-					    enum metric_dir direction)
+					    enum metric_dir direction,
+					    __s8 *ext_err)
 {
-	__u8 type = icmp6_load_type(ctx, nh_off);
-	cilium_dbg(ctx, DBG_ICMP6_HANDLE, type, 0);
+	__u8 type;
 
+	if (icmp6_load_type(ctx, nh_off + sizeof(struct ipv6hdr), &type) < 0)
+		return DROP_INVALID;
+
+	cilium_dbg(ctx, DBG_ICMP6_HANDLE, type, 0);
 	if (type == ICMP6_NS_MSG_TYPE)
-		return icmp6_handle_ns(ctx, nh_off, direction);
+		return icmp6_handle_ns(ctx, nh_off, direction, ext_err);
 
 	/* All branching above will have issued a tail call, all
 	 * remaining traffic is subject to forwarding to containers.
@@ -392,15 +392,13 @@ static __always_inline int icmp6_ndp_handle(struct __ctx_buff *ctx, int nh_off,
 }
 
 static __always_inline int
-icmp6_host_handle(struct __ctx_buff *ctx __maybe_unused)
+icmp6_host_handle(struct __ctx_buff *ctx, int l4_off)
 {
-	__u8 type __maybe_unused;
+	__u8 type;
 
-	type = icmp6_load_type(ctx, ETH_HLEN);
-	if (type == ICMP6_NS_MSG_TYPE)
-		return icmp6_handle_ns(ctx, ETH_HLEN, METRIC_INGRESS);
+	if (icmp6_load_type(ctx, l4_off, &type) < 0)
+		return DROP_INVALID;
 
-#ifdef ENABLE_HOST_FIREWALL
 	/* When the host firewall is enabled, we drop and allow ICMPv6 messages
 	 * according to RFC4890, except for echo request and reply messages which
 	 * are handled by host policies and can be dropped.
@@ -420,7 +418,7 @@ icmp6_host_handle(struct __ctx_buff *ctx __maybe_unused)
 	 * |      ICMPv6-mult-list-done      |   CTX_ACT_OK    |  132 |
 	 * |      ICMPv6-router-solici       |   CTX_ACT_OK    |  133 |
 	 * |      ICMPv6-router-advert       |   CTX_ACT_OK    |  134 |
-	 * |     ICMPv6-neighbor-solicit     | icmp6_handle_ns |  135 |
+	 * |     ICMPv6-neighbor-solicit     |   CTX_ACT_OK    |  135 |
 	 * |      ICMPv6-neighbor-advert     |   CTX_ACT_OK    |  136 |
 	 * |     ICMPv6-redirect-message     |  CTX_ACT_DROP   |  137 |
 	 * |      ICMPv6-router-renumber     |   CTX_ACT_OK    |  138 |
@@ -448,6 +446,9 @@ icmp6_host_handle(struct __ctx_buff *ctx __maybe_unused)
 	 * |       ICMPv6-unassigned         |  CTX_ACT_DROP   |      |
 	 */
 
+	if (type == ICMP6_NS_MSG_TYPE)
+		return CTX_ACT_OK;
+
 	if (type == ICMP6_ECHO_REQUEST_MSG_TYPE || type == ICMP6_ECHO_REPLY_MSG_TYPE)
 		/* Decision is deferred to the host policies. */
 		return CTX_ACT_OK;
@@ -459,9 +460,6 @@ icmp6_host_handle(struct __ctx_buff *ctx __maybe_unused)
 		(ICMP6_MULT_RA_MSG_TYPE <= type && type <= ICMP6_MULT_RT_MSG_TYPE))
 		return SKIP_HOST_FIREWALL;
 	return DROP_FORBIDDEN_ICMP6;
-#else
-	return CTX_ACT_OK;
-#endif /* ENABLE_HOST_FIREWALL */
 }
 
 #endif

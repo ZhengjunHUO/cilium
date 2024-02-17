@@ -31,25 +31,17 @@ func (c *Client) DescribeHostReservations(ctx context.Context, params *DescribeH
 type DescribeHostReservationsInput struct {
 
 	// The filters.
-	//
-	// * instance-family - The instance family (for example, m4).
-	//
-	// *
-	// payment-option - The payment option (NoUpfront | PartialUpfront |
-	// AllUpfront).
-	//
-	// * state - The state of the reservation (payment-pending |
-	// payment-failed | active | retired).
-	//
-	// * tag: - The key/value combination of a tag
-	// assigned to the resource. Use the tag key in the filter name and the tag value
-	// as the filter value. For example, to find all resources that have a tag with the
-	// key Owner and the value TeamA, specify tag:Owner for the filter name and TeamA
-	// for the filter value.
-	//
-	// * tag-key - The key of a tag assigned to the resource.
-	// Use this filter to find all resources assigned a tag with a specific key,
-	// regardless of the tag value.
+	//   - instance-family - The instance family (for example, m4 ).
+	//   - payment-option - The payment option ( NoUpfront | PartialUpfront |
+	//   AllUpfront ).
+	//   - state - The state of the reservation ( payment-pending | payment-failed |
+	//   active | retired ).
+	//   - tag: - The key/value combination of a tag assigned to the resource. Use the
+	//   tag key in the filter name and the tag value as the filter value. For example,
+	//   to find all resources that have a tag with the key Owner and the value TeamA ,
+	//   specify tag:Owner for the filter name and TeamA for the filter value.
+	//   - tag-key - The key of a tag assigned to the resource. Use this filter to find
+	//   all resources assigned a tag with a specific key, regardless of the tag value.
 	Filter []types.Filter
 
 	// The host reservation IDs.
@@ -83,12 +75,22 @@ type DescribeHostReservationsOutput struct {
 }
 
 func (c *Client) addOperationDescribeHostReservationsMiddlewares(stack *middleware.Stack, options Options) (err error) {
+	if err := stack.Serialize.Add(&setOperationInputMiddleware{}, middleware.After); err != nil {
+		return err
+	}
 	err = stack.Serialize.Add(&awsEc2query_serializeOpDescribeHostReservations{}, middleware.After)
 	if err != nil {
 		return err
 	}
 	err = stack.Deserialize.Add(&awsEc2query_deserializeOpDescribeHostReservations{}, middleware.After)
 	if err != nil {
+		return err
+	}
+	if err := addProtocolFinalizerMiddlewares(stack, options, "DescribeHostReservations"); err != nil {
+		return fmt.Errorf("add protocol finalizers: %v", err)
+	}
+
+	if err = addlegacyEndpointContextSetter(stack, options); err != nil {
 		return err
 	}
 	if err = addSetLoggerMiddleware(stack, options); err != nil {
@@ -109,16 +111,13 @@ func (c *Client) addOperationDescribeHostReservationsMiddlewares(stack *middlewa
 	if err = addRetryMiddlewares(stack, options); err != nil {
 		return err
 	}
-	if err = addHTTPSignerV4Middleware(stack, options); err != nil {
-		return err
-	}
 	if err = awsmiddleware.AddRawResponseToMetadata(stack); err != nil {
 		return err
 	}
 	if err = awsmiddleware.AddRecordResponseTiming(stack); err != nil {
 		return err
 	}
-	if err = addClientUserAgent(stack); err != nil {
+	if err = addClientUserAgent(stack, options); err != nil {
 		return err
 	}
 	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
@@ -127,7 +126,13 @@ func (c *Client) addOperationDescribeHostReservationsMiddlewares(stack *middlewa
 	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
 		return err
 	}
+	if err = addSetLegacyContextSigningOptionsMiddleware(stack); err != nil {
+		return err
+	}
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opDescribeHostReservations(options.Region), middleware.Before); err != nil {
+		return err
+	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
@@ -137,6 +142,9 @@ func (c *Client) addOperationDescribeHostReservationsMiddlewares(stack *middlewa
 		return err
 	}
 	if err = addRequestResponseLogging(stack, options); err != nil {
+		return err
+	}
+	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
 		return err
 	}
 	return nil
@@ -241,7 +249,6 @@ func newServiceMetadataMiddleware_opDescribeHostReservations(region string) *aws
 	return &awsmiddleware.RegisterServiceMetadata{
 		Region:        region,
 		ServiceID:     ServiceID,
-		SigningName:   "ec2",
 		OperationName: "DescribeHostReservations",
 	}
 }

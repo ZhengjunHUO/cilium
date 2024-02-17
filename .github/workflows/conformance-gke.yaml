@@ -1,27 +1,25 @@
-name: ConformanceGKE (ci-gke)
+name: Conformance GKE (ci-gke)
 
 # Any change in triggers needs to be reflected in the concurrency group.
 on:
-  issue_comment:
-    types:
-      - created
+  workflow_dispatch:
+    inputs:
+      PR-number:
+        description: "Pull request number."
+        required: true
+      context-ref:
+        description: "Context in which the workflow runs. If PR is from a fork, will be the PR target branch (general case). If PR is NOT from a fork, will be the PR branch itself (this allows committers to test changes to workflows directly from PRs)."
+        required: true
+      SHA:
+        description: "SHA under test (head of the PR branch)."
+        required: true
+      extra-args:
+        description: "[JSON object] Arbitrary arguments passed from the trigger comment via regex capture group. Parse with 'fromJson(inputs.extra-args).argName' in workflow."
+        required: false
+        default: '{}'
   # Run every 6 hours
   schedule:
     - cron:  '0 2/6 * * *'
-  ### FOR TESTING PURPOSES
-  # This workflow runs in the context of `main`, and ignores changes to
-  # workflow files in PRs. For testing changes to this workflow from a PR:
-  # - Make sure the PR uses a branch from the base repository (requires write
-  #   privileges). It will not work with a branch from a fork (missing secrets).
-  # - Uncomment the `pull_request` event below, commit separately with a `DO
-  #   NOT MERGE` message, and push to the PR. As long as the commit is present,
-  #   any push to the PR will trigger this workflow.
-  # - Don't forget to remove the `DO NOT MERGE` commit once satisfied. The run
-  #   will disappear from the PR checks: please provide a direct link to the
-  #   successful workflow run (can be found from Actions tab) in a comment.
-  #
-  # pull_request: {}
-  ###
 
 # By specifying the access of one of the scopes, all of those that are not
 # specified are set to 'none'.
@@ -30,8 +28,10 @@ permissions:
   contents: read
   # To allow retrieving information from the PR API
   pull-requests: read
-  # So that Sibz/github-status-action can write into the status API
+  # To be able to set commit status
   statuses: write
+  # To be able to request the JWT from GitHub's OIDC provider
+  id-token: write
 
 concurrency:
   # Structure:
@@ -39,180 +39,154 @@ concurrency:
   # - Event type
   # - A unique identifier depending on event type:
   #   - schedule: SHA
-  #   - issue_comment: PR number
-  #   - pull_request: PR number
+  #   - workflow_dispatch: PR number
   #
   # This structure ensures a unique concurrency group name is generated for each
-  # type of testing:
-  # - schedule: {name} schedule {SHA}
-  # - issue_comment: {name} issue_comment {PR number}
-  # - pull_request: {name} pull_request {PR number}
-  #
-  # Note: for `issue_comment` triggers, we additionally need to filter out based
-  # on comment content, otherwise any comment will interrupt workflow runs.
+  # type of testing, such that re-runs will cancel the previous run.
   group: |
     ${{ github.workflow }}
     ${{ github.event_name }}
     ${{
       (github.event_name == 'schedule' && github.sha) ||
-      (github.event_name == 'issue_comment' && (
-        github.event.comment.body == '/ci-gke' ||
-        github.event.comment.body == '/test'
-      ) && github.event.issue.number) ||
-      (github.event_name == 'pull_request' && github.event.pull_request.number)
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.PR-number)
     }}
   cancel-in-progress: true
 
 env:
-  clusterName: ${{ github.repository_owner }}-${{ github.event.repository.name }}-${{ github.run_id }}
-  zone: us-west2-a
-  # renovate: datasource=github-releases depName=cilium/cilium-cli
-  cilium_cli_version: v0.13.2
+  clusterName: ${{ github.repository_owner }}-${{ github.event.repository.name }}-${{ github.run_id }}-${{ github.run_attempt }}
+  cilium_cli_ci_version:
+  CILIUM_CLI_MODE: helm
   check_url: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
   USE_GKE_GCLOUD_AUTH_PLUGIN: True
-  k8s_version: 1.24
 
 jobs:
-  check_changes:
-    name: Deduce required tests from code changes
-    if: |
-      (github.event_name == 'issue_comment' && (
-        github.event.comment.body == '/ci-gke' ||
-        github.event.comment.body == '/test'
-      )) ||
-      github.event_name == 'schedule' ||
-      github.event_name == 'pull_request'
+  commit-status-start:
+    name: Commit Status Start
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set initial commit status
+        uses: myrotvorets/set-commit-status-action@38f3f27c7d52fb381273e95542f07f0fba301307 # v2.0.0  
+        with:
+          sha: ${{ inputs.SHA || github.sha }}
+
+  generate-matrix:
+    name: Generate Matrix
     runs-on: ubuntu-latest
     outputs:
-      tested: ${{ steps.tested-tree.outputs.src }}
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
-      # Because we run on issue comments, we need to checkout the code for
-      # paths-filter to work.
-      - name: Checkout code
-        if: ${{ github.event.issue.pull_request }}
-        uses: actions/checkout@8e5e7e5ab8b370d6c329ec480221332ada57f0ab # v3.5.2
+      - name: Checkout context ref (trusted)
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
         with:
+          ref: ${{ inputs.context-ref || github.sha }}
           persist-credentials: false
-      - name: Retrieve pull request's base and head
-        if: ${{ github.event.issue.pull_request }}
-        id: pr
-        run: |
-          curl ${{ github.event.issue.pull_request.url }} > pr.json
-          echo "base=$(jq -r '.base.sha' pr.json)" >> $GITHUB_OUTPUT
-          echo "head=$(jq -r '.head.sha' pr.json)" >> $GITHUB_OUTPUT
-      - name: Check code changes
-        if: ${{ github.event.issue.pull_request }}
-        uses: dorny/paths-filter@4512585405083f25c027a35db413c2b3b9006d50 # v2.11.1
-        id: tested-tree
-        with:
-          base: ${{ steps.pr.outputs.base }}
-          ref: ${{ steps.pr.outputs.head }}
-          filters: |
-            src:
-              - '!(test|Documentation)/**'
 
-  # This job is skipped when the workflow was triggered with the generic `/test`
-  # trigger if the only modified files were under `test/` or `Documentation/`.
+      - name: Convert YAML to JSON
+        run: |
+          work_dir=".github/actions/gke"
+          destination_directory="/tmp/generated/gke"
+          mkdir -p "${destination_directory}"
+
+          ls ${work_dir}/*.yaml | grep -v 'schema\|classic' | while read file;do
+            filename=$(basename "$file")
+            new_filename="${filename%.yaml}.json"
+            yq -o=json "${file}" | jq . > "${destination_directory}/${new_filename}"
+          done
+          
+          # Merge 2 files into one
+          jq -s "add" ${destination_directory}/*.json > "${destination_directory}/gke.json"
+
+      - name: Generate Matrix
+        id: set-matrix
+        run: |
+          cd /tmp/generated/gke
+
+          # Use complete matrix in case of scheduled run
+          # main -> event_name = schedule
+          # other stable branches -> PR-number starting with v (e.g. v1.14)
+          if [[ "${{ github.event_name }}" == "schedule" || "${{ inputs.PR-number }}" == v* ]];then
+            cp gke.json /tmp/matrix.json
+          else
+            jq '{ "k8s": [ .k8s[] | select(.default) ], "config": .config}' gke.json > /tmp/matrix.json
+          fi
+
+          echo "Generated matrix:"
+          cat /tmp/matrix.json
+          echo "matrix=$(jq -c . < /tmp/matrix.json)" >> $GITHUB_OUTPUT
+
   installation-and-connectivity:
-    needs: check_changes
-    if: |
-      (github.event_name == 'issue_comment' && (
-        github.event.comment.body == '/ci-gke' ||
-        (github.event.comment.body == '/test' && needs.check_changes.outputs.tested == 'true')
-      )) ||
-      github.event_name == 'schedule' ||
-      github.event_name == 'pull_request'
+    name: Installation and Connectivity Test
+    needs: generate-matrix
     runs-on: ubuntu-latest
     timeout-minutes: 75
+    env:
+      job_name: "Installation and Connectivity Test"
+      preemptible: ${{ github.event_name != 'schedule' && '--preemptible' || '' }}
+    strategy:
+      fail-fast: false
+      matrix: ${{fromJson(needs.generate-matrix.outputs.matrix)}}
+
     steps:
-      - name: Checkout main branch to access local actions
-        uses: actions/checkout@8e5e7e5ab8b370d6c329ec480221332ada57f0ab # v3.5.2
+      - name: Checkout context ref (trusted)
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
         with:
-          ref: ${{ github.event.repository.default_branch }}
+          ref: ${{ inputs.context-ref || github.sha }}
           persist-credentials: false
+
       - name: Set Environment Variables
         uses: ./.github/actions/set-env-variables
+
+      - name: Get Cilium's default values
+        id: default_vars
+        uses: ./.github/actions/helm-default
+        with:
+          image-tag: ${{ inputs.SHA }}
+          chart-dir: ./untrusted/install/kubernetes/cilium
 
       - name: Set up job variables
         id: vars
         run: |
-          if [ ${{ github.event.issue.pull_request || github.event.pull_request }} ]; then
-            PR_API_JSON=$(curl \
-              -H "Accept: application/vnd.github.v3+json" \
-              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-              ${{ github.event.issue.pull_request.url || github.event.pull_request.url }})
-            SHA=$(echo "$PR_API_JSON" | jq -r ".head.sha")
-            OWNER=$(echo "$PR_API_JSON" | jq -r ".number")
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            OWNER="${{ inputs.PR-number }}"
           else
-            SHA=${{ github.sha }}
-            OWNER=${{ github.sha }}
+            OWNER="${{ github.ref_name }}"
+            OWNER="${OWNER/./-}"
           fi
 
-          CILIUM_INSTALL_DEFAULTS="--cluster-name=${{ env.clusterName }} \
-            --chart-directory=install/kubernetes/cilium \
-            --helm-set=image.repository=quay.io/${{ env.QUAY_ORGANIZATION_DEV }}/cilium-ci \
-            --helm-set=image.useDigest=false \
-            --helm-set=image.tag=${SHA} \
-            --helm-set=operator.image.repository=quay.io/${{ env.QUAY_ORGANIZATION_DEV }}/operator \
-            --helm-set=operator.image.suffix=-ci \
-            --helm-set=operator.image.tag=${SHA} \
-            --helm-set=operator.image.useDigest=false \
-            --helm-set=clustermesh.apiserver.image.repository=quay.io/${{ env.QUAY_ORGANIZATION_DEV }}/clustermesh-apiserver-ci \
-            --helm-set=clustermesh.apiserver.image.tag=${SHA} \
-            --helm-set=clustermesh.apiserver.image.useDigest=false \
-            --helm-set=hubble.relay.image.repository=quay.io/${{ env.QUAY_ORGANIZATION_DEV }}/hubble-relay-ci \
-            --helm-set=hubble.relay.image.tag=${SHA} \
+          CILIUM_INSTALL_DEFAULTS="${{ steps.default_vars.outputs.cilium_install_defaults }} \
+            --cluster-name=${{ env.clusterName }}-${{ matrix.config.index }} \
+            --helm-set=hubble.relay.enabled=true \
             --helm-set=agentNotReadyTaintKey=ignore-taint.cluster-autoscaler.kubernetes.io/cilium-agent-not-ready \
             --helm-set loadBalancer.l7.backend=envoy \
             --helm-set tls.secretsBackend=k8s \
-            --wait=false \
-            --rollback=false \
-            --config monitor-aggregation=none \
-            --version="
-          HUBBLE_ENABLE_DEFAULTS="--chart-directory=install/kubernetes/cilium \
-            --relay-image=quay.io/${{ env.QUAY_ORGANIZATION_DEV }}/hubble-relay-ci:${SHA} \
-            --relay-version=${SHA}"
+            --wait=false"
+
           CONNECTIVITY_TEST_DEFAULTS="--flow-validation=disabled --hubble=false --collect-sysdump-on-failure \
             --external-target google.com --external-cidr 8.0.0.0/8 --external-ip 8.8.8.8 --external-other-ip 8.8.4.4"
           echo cilium_install_defaults=${CILIUM_INSTALL_DEFAULTS} >> $GITHUB_OUTPUT
           echo hubble_enable_defaults=${HUBBLE_ENABLE_DEFAULTS} >> $GITHUB_OUTPUT
           echo connectivity_test_defaults=${CONNECTIVITY_TEST_DEFAULTS} >> $GITHUB_OUTPUT
-          echo sha=${SHA} >> $GITHUB_OUTPUT
+          echo sha=${{ steps.default_vars.outputs.sha }} >> $GITHUB_OUTPUT
           echo owner=${OWNER} >> $GITHUB_OUTPUT
 
-      - name: Set commit status to pending
-        uses: Sibz/github-status-action@650dd1a882a76dbbbc4576fb5974b8d22f29847f # v1.1.6
-        with:
-          authToken: ${{ secrets.GITHUB_TOKEN }}
-          sha: ${{ steps.vars.outputs.sha }}
-          context: ${{ github.workflow }}
-          description: Connectivity test in progress...
-          state: pending
-          target_url: ${{ env.check_url }}
-
-      # Checkout source code to install Cilium using local Helm chart.
-      - name: Checkout code
-        uses: actions/checkout@8e5e7e5ab8b370d6c329ec480221332ada57f0ab # v3.5.2
-        with:
-          ref: ${{ steps.vars.outputs.sha }}
-          persist-credentials: false
-
       - name: Install Cilium CLI
-        run: |
-          curl -sSL --remote-name-all https://github.com/cilium/cilium-cli/releases/download/${{ env.cilium_cli_version }}/cilium-linux-amd64.tar.gz{,.sha256sum}
-          sha256sum --check cilium-linux-amd64.tar.gz.sha256sum
-          sudo tar xzvfC cilium-linux-amd64.tar.gz /usr/local/bin
-          rm cilium-linux-amd64.tar.gz{,.sha256sum}
-          cilium version
+        uses: cilium/cilium-cli@b0955d62f5d0fd22449c568c6be921f46b66f603 # v0.15.22
+        with:
+          repository: ${{ env.CILIUM_CLI_RELEASE_REPO }}
+          release-version: ${{ env.CILIUM_CLI_VERSION }}
+          ci-version: ${{ env.cilium_cli_ci_version }}
 
       - name: Set up gcloud credentials
         id: 'auth'
-        uses: google-github-actions/auth@e8df18b60c5dd38ba618c121b779307266153fbf # v1.1.0
+        uses: google-github-actions/auth@a6e2e39c0a0331da29f7fd2c2a20a427e8d3ad1f # v2.1.1
         with:
-          credentials_json: '${{ secrets.GCP_PR_SA_KEY }}'
+          workload_identity_provider: ${{ secrets.GCP_PR_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_PR_SA }}
+          create_credentials_file: true
+          export_environment_variables: true
 
       - name: Set up gcloud CLI
-        uses: google-github-actions/setup-gcloud@62d4898025f6041e16b1068643bfc5a696863587 # v1.1.0
+        uses: google-github-actions/setup-gcloud@98ddc00a17442e89a24bbf282954a3b65ce6d200 # v2.1.0
         with:
           project_id: ${{ secrets.GCP_PROJECT_ID }}
           version: "405.0.0"
@@ -227,118 +201,59 @@ jobs:
 
       - name: Create GKE cluster
         run: |
-          gcloud container clusters create ${{ env.clusterName }} \
+          gcloud container clusters create ${{ env.clusterName }}-${{ matrix.config.index }} \
             --labels "usage=${{ github.repository_owner }}-${{ github.event.repository.name }},owner=${{ steps.vars.outputs.owner }}" \
-            --zone ${{ env.zone }} \
-            --cluster-version ${{ env.k8s_version }} \
+            --zone ${{ matrix.k8s.zone }} \
+            --cluster-version ${{ matrix.k8s.version }} \
             --enable-ip-alias \
-            --create-subnetwork="" \
+            --create-subnetwork="range=/26" \
+            --cluster-ipv4-cidr="/21" \
+            --services-ipv4-cidr="/24" \
             --image-type COS_CONTAINERD \
             --num-nodes 2 \
             --machine-type e2-custom-2-4096 \
             --disk-type pd-standard \
-            --disk-size 10GB \
+            --disk-size 20GB \
             --node-taints ignore-taint.cluster-autoscaler.kubernetes.io/cilium-agent-not-ready=true:NoExecute \
-            --preemptible
+            ${{ env.preemptible }}
 
       - name: Get cluster credentials
         run: |
-          gcloud container clusters get-credentials ${{ env.clusterName }} --zone ${{ env.zone }}
+          gcloud container clusters get-credentials ${{ env.clusterName }}-${{ matrix.config.index }} --zone ${{ matrix.k8s.zone }}
+
+      # Warning: since this is a privileged workflow, subsequent workflow job
+      # steps must take care not to execute untrusted code.
+      - name: Checkout pull request branch (NOT TRUSTED)
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        with:
+          ref: ${{ steps.vars.outputs.sha }}
+          persist-credentials: false
+          path: untrusted
+          sparse-checkout: |
+            install/kubernetes/cilium
 
       - name: Wait for images to be available
-        timeout-minutes: 10
+        timeout-minutes: 30
         shell: bash
         run: |
           for image in cilium-ci operator-generic-ci hubble-relay-ci ; do
             until docker manifest inspect quay.io/${{ env.QUAY_ORGANIZATION_DEV }}/$image:${{ steps.vars.outputs.sha }} &> /dev/null; do sleep 45s; done
           done
 
-      - name: Install Cilium
-        run: |
-          cilium install ${{ steps.vars.outputs.cilium_install_defaults }}
-
-      - name: Enable Relay
-        run: |
-          cilium hubble enable ${{ steps.vars.outputs.hubble_enable_defaults }}
-
-      - name: Port forward Relay
-        run: |
-          cilium hubble port-forward&
-          sleep 10s
-          [[ $(pgrep -f "cilium.*hubble.*port-forward|kubectl.*port-forward.*hubble-relay" | wc -l) == 2 ]]
-
-      - name: Run connectivity test
-        run: |
-          cilium connectivity test ${{ steps.vars.outputs.connectivity_test_defaults }}
-
-      - name: Clean up Cilium
-        run: |
-          pkill -f "cilium.*hubble.*port-forward|kubectl.*port-forward.*hubble-relay"
-          cilium uninstall --chart-directory=install/kubernetes/cilium --wait
-
-      - name: Install Cilium with tunnel datapath
-        run: |
-          cilium install ${{ steps.vars.outputs.cilium_install_defaults }} \
-            --datapath-mode=tunnel
-
-      - name: Enable Relay
-        run: |
-          cilium hubble enable ${{ steps.vars.outputs.hubble_enable_defaults }}
-
-      - name: Port forward Relay
-        run: |
-          cilium hubble port-forward&
-          sleep 10s
-          [[ $(pgrep -f "cilium.*hubble.*port-forward|kubectl.*port-forward.*hubble-relay" | wc -l) == 2 ]]
-
-      - name: Run connectivity test
-        run: |
-          cilium connectivity test ${{ steps.vars.outputs.connectivity_test_defaults }} --force-deploy --test-namespace cilium-test-tunnel 
-        # --test-namespace cilium-test-tunnel added for mitigating test flake until the issue is solved https://github.com/cilium/cilium/issues/22368
-
-      - name: Clean up Cilium
-        run: |
-          pkill -f "cilium.*hubble.*port-forward|kubectl.*port-forward.*hubble-relay"
-          cilium uninstall --chart-directory=install/kubernetes/cilium --test-namespace cilium-test-tunnel
-        # --wait removed and --test-namespace cilium-test-tunnel added for mitigating test flake until the issue is solved https://github.com/cilium/cilium/issues/22368
-
       - name: Create custom IPsec secret
+        if: ${{ matrix.config.type == 'ipsec' || matrix.config.type == 'tunnel-ipsec' }}
         run: |
           kubectl create -n kube-system secret generic cilium-ipsec-keys --from-literal=keys="15 rfc4106(gcm(aes)) $(echo $(dd if=/dev/urandom count=20 bs=1 2> /dev/null | xxd -p -c 64)) 128"
 
-      - name: Install Cilium with encryption
+      - name: Install Cilium
+        id: install-cilium
         run: |
-          cilium install ${{ steps.vars.outputs.cilium_install_defaults }} \
-            --encryption=ipsec
+          cilium install ${{ steps.vars.outputs.cilium_install_defaults }} ${{ matrix.config.cilium-install-opts }}
 
-      - name: Enable Relay
+      - name: Wait for Cilium to be ready
         run: |
-          cilium hubble enable ${{ steps.vars.outputs.hubble_enable_defaults }}
-
-      - name: Port forward Relay
-        run: |
-          cilium hubble port-forward&
-          sleep 10s
-          [[ $(pgrep -f "cilium.*hubble.*port-forward|kubectl.*port-forward.*hubble-relay" | wc -l) == 2 ]]
-
-      - name: Run connectivity test
-        run: |
-          cilium connectivity test ${{ steps.vars.outputs.connectivity_test_defaults }} --force-deploy
-
-      - name: Clean up Cilium
-        run: |
-          pkill -f "cilium.*hubble.*port-forward|kubectl.*port-forward.*hubble-relay"
-          cilium uninstall --chart-directory=install/kubernetes/cilium --wait
-
-      - name: Install Cilium with encryption and tunnel datapath
-        run: |
-          cilium install ${{ steps.vars.outputs.cilium_install_defaults }} \
-            --encryption=ipsec \
-            --datapath-mode=tunnel
-
-      - name: Enable Relay
-        run: |
-          cilium hubble enable ${{ steps.vars.outputs.hubble_enable_defaults }}
+          cilium status --wait --wait-duration=10m
+          kubectl get pods -n kube-system
 
       - name: Port forward Relay
         run: |
@@ -346,64 +261,84 @@ jobs:
           sleep 10s
           [[ $(pgrep -f "cilium.*hubble.*port-forward|kubectl.*port-forward.*hubble-relay" | wc -l) == 2 ]]
 
-      - name: Run connectivity test
+      - name: Make JUnit report directory
         run: |
-          cilium connectivity test ${{ steps.vars.outputs.connectivity_test_defaults }} --force-deploy
+          mkdir -p cilium-junits
+
+      - name: Run connectivity test (${{ matrix.k8s.version }}, ${{ matrix.config.index }}, ${{ matrix.config.type }})
+        run: |
+          cilium connectivity test ${{ steps.vars.outputs.connectivity_test_defaults }} \
+          --junit-file "cilium-junits/${{ env.job_name }} (${{ join(matrix.k8s.*, ', ') }}, ${{ join(matrix.config.*, ', ') }}).xml" \
+          --junit-property github_job_step="Run connectivity test (${{ matrix.k8s.version }}, ${{ matrix.config.index }}, ${{ matrix.config.type }})"
 
       - name: Post-test information gathering
-        if: ${{ !success() }}
+        if: ${{ !success() && steps.install-cilium.outcome != 'skipped' }}
         run: |
           kubectl get pods --all-namespaces -o wide
           cilium status
-          cilium sysdump --output-filename cilium-sysdump-final
+          cilium sysdump --output-filename cilium-sysdump-final-${{ matrix.k8s.version }}-${{ matrix.config.index }}-${{ matrix.config.type }}
         shell: bash {0} # Disable default fail-fast behaviour so that all commands run independently
 
       - name: Clean up GKE
         if: ${{ always() }}
         run: |
-          while [ "$(gcloud container operations list --filter="status=RUNNING AND targetLink~${{ env.clusterName }}" --format="value(name)")" ];do
+          while [ "$(gcloud container operations list --zone ${{ matrix.k8s.zone }} --filter="status=RUNNING AND targetLink~${{ env.clusterName }}-${{ matrix.config.index }}" --format="value(name)")" ];do
             echo "cluster has an ongoing operation, waiting for all operations to finish"; sleep 15
           done
-          gcloud container clusters delete ${{ env.clusterName }} --zone ${{ env.zone }} --quiet --async
+          gcloud container clusters delete ${{ env.clusterName }}-${{ matrix.config.index }} --zone ${{ matrix.k8s.zone }} --quiet --async
         shell: bash {0} # Disable default fail-fast behavior so that all commands run independently
 
       - name: Upload artifacts
         if: ${{ !success() }}
-        uses: actions/upload-artifact@0b7f8abb1508181956e8e162db84b466c27e18ce # v3.1.2
+        uses: actions/upload-artifact@5d5d22a31266ced268874388b861e4b58bb5c2f3 # v4.3.1
+        with:
+          name: cilium-sysdumps-${{ matrix.config.index }}-${{ matrix.k8s.vmIndex }}
+          path: cilium-sysdump-*.zip
+
+      - name: Upload JUnits [junit]
+        if: ${{ always() }}
+        uses: actions/upload-artifact@5d5d22a31266ced268874388b861e4b58bb5c2f3 # v4.3.1
+        with:
+          name: cilium-junits-${{ matrix.config.index }}-${{ matrix.k8s.vmIndex }}
+          path: cilium-junits/*.xml
+
+      - name: Publish Test Results As GitHub Summary
+        if: ${{ always() }}
+        uses: aanm/junit2md@332ebf0fddd34e91b03a832cfafaa826306558f9 # v0.0.3
+        with:
+          junit-directory: "cilium-junits"
+
+  merge-upload:
+    if: ${{ always() }}
+    name: Merge and Upload Artifacts
+    runs-on: ubuntu-latest
+    needs: installation-and-connectivity
+    steps:
+      - name: Merge Sysdumps
+        if: ${{ needs.installation-and-connectivity.result == 'failure' }}
+        uses: actions/upload-artifact/merge@5d5d22a31266ced268874388b861e4b58bb5c2f3 # v4.3.1
         with:
           name: cilium-sysdumps
-          path: cilium-sysdump-*.zip
+          pattern: cilium-sysdumps-*
           retention-days: 5
-
-      - name: Set commit status to success
-        if: ${{ success() }}
-        uses: Sibz/github-status-action@650dd1a882a76dbbbc4576fb5974b8d22f29847f # v1.1.6
+          delete-merged: true
+        continue-on-error: true
+      - name: Merge JUnits
+        uses: actions/upload-artifact/merge@5d5d22a31266ced268874388b861e4b58bb5c2f3 # v4.3.1
         with:
-          authToken: ${{ secrets.GITHUB_TOKEN }}
-          sha: ${{ steps.vars.outputs.sha }}
-          context: ${{ github.workflow }}
-          description: Connectivity test successful
-          state: success
-          target_url: ${{ env.check_url }}
+          name: cilium-junits
+          pattern: cilium-junits-*
+          retention-days: 5
+          delete-merged: true
 
-      - name: Set commit status to failure
-        if: ${{ failure() }}
-        uses: Sibz/github-status-action@650dd1a882a76dbbbc4576fb5974b8d22f29847f # v1.1.6
+  commit-status-final:
+    if: ${{ always() }}
+    name: Commit Status Final
+    needs: installation-and-connectivity
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set final commit status
+        uses: myrotvorets/set-commit-status-action@38f3f27c7d52fb381273e95542f07f0fba301307 # v2.0.0  
         with:
-          authToken: ${{ secrets.GITHUB_TOKEN }}
-          sha: ${{ steps.vars.outputs.sha }}
-          context: ${{ github.workflow }}
-          description: Connectivity test failed
-          state: failure
-          target_url: ${{ env.check_url }}
-
-      - name: Set commit status to cancelled
-        if: ${{ cancelled() }}
-        uses: Sibz/github-status-action@650dd1a882a76dbbbc4576fb5974b8d22f29847f # v1.1.6
-        with:
-          authToken: ${{ secrets.GITHUB_TOKEN }}
-          sha: ${{ steps.vars.outputs.sha }}
-          context: ${{ github.workflow }}
-          description: Connectivity test cancelled
-          state: error
-          target_url: ${{ env.check_url }}
+          sha: ${{ inputs.SHA || github.sha }}
+          status: ${{ needs.installation-and-connectivity.result }}

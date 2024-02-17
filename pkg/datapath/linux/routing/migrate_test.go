@@ -9,8 +9,8 @@ import (
 	"net"
 	"os/exec"
 
+	. "github.com/cilium/checkmate"
 	"github.com/vishvananda/netlink"
-	. "gopkg.in/check.v1"
 
 	"github.com/cilium/cilium/pkg/datapath/linux/linux_defaults"
 	"github.com/cilium/cilium/pkg/testutils"
@@ -38,7 +38,7 @@ type MigrateSuite struct {
 }
 
 func (s *MigrateSuite) SetUpSuite(c *C) {
-	testutils.PrivilegedCheck(c)
+	testutils.PrivilegedTest(c)
 }
 
 // n is the number of devices, routes, and rules that will be created in
@@ -430,24 +430,11 @@ func setUpRoutingTable(c *C, ifindex, tableID, priority int) (map[string]int, ma
 			Table:     newTableID,
 		}), IsNil)
 
-		// _, cidr, err := net.ParseCIDR("172.16.0.2/24")
-		// c.Assert(err, IsNil)
-		// c.Assert(netlink.RuleAdd(&netlink.Rule{
-		// 	// Src:      &net.IPNet{IP: net.ParseIP("172.16.0.2"), Mask: net.CIDRMask(24, 32)},
-		// 	Src: cidr,
-		// 	// Dst:      &net.IPNet{IP: net.IPv4zero, Mask: net.CIDRMask(0, 32)},
-		// 	Priority: linux_defaults.RulePriorityEgress,
-		// 	Table:    dummyTmpl.Index,
-		// }), IsNil)
-
-		// TODO(christarazi): Must shell out here due to netlink request (above)
-		// resulting in EINVAL. See https://github.com/cilium/cilium/issues/14383.
-		err = exec.Command("ip", "rule", "add",
-			"from", linkCIDR.String(),
-			"to", "all",
-			"table", fmt.Sprintf("%d", newTableID),
-			"priority", fmt.Sprintf("%d", priority)).Run()
-		c.Assert(err, IsNil)
+		rule := netlink.NewRule()
+		rule.Src = linkCIDR
+		rule.Priority = priority
+		rule.Table = newTableID
+		c.Assert(netlink.RuleAdd(rule), IsNil)
 
 		// Return the MAC address of the dummy device, which acts as the ENI.
 		link, err := netlink.LinkByName(devName)

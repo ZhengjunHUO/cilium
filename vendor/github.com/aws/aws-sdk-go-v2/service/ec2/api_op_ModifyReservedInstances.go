@@ -4,6 +4,7 @@ package ec2
 
 import (
 	"context"
+	"fmt"
 	awsmiddleware "github.com/aws/aws-sdk-go-v2/aws/middleware"
 	"github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
@@ -14,13 +15,8 @@ import (
 // Modifies the configuration of your Reserved Instances, such as the Availability
 // Zone, instance count, or instance type. The Reserved Instances to be modified
 // must be identical, except for Availability Zone, network platform, and instance
-// type. For more information, see Modifying Reserved Instances
-// (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ri-modifying.html) in the
-// Amazon EC2 User Guide. We are retiring EC2-Classic. We recommend that you
-// migrate from EC2-Classic to a VPC. For more information, see Migrate from
-// EC2-Classic to a VPC
-// (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/vpc-migrate.html) in the
-// Amazon Elastic Compute Cloud User Guide.
+// type. For more information, see Modifying Reserved Instances (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ri-modifying.html)
+// in the Amazon EC2 User Guide.
 func (c *Client) ModifyReservedInstances(ctx context.Context, params *ModifyReservedInstancesInput, optFns ...func(*Options)) (*ModifyReservedInstancesOutput, error) {
 	if params == nil {
 		params = &ModifyReservedInstancesInput{}
@@ -50,8 +46,8 @@ type ModifyReservedInstancesInput struct {
 	TargetConfigurations []types.ReservedInstancesConfiguration
 
 	// A unique, case-sensitive token you provide to ensure idempotency of your
-	// modification request. For more information, see Ensuring Idempotency
-	// (https://docs.aws.amazon.com/AWSEC2/latest/APIReference/Run_Instance_Idempotency.html).
+	// modification request. For more information, see Ensuring Idempotency (https://docs.aws.amazon.com/AWSEC2/latest/APIReference/Run_Instance_Idempotency.html)
+	// .
 	ClientToken *string
 
 	noSmithyDocumentSerde
@@ -70,12 +66,22 @@ type ModifyReservedInstancesOutput struct {
 }
 
 func (c *Client) addOperationModifyReservedInstancesMiddlewares(stack *middleware.Stack, options Options) (err error) {
+	if err := stack.Serialize.Add(&setOperationInputMiddleware{}, middleware.After); err != nil {
+		return err
+	}
 	err = stack.Serialize.Add(&awsEc2query_serializeOpModifyReservedInstances{}, middleware.After)
 	if err != nil {
 		return err
 	}
 	err = stack.Deserialize.Add(&awsEc2query_deserializeOpModifyReservedInstances{}, middleware.After)
 	if err != nil {
+		return err
+	}
+	if err := addProtocolFinalizerMiddlewares(stack, options, "ModifyReservedInstances"); err != nil {
+		return fmt.Errorf("add protocol finalizers: %v", err)
+	}
+
+	if err = addlegacyEndpointContextSetter(stack, options); err != nil {
 		return err
 	}
 	if err = addSetLoggerMiddleware(stack, options); err != nil {
@@ -96,16 +102,13 @@ func (c *Client) addOperationModifyReservedInstancesMiddlewares(stack *middlewar
 	if err = addRetryMiddlewares(stack, options); err != nil {
 		return err
 	}
-	if err = addHTTPSignerV4Middleware(stack, options); err != nil {
-		return err
-	}
 	if err = awsmiddleware.AddRawResponseToMetadata(stack); err != nil {
 		return err
 	}
 	if err = awsmiddleware.AddRecordResponseTiming(stack); err != nil {
 		return err
 	}
-	if err = addClientUserAgent(stack); err != nil {
+	if err = addClientUserAgent(stack, options); err != nil {
 		return err
 	}
 	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
@@ -114,10 +117,16 @@ func (c *Client) addOperationModifyReservedInstancesMiddlewares(stack *middlewar
 	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
 		return err
 	}
+	if err = addSetLegacyContextSigningOptionsMiddleware(stack); err != nil {
+		return err
+	}
 	if err = addOpModifyReservedInstancesValidationMiddleware(stack); err != nil {
 		return err
 	}
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opModifyReservedInstances(options.Region), middleware.Before); err != nil {
+		return err
+	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
@@ -129,6 +138,9 @@ func (c *Client) addOperationModifyReservedInstancesMiddlewares(stack *middlewar
 	if err = addRequestResponseLogging(stack, options); err != nil {
 		return err
 	}
+	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -136,7 +148,6 @@ func newServiceMetadataMiddleware_opModifyReservedInstances(region string) *awsm
 	return &awsmiddleware.RegisterServiceMetadata{
 		Region:        region,
 		ServiceID:     ServiceID,
-		SigningName:   "ec2",
 		OperationName: "ModifyReservedInstances",
 	}
 }

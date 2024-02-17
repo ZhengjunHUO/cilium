@@ -12,16 +12,15 @@ import (
 	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
-// Describes the specified event windows or all event windows. If you specify event
-// window IDs, the output includes information for only the specified event
+// Describes the specified event windows or all event windows. If you specify
+// event window IDs, the output includes information for only the specified event
 // windows. If you specify filters, the output includes information for only those
 // event windows that meet the filter criteria. If you do not specify event windows
 // IDs or filters, the output includes information for all event windows, which can
 // affect performance. We recommend that you use pagination to ensure that the
 // operation returns quickly and successfully. For more information, see Define
-// event windows for scheduled events
-// (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/event-windows.html) in the
-// Amazon EC2 User Guide.
+// event windows for scheduled events (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/event-windows.html)
+// in the Amazon EC2 User Guide.
 func (c *Client) DescribeInstanceEventWindows(ctx context.Context, params *DescribeInstanceEventWindowsInput, optFns ...func(*Options)) (*DescribeInstanceEventWindowsOutput, error) {
 	if params == nil {
 		params = &DescribeInstanceEventWindowsInput{}
@@ -42,44 +41,32 @@ type DescribeInstanceEventWindowsInput struct {
 
 	// Checks whether you have the required permissions for the action, without
 	// actually making the request, and provides an error response. If you have the
-	// required permissions, the error response is DryRunOperation. Otherwise, it is
-	// UnauthorizedOperation.
+	// required permissions, the error response is DryRunOperation . Otherwise, it is
+	// UnauthorizedOperation .
 	DryRun *bool
 
 	// One or more filters.
-	//
-	// * dedicated-host-id - The event windows associated with
-	// the specified Dedicated Host ID.
-	//
-	// * event-window-name - The event windows
-	// associated with the specified names.
-	//
-	// * instance-id - The event windows
-	// associated with the specified instance ID.
-	//
-	// * instance-tag - The event windows
-	// associated with the specified tag and value.
-	//
-	// * instance-tag-key - The event
-	// windows associated with the specified tag key, regardless of the value.
-	//
-	// *
-	// instance-tag-value - The event windows associated with the specified tag value,
-	// regardless of the key.
-	//
-	// * tag: - The key/value combination of a tag assigned to
-	// the event window. Use the tag key in the filter name and the tag value as the
-	// filter value. For example, to find all resources that have a tag with the key
-	// Owner and the value CMX, specify tag:Owner for the filter name and CMX for the
-	// filter value.
-	//
-	// * tag-key - The key of a tag assigned to the event window. Use
-	// this filter to find all event windows that have a tag with a specific key,
-	// regardless of the tag value.
-	//
-	// * tag-value - The value of a tag assigned to the
-	// event window. Use this filter to find all event windows that have a tag with a
-	// specific value, regardless of the tag key.
+	//   - dedicated-host-id - The event windows associated with the specified
+	//   Dedicated Host ID.
+	//   - event-window-name - The event windows associated with the specified names.
+	//   - instance-id - The event windows associated with the specified instance ID.
+	//   - instance-tag - The event windows associated with the specified tag and
+	//   value.
+	//   - instance-tag-key - The event windows associated with the specified tag key,
+	//   regardless of the value.
+	//   - instance-tag-value - The event windows associated with the specified tag
+	//   value, regardless of the key.
+	//   - tag: - The key/value combination of a tag assigned to the event window. Use
+	//   the tag key in the filter name and the tag value as the filter value. For
+	//   example, to find all resources that have a tag with the key Owner and the
+	//   value CMX , specify tag:Owner for the filter name and CMX for the filter
+	//   value.
+	//   - tag-key - The key of a tag assigned to the event window. Use this filter to
+	//   find all event windows that have a tag with a specific key, regardless of the
+	//   tag value.
+	//   - tag-value - The value of a tag assigned to the event window. Use this filter
+	//   to find all event windows that have a tag with a specific value, regardless of
+	//   the tag key.
 	Filters []types.Filter
 
 	// The IDs of the event windows.
@@ -113,12 +100,22 @@ type DescribeInstanceEventWindowsOutput struct {
 }
 
 func (c *Client) addOperationDescribeInstanceEventWindowsMiddlewares(stack *middleware.Stack, options Options) (err error) {
+	if err := stack.Serialize.Add(&setOperationInputMiddleware{}, middleware.After); err != nil {
+		return err
+	}
 	err = stack.Serialize.Add(&awsEc2query_serializeOpDescribeInstanceEventWindows{}, middleware.After)
 	if err != nil {
 		return err
 	}
 	err = stack.Deserialize.Add(&awsEc2query_deserializeOpDescribeInstanceEventWindows{}, middleware.After)
 	if err != nil {
+		return err
+	}
+	if err := addProtocolFinalizerMiddlewares(stack, options, "DescribeInstanceEventWindows"); err != nil {
+		return fmt.Errorf("add protocol finalizers: %v", err)
+	}
+
+	if err = addlegacyEndpointContextSetter(stack, options); err != nil {
 		return err
 	}
 	if err = addSetLoggerMiddleware(stack, options); err != nil {
@@ -139,16 +136,13 @@ func (c *Client) addOperationDescribeInstanceEventWindowsMiddlewares(stack *midd
 	if err = addRetryMiddlewares(stack, options); err != nil {
 		return err
 	}
-	if err = addHTTPSignerV4Middleware(stack, options); err != nil {
-		return err
-	}
 	if err = awsmiddleware.AddRawResponseToMetadata(stack); err != nil {
 		return err
 	}
 	if err = awsmiddleware.AddRecordResponseTiming(stack); err != nil {
 		return err
 	}
-	if err = addClientUserAgent(stack); err != nil {
+	if err = addClientUserAgent(stack, options); err != nil {
 		return err
 	}
 	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
@@ -157,7 +151,13 @@ func (c *Client) addOperationDescribeInstanceEventWindowsMiddlewares(stack *midd
 	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
 		return err
 	}
+	if err = addSetLegacyContextSigningOptionsMiddleware(stack); err != nil {
+		return err
+	}
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opDescribeInstanceEventWindows(options.Region), middleware.Before); err != nil {
+		return err
+	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
@@ -167,6 +167,9 @@ func (c *Client) addOperationDescribeInstanceEventWindowsMiddlewares(stack *midd
 		return err
 	}
 	if err = addRequestResponseLogging(stack, options); err != nil {
+		return err
+	}
+	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
 		return err
 	}
 	return nil
@@ -272,7 +275,6 @@ func newServiceMetadataMiddleware_opDescribeInstanceEventWindows(region string) 
 	return &awsmiddleware.RegisterServiceMetadata{
 		Region:        region,
 		ServiceID:     ServiceID,
-		SigningName:   "ec2",
 		OperationName: "DescribeInstanceEventWindows",
 	}
 }

@@ -19,7 +19,7 @@ import (
 // Availability Zone redundancy. If you specified a VPC when you created the Client
 // VPN endpoint or if you have previous subnet associations, the specified subnet
 // must be in the same VPC. To specify a subnet that's in a different VPC, you must
-// first modify the Client VPN endpoint (ModifyClientVpnEndpoint) and change the
+// first modify the Client VPN endpoint ( ModifyClientVpnEndpoint ) and change the
 // VPC that's associated with it.
 func (c *Client) AssociateClientVpnTargetNetwork(ctx context.Context, params *AssociateClientVpnTargetNetworkInput, optFns ...func(*Options)) (*AssociateClientVpnTargetNetworkOutput, error) {
 	if params == nil {
@@ -49,14 +49,14 @@ type AssociateClientVpnTargetNetworkInput struct {
 	SubnetId *string
 
 	// Unique, case-sensitive identifier that you provide to ensure the idempotency of
-	// the request. For more information, see How to ensure idempotency
-	// (https://docs.aws.amazon.com/AWSEC2/latest/APIReference/Run_Instance_Idempotency.html).
+	// the request. For more information, see How to ensure idempotency (https://docs.aws.amazon.com/AWSEC2/latest/APIReference/Run_Instance_Idempotency.html)
+	// .
 	ClientToken *string
 
 	// Checks whether you have the required permissions for the action, without
 	// actually making the request, and provides an error response. If you have the
-	// required permissions, the error response is DryRunOperation. Otherwise, it is
-	// UnauthorizedOperation.
+	// required permissions, the error response is DryRunOperation . Otherwise, it is
+	// UnauthorizedOperation .
 	DryRun *bool
 
 	noSmithyDocumentSerde
@@ -77,12 +77,22 @@ type AssociateClientVpnTargetNetworkOutput struct {
 }
 
 func (c *Client) addOperationAssociateClientVpnTargetNetworkMiddlewares(stack *middleware.Stack, options Options) (err error) {
+	if err := stack.Serialize.Add(&setOperationInputMiddleware{}, middleware.After); err != nil {
+		return err
+	}
 	err = stack.Serialize.Add(&awsEc2query_serializeOpAssociateClientVpnTargetNetwork{}, middleware.After)
 	if err != nil {
 		return err
 	}
 	err = stack.Deserialize.Add(&awsEc2query_deserializeOpAssociateClientVpnTargetNetwork{}, middleware.After)
 	if err != nil {
+		return err
+	}
+	if err := addProtocolFinalizerMiddlewares(stack, options, "AssociateClientVpnTargetNetwork"); err != nil {
+		return fmt.Errorf("add protocol finalizers: %v", err)
+	}
+
+	if err = addlegacyEndpointContextSetter(stack, options); err != nil {
 		return err
 	}
 	if err = addSetLoggerMiddleware(stack, options); err != nil {
@@ -103,22 +113,22 @@ func (c *Client) addOperationAssociateClientVpnTargetNetworkMiddlewares(stack *m
 	if err = addRetryMiddlewares(stack, options); err != nil {
 		return err
 	}
-	if err = addHTTPSignerV4Middleware(stack, options); err != nil {
-		return err
-	}
 	if err = awsmiddleware.AddRawResponseToMetadata(stack); err != nil {
 		return err
 	}
 	if err = awsmiddleware.AddRecordResponseTiming(stack); err != nil {
 		return err
 	}
-	if err = addClientUserAgent(stack); err != nil {
+	if err = addClientUserAgent(stack, options); err != nil {
 		return err
 	}
 	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
 		return err
 	}
 	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
+		return err
+	}
+	if err = addSetLegacyContextSigningOptionsMiddleware(stack); err != nil {
 		return err
 	}
 	if err = addIdempotencyToken_opAssociateClientVpnTargetNetworkMiddleware(stack, options); err != nil {
@@ -130,6 +140,9 @@ func (c *Client) addOperationAssociateClientVpnTargetNetworkMiddlewares(stack *m
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opAssociateClientVpnTargetNetwork(options.Region), middleware.Before); err != nil {
 		return err
 	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
+		return err
+	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
 		return err
 	}
@@ -137,6 +150,9 @@ func (c *Client) addOperationAssociateClientVpnTargetNetworkMiddlewares(stack *m
 		return err
 	}
 	if err = addRequestResponseLogging(stack, options); err != nil {
+		return err
+	}
+	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
 		return err
 	}
 	return nil
@@ -179,7 +195,6 @@ func newServiceMetadataMiddleware_opAssociateClientVpnTargetNetwork(region strin
 	return &awsmiddleware.RegisterServiceMetadata{
 		Region:        region,
 		ServiceID:     ServiceID,
-		SigningName:   "ec2",
 		OperationName: "AssociateClientVpnTargetNetwork",
 	}
 }

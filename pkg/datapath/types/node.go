@@ -9,9 +9,14 @@ import (
 
 	"github.com/cilium/cilium/api/v1/models"
 	"github.com/cilium/cilium/pkg/cidr"
-	"github.com/cilium/cilium/pkg/mtu"
 	nodeTypes "github.com/cilium/cilium/pkg/node/types"
 )
+
+type MTUConfiguration interface {
+	GetDeviceMTU() int
+	GetRouteMTU() int
+	GetRoutePostEncryptMTU() int
+}
 
 // LocalNodeConfiguration represents the configuration of the local node
 type LocalNodeConfiguration struct {
@@ -19,7 +24,7 @@ type LocalNodeConfiguration struct {
 	//
 	// This field is immutable at runtime. The value will not change in
 	// subsequent calls to NodeConfigurationChanged().
-	MtuConfig mtu.Configuration
+	MtuConfig MTUConfiguration
 
 	// AuxiliaryPrefixes is the list of auxiliary prefixes that should be
 	// configured in addition to the node PodCIDR
@@ -41,21 +46,6 @@ type LocalNodeConfiguration struct {
 	// This field is immutable at runtime. The value will not change in
 	// subsequent calls to NodeConfigurationChanged().
 	EnableIPv6 bool
-
-	// UseSingleClusterRoute enables the use of a single cluster-wide route
-	// to direct traffic from the host into the Cilium datapath.  This
-	// avoids the requirement to install a separate route for each node
-	// CIDR and can thus improve the overhead when operating large clusters
-	// with significant node event churn due to auto-scaling.
-	//
-	// Use of UseSingleClusterRoute must be compatible with
-	// EnableAutoDirectRouting. When both are enabled, any direct node
-	// route must take precedence over the cluster-wide route as per LPM
-	// routing definition.
-	//
-	// This field is mutable. The implementation of
-	// NodeConfigurationChanged() must adjust the routes accordingly.
-	UseSingleClusterRoute bool
 
 	// EnableEncapsulation enables use of encapsulation in communication
 	// between nodes.
@@ -106,6 +96,10 @@ type LocalNodeConfiguration struct {
 // implementation can differ between the own local node and remote nodes by
 // calling node.IsLocal().
 type NodeHandler interface {
+	// Name identifies the handler, this is used in logging/reporting handler
+	// reconciliation errors.
+	Name() string
+
 	// NodeAdd is called when a node is discovered for the first time.
 	NodeAdd(newNode nodeTypes.Node) error
 
@@ -117,6 +111,10 @@ type NodeHandler interface {
 	// NodeDelete is called after a node has been deleted
 	NodeDelete(node nodeTypes.Node) error
 
+	// AllNodeValidateImplementation is called to validate the implementation
+	// of all nodes in the node cache.
+	AllNodeValidateImplementation()
+
 	// NodeValidateImplementation is called to validate the implementation of
 	// the node in the datapath. This function is intended to be run on an
 	// interval to ensure that the datapath is consistently converged.
@@ -125,7 +123,9 @@ type NodeHandler interface {
 	// NodeConfigurationChanged is called when the local node configuration
 	// has changed
 	NodeConfigurationChanged(config LocalNodeConfiguration) error
+}
 
+type NodeNeighbors interface {
 	// NodeNeighDiscoveryEnabled returns whether node neighbor discovery is enabled
 	NodeNeighDiscoveryEnabled() bool
 
@@ -135,10 +135,14 @@ type NodeHandler interface {
 	// NodeCleanNeighbors cleans all neighbor entries for the direct routing device
 	// and the encrypt interface.
 	NodeCleanNeighbors(migrateOnly bool)
+}
 
-	// AllocateNodeID allocates a new ID for the given node (by IP) if one wasn't
-	// already assigned.
-	AllocateNodeID(net.IP) uint16
+type NodeIDHandler interface {
+	// GetNodeIP returns the string node IP that was previously registered as the given node ID.
+	GetNodeIP(uint16) string
+
+	// GetNodeID gets the node ID for the given node IP. If none is found, exists is false.
+	GetNodeID(nodeIP net.IP) (nodeID uint16, exists bool)
 
 	// DumpNodeIDs returns all node IDs and their associated IP addresses.
 	DumpNodeIDs() []*models.NodeID

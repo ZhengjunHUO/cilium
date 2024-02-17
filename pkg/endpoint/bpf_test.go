@@ -9,16 +9,17 @@ import (
 	"os"
 	"testing"
 
-	. "gopkg.in/check.v1"
+	. "github.com/cilium/checkmate"
 
 	"github.com/cilium/cilium/pkg/datapath/linux"
+	"github.com/cilium/cilium/pkg/datapath/linux/config"
 	"github.com/cilium/cilium/pkg/testutils"
 	testidentity "github.com/cilium/cilium/pkg/testutils/identity"
 	testipcache "github.com/cilium/cilium/pkg/testutils/ipcache"
 )
 
 func (s *EndpointSuite) TestWriteInformationalComments(c *C) {
-	e := NewEndpointWithState(s, s, testipcache.NewMockIPCache(), &FakeEndpointProxy{}, testidentity.NewMockIdentityAllocator(nil), 100, StateWaitingForIdentity)
+	e := NewTestEndpointWithState(c, s, s, testipcache.NewMockIPCache(), &FakeEndpointProxy{}, testidentity.NewMockIdentityAllocator(nil), 100, StateWaitingForIdentity)
 
 	var f bytes.Buffer
 	err := e.writeInformationalComments(&f)
@@ -30,8 +31,13 @@ type writeFunc func(io.Writer) error
 func BenchmarkWriteHeaderfile(b *testing.B) {
 	testutils.IntegrationTest(b)
 
-	e := NewEndpointWithState(&suite, &suite, testipcache.NewMockIPCache(), &FakeEndpointProxy{}, testidentity.NewMockIdentityAllocator(nil), 100, StateWaitingForIdentity)
-	dp := linux.NewDatapath(linux.DatapathConfiguration{}, nil, nil)
+	e := NewTestEndpointWithState(b, &suite, &suite, testipcache.NewMockIPCache(), &FakeEndpointProxy{}, testidentity.NewMockIdentityAllocator(nil), 100, StateWaitingForIdentity)
+	dp := linux.NewDatapath(linux.DatapathParams{
+		RuleManager:    nil,
+		NodeAddressing: nil,
+		NodeMap:        nil,
+		ConfigWriter:   &config.HeaderfileWriter{},
+	}, linux.DatapathConfiguration{})
 
 	targetComments := func(w io.Writer) error {
 		return e.writeInformationalComments(w)

@@ -4,24 +4,19 @@ package ec2
 
 import (
 	"context"
+	"fmt"
 	awsmiddleware "github.com/aws/aws-sdk-go-v2/aws/middleware"
 	"github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/smithy-go/middleware"
 	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
-// We are retiring EC2-Classic. We recommend that you migrate from EC2-Classic to a
-// VPC. For more information, see Migrate from EC2-Classic to a VPC
-// (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/vpc-migrate.html) in the
-// Amazon Elastic Compute Cloud User Guide. Enables a VPC to support DNS hostname
-// resolution for ClassicLink. If enabled, the DNS hostname of a linked EC2-Classic
-// instance resolves to its private IP address when addressed from an instance in
-// the VPC to which it's linked. Similarly, the DNS hostname of an instance in a
-// VPC resolves to its private IP address when addressed from a linked EC2-Classic
-// instance. For more information, see ClassicLink
-// (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/vpc-classiclink.html) in
-// the Amazon Elastic Compute Cloud User Guide. You must specify a VPC ID in the
-// request.
+// This action is deprecated. Enables a VPC to support DNS hostname resolution for
+// ClassicLink. If enabled, the DNS hostname of a linked EC2-Classic instance
+// resolves to its private IP address when addressed from an instance in the VPC to
+// which it's linked. Similarly, the DNS hostname of an instance in a VPC resolves
+// to its private IP address when addressed from a linked EC2-Classic instance. You
+// must specify a VPC ID in the request.
 func (c *Client) EnableVpcClassicLinkDnsSupport(ctx context.Context, params *EnableVpcClassicLinkDnsSupportInput, optFns ...func(*Options)) (*EnableVpcClassicLinkDnsSupportOutput, error) {
 	if params == nil {
 		params = &EnableVpcClassicLinkDnsSupportInput{}
@@ -57,12 +52,22 @@ type EnableVpcClassicLinkDnsSupportOutput struct {
 }
 
 func (c *Client) addOperationEnableVpcClassicLinkDnsSupportMiddlewares(stack *middleware.Stack, options Options) (err error) {
+	if err := stack.Serialize.Add(&setOperationInputMiddleware{}, middleware.After); err != nil {
+		return err
+	}
 	err = stack.Serialize.Add(&awsEc2query_serializeOpEnableVpcClassicLinkDnsSupport{}, middleware.After)
 	if err != nil {
 		return err
 	}
 	err = stack.Deserialize.Add(&awsEc2query_deserializeOpEnableVpcClassicLinkDnsSupport{}, middleware.After)
 	if err != nil {
+		return err
+	}
+	if err := addProtocolFinalizerMiddlewares(stack, options, "EnableVpcClassicLinkDnsSupport"); err != nil {
+		return fmt.Errorf("add protocol finalizers: %v", err)
+	}
+
+	if err = addlegacyEndpointContextSetter(stack, options); err != nil {
 		return err
 	}
 	if err = addSetLoggerMiddleware(stack, options); err != nil {
@@ -83,16 +88,13 @@ func (c *Client) addOperationEnableVpcClassicLinkDnsSupportMiddlewares(stack *mi
 	if err = addRetryMiddlewares(stack, options); err != nil {
 		return err
 	}
-	if err = addHTTPSignerV4Middleware(stack, options); err != nil {
-		return err
-	}
 	if err = awsmiddleware.AddRawResponseToMetadata(stack); err != nil {
 		return err
 	}
 	if err = awsmiddleware.AddRecordResponseTiming(stack); err != nil {
 		return err
 	}
-	if err = addClientUserAgent(stack); err != nil {
+	if err = addClientUserAgent(stack, options); err != nil {
 		return err
 	}
 	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
@@ -101,7 +103,13 @@ func (c *Client) addOperationEnableVpcClassicLinkDnsSupportMiddlewares(stack *mi
 	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
 		return err
 	}
+	if err = addSetLegacyContextSigningOptionsMiddleware(stack); err != nil {
+		return err
+	}
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opEnableVpcClassicLinkDnsSupport(options.Region), middleware.Before); err != nil {
+		return err
+	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
@@ -113,6 +121,9 @@ func (c *Client) addOperationEnableVpcClassicLinkDnsSupportMiddlewares(stack *mi
 	if err = addRequestResponseLogging(stack, options); err != nil {
 		return err
 	}
+	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -120,7 +131,6 @@ func newServiceMetadataMiddleware_opEnableVpcClassicLinkDnsSupport(region string
 	return &awsmiddleware.RegisterServiceMetadata{
 		Region:        region,
 		ServiceID:     ServiceID,
-		SigningName:   "ec2",
 		OperationName: "EnableVpcClassicLinkDnsSupport",
 	}
 }

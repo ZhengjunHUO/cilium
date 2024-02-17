@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
 # Copyright Authors of Cilium
 
@@ -33,17 +33,21 @@ handle_args() {
 
     if ! echo "$1" | grep -q "$RELEASE_REGEX"; then
         usage 2>&1
-        common::exit 1 "Invalid OLD-VERSION ARG \"$1\"; Expected X.Y.Z[-rc.W|-snapshot.W]"
+        common::exit 1 "Invalid OLD-VERSION ARG \"$1\"; $RELEASE_FORMAT_MSG"
     fi
 
     if ! echo "$2" | grep -q "$RELEASE_REGEX"; then
         usage 2>&1
-        common::exit 1 "Invalid NEW-VERSION ARG \"$2\"; Expected X.Y.Z[-rc.W|-snapshot.W]"
+        common::exit 1 "Invalid NEW-VERSION ARG \"$2\"; $RELEASE_FORMAT_MSG"
     fi
 
     if [ "$#" -eq 3 ] && ! echo "$3" | grep -q "[0-9]\+\.[0-9]\+"; then
         usage 2>&1
         common::exit 1 "Invalid OLD-BRANCH ARG \"$3\"; Expected X.Y"
+    fi
+
+    if ! gh auth status >/dev/null; then
+        common::exit 1 "Failed to authenticate with GitHub"
     fi
 }
 
@@ -54,6 +58,7 @@ main() {
     local ersion="$(echo $2 | sed 's/^v//')"
     local version="v$ersion"
     local old_branch="$(echo $3 | sed 's/^v//')"
+    local GITHUB_TOKEN=${GITHUB_TOKEN:-"$(gh auth token)"}
 
     logecho "Generating CHANGELOG.md"
     rm -f $RELNOTESCACHE

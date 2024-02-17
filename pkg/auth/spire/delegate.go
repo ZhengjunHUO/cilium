@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"time"
 
 	delegatedidentityv1 "github.com/spiffe/spire-api-sdk/proto/spire/api/agent/delegatedidentity/v1"
 	spiffeTypes "github.com/spiffe/spire-api-sdk/proto/spire/api/types"
@@ -23,11 +22,10 @@ import (
 
 	"github.com/cilium/cilium/pkg/auth/certs"
 	"github.com/cilium/cilium/pkg/backoff"
-	"github.com/cilium/cilium/pkg/hive"
 	"github.com/cilium/cilium/pkg/hive/cell"
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/logging"
-	"github.com/cilium/cilium/pkg/logging/logfields"
+	"github.com/cilium/cilium/pkg/time"
 )
 
 type SpireDelegateClient struct {
@@ -48,6 +46,10 @@ type SpireDelegateClient struct {
 	rotatedIdentitiesChan chan certs.CertificateRotationEvent
 
 	logLimiter logging.Limiter
+
+	connected        bool
+	lastConnectError error
+	connectedMutex   lock.RWMutex
 }
 
 type SpireDelegateConfig struct {
@@ -63,20 +65,20 @@ var Cell = cell.Module(
 	cell.Config(SpireDelegateConfig{}),
 )
 
-func newSpireDelegateClient(lc hive.Lifecycle, cfg SpireDelegateConfig, log logrus.FieldLogger) certs.CertificateProvider {
+func newSpireDelegateClient(lc cell.Lifecycle, cfg SpireDelegateConfig, log logrus.FieldLogger) certs.CertificateProvider {
 	if cfg.SpireAdminSocketPath == "" {
 		log.Info("Spire Delegate API Client is disabled as no socket path is configured")
 		return nil
 	}
 	client := &SpireDelegateClient{
 		cfg:                   cfg,
-		log:                   log.WithField(logfields.LogSubsys, "spire-delegate"),
+		log:                   log,
 		svidStore:             map[string]*delegatedidentityv1.X509SVIDWithKey{},
 		rotatedIdentitiesChan: make(chan certs.CertificateRotationEvent, cfg.RotatedQueueSize),
 		logLimiter:            logging.NewLimiter(10*time.Second, 3),
 	}
 
-	lc.Append(hive.Hook{OnStart: client.onStart, OnStop: client.onStop})
+	lc.Append(cell.Hook{OnStart: client.onStart, OnStop: client.onStop})
 
 	return client
 }
@@ -87,7 +89,7 @@ func (cfg SpireDelegateConfig) Flags(flags *pflag.FlagSet) {
 	flags.IntVar(&cfg.RotatedQueueSize, "mesh-auth-rotated-identities-queue-size", 1024, "The size of the queue for signaling rotated identities.")
 }
 
-func (s *SpireDelegateClient) onStart(ctx hive.HookContext) error {
+func (s *SpireDelegateClient) onStart(ctx cell.HookContext) error {
 	s.log.Info("Spire Delegate API Client is running")
 
 	listenCtx, cancel := context.WithCancel(context.Background())
@@ -98,7 +100,7 @@ func (s *SpireDelegateClient) onStart(ctx hive.HookContext) error {
 	return nil
 }
 
-func (s *SpireDelegateClient) onStop(ctx hive.HookContext) error {
+func (s *SpireDelegateClient) onStop(ctx cell.HookContext) error {
 	s.log.Info("SPIFFE Delegate API Client is stopping")
 
 	s.cancelListenForUpdates()
@@ -126,7 +128,7 @@ func (s *SpireDelegateClient) listenForUpdates(ctx context.Context) {
 			cancel()
 			return
 		case e := <-err:
-			s.log.WithError(e).Error("error in delegate stream, restarting")
+			s.log.WithError(e).Error("Error in delegate stream, restarting")
 			time.Sleep(backoffTime.Duration(s.connectionAttempts))
 			cancel()
 			s.connectionAttempts++
@@ -148,7 +150,9 @@ func (s *SpireDelegateClient) listenForSVIDUpdates(ctx context.Context, errorCha
 				return
 			}
 
-			s.log.Debugf("received %d X509-SVIDs in update", len(resp.X509Svids))
+			s.log.
+				WithField("nr_of_svids", len(resp.X509Svids)).
+				Debug("Received X509-SVID update")
 			s.handleX509SVIDUpdate(resp.X509Svids)
 		}
 	}
@@ -166,7 +170,9 @@ func (s *SpireDelegateClient) listenForBundleUpdates(ctx context.Context, errorC
 				return
 			}
 
-			s.log.Debugf("received %d X509-Bundles in update", len(resp.CaCertificates))
+			s.log.
+				WithField("nr_of_bundles", len(resp.CaCertificates)).
+				Debug("Received X509-Bundle update", len(resp.CaCertificates))
 			s.handleX509BundleUpdate(resp.CaCertificates)
 		}
 	}
@@ -177,11 +183,14 @@ func (s *SpireDelegateClient) handleX509SVIDUpdate(svids []*delegatedidentityv1.
 
 	s.svidStoreMutex.RLock()
 	updatedKeys := []string{}
+	deletedKeys := []string{}
 
 	for _, svid := range svids {
 
 		if svid.X509Svid.Id.TrustDomain != s.cfg.SpiffeTrustDomain {
-			s.log.Debugf("skipping X509-SVID update for trust domain %s as it does not match ours", svid.X509Svid.Id.TrustDomain)
+			s.log.
+				WithField("trust_domain", svid.X509Svid.Id.TrustDomain).
+				Debug("Skipping X509-SVID update as it does not match ours")
 			s.svidStoreMutex.RUnlock()
 			return
 		}
@@ -194,30 +203,71 @@ func (s *SpireDelegateClient) handleX509SVIDUpdate(svids []*delegatedidentityv1.
 				updatedKeys = append(updatedKeys, key)
 			}
 		} else {
-			s.log.Debugf("X509-SVID for %s is new, adding", key)
+			s.log.
+				WithField("spiffe_id", key).
+				Debug("Adding newly discovered X509-SVID")
 		}
 		newSvidStore[key] = svid
 
 	}
+
+	// check for deleted keys
+	for key := range s.svidStore {
+		if _, exists := newSvidStore[key]; !exists {
+			deletedKeys = append(deletedKeys, key)
+		}
+	}
+
 	s.svidStoreMutex.RUnlock()
 
 	s.svidStoreMutex.Lock()
 	s.svidStore = newSvidStore
 	s.svidStoreMutex.Unlock()
 
+	for _, key := range deletedKeys {
+		// we send an update event to re-trigger a handshake if needed
+		id, err := s.spiffeIDToNumericIdentity(key)
+		if err != nil {
+			s.log.
+				WithError(err).
+				WithField("spiffe_id", key).
+				Error("Failed to convert SPIFFE ID to numeric identity")
+			continue
+		}
+		select {
+		case s.rotatedIdentitiesChan <- certs.CertificateRotationEvent{Identity: id, Deleted: true}:
+			s.log.
+				WithField("spiffe_id", key).
+				Debug("X509-SVID has been deleted, signaling this")
+		default:
+			if s.logLimiter.Allow() {
+				s.log.
+					WithField("identity", id).
+					Warn("Skip sending deleted identity as channel is full")
+			}
+		}
+	}
+
 	for _, key := range updatedKeys {
 		// we send an update event to re-trigger a handshake if needed
 		id, err := s.spiffeIDToNumericIdentity(key)
 		if err != nil {
-			s.log.WithError(err).Errorf("failed to convert spiffe ID %s to numeric identity", key)
+			s.log.
+				WithError(err).
+				WithField("spiffe_id", key).
+				Error("Failed to convert SPIFFE ID to numeric identity")
 			continue
 		}
 		select {
 		case s.rotatedIdentitiesChan <- certs.CertificateRotationEvent{Identity: id}:
-			s.log.Debugf("X509-SVID for %s has changed, signaling this", key)
+			s.log.
+				WithField("spiffe_id", key).
+				Debug("X509-SVID has changed, signaling this")
 		default:
 			if s.logLimiter.Allow() {
-				s.log.Warnf("skipping sending rotated identity %d as channel is full", id)
+				s.log.
+					WithField("identity", id).
+					Warn("Skip sending rotated identity as channel is full")
 			}
 		}
 	}
@@ -227,11 +277,16 @@ func (s *SpireDelegateClient) handleX509BundleUpdate(bundles map[string][]byte) 
 	pool := x509.NewCertPool()
 
 	for trustDomain, bundle := range bundles {
-		s.log.Debugf("processing trust domain %s cert bundle", trustDomain)
+		s.log.
+			WithField("trust_domain", trustDomain).
+			Debug("Processing trust domain cert bundle", trustDomain)
 
 		certs, err := x509.ParseCertificates(bundle)
 		if err != nil {
-			s.log.WithError(err).Errorf("failed to parse X.509 DER bundle for trust domain %s", trustDomain)
+			s.log.
+				WithError(err).
+				WithField("trust_domain", trustDomain).
+				Error("Failed to parse X.509 DER bundle")
 			continue
 		}
 
@@ -246,6 +301,12 @@ func (s *SpireDelegateClient) handleX509BundleUpdate(bundles map[string][]byte) 
 func (s *SpireDelegateClient) openStream(ctx context.Context) {
 	// try to init the watcher with a backoff
 	backoffTime := backoff.Exponential{Min: 100 * time.Millisecond, Max: 10 * time.Second}
+
+	// a retry might have happened, signal that we are disconnected
+	s.connectedMutex.Lock()
+	s.connected = false
+	s.connectedMutex.Unlock()
+
 	for {
 		s.log.Info("Connecting to SPIRE Delegate API Client")
 
@@ -253,10 +314,21 @@ func (s *SpireDelegateClient) openStream(ctx context.Context) {
 		s.stream, s.trustStream, err = s.initWatcher(ctx)
 		if err != nil {
 			s.log.WithError(err).Warn("SPIRE Delegate API Client failed to init watcher, retrying")
+
+			s.connectedMutex.Lock()
+			s.connected = false
+			s.lastConnectError = err
+			s.connectedMutex.Unlock()
+
 			time.Sleep(backoffTime.Duration(s.connectionAttempts))
 			s.connectionAttempts++
 			continue
 		}
+
+		s.connectedMutex.Lock()
+		s.connected = true
+		s.lastConnectError = nil
+		s.connectedMutex.Unlock()
 		break
 	}
 }
@@ -282,7 +354,7 @@ func (s *SpireDelegateClient) initWatcher(ctx context.Context) (delegatedidentit
 		Selectors: []*spiffeTypes.Selector{
 			{
 				Type:  "cilium",
-				Value: "mtls",
+				Value: "mutual-auth",
 			},
 		},
 	})

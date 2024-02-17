@@ -7,19 +7,19 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"time"
-
-	"github.com/cilium/ipam/cidrset"
-	"github.com/cilium/ipam/service/ipallocator"
 
 	"github.com/cilium/cilium/pkg/api/helpers"
 	eniTypes "github.com/cilium/cilium/pkg/aws/eni/types"
 	"github.com/cilium/cilium/pkg/aws/types"
 	"github.com/cilium/cilium/pkg/ip"
+	"github.com/cilium/cilium/pkg/ipam/cidrset"
 	"github.com/cilium/cilium/pkg/ipam/option"
+	"github.com/cilium/cilium/pkg/ipam/service/ipallocator"
 	ipamTypes "github.com/cilium/cilium/pkg/ipam/types"
 	"github.com/cilium/cilium/pkg/lock"
+	"github.com/cilium/cilium/pkg/time"
 
+	ec2_types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/google/uuid"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/time/rate"
@@ -51,6 +51,7 @@ type API struct {
 	subnets        map[string]*ipamTypes.Subnet
 	vpcs           map[string]*ipamTypes.VirtualNetwork
 	securityGroups map[string]*types.SecurityGroup
+	instanceTypes  []ec2_types.InstanceTypeInfo
 	errors         map[Operation]error
 	allocator      *ipallocator.Range
 	pdAllocator    *cidrset.CidrSet
@@ -68,10 +69,8 @@ func NewAPI(subnets []*ipamTypes.Subnet, vpcs []*ipamTypes.VirtualNetwork, secur
 	// Use 10.10.0.0/17 for IP allocations
 	cidrSet, _ := cidrset.NewCIDRSet(baseCidr, 17)
 	podCidr, _ := cidrSet.AllocateNext()
-	podCidrRange, err := ipallocator.NewCIDRRange(podCidr)
-	if err != nil {
-		panic(err)
-	}
+	podCidrRange := ipallocator.NewCIDRRange(podCidr)
+
 	// Use 10.10.128.0/17 for prefix allocations
 	pdCidr, _ := cidrSet.AllocateNext()
 	pdCidrRange, err := cidrset.NewCIDRSet(pdCidr, 28)
@@ -85,6 +84,7 @@ func NewAPI(subnets []*ipamTypes.Subnet, vpcs []*ipamTypes.VirtualNetwork, secur
 		subnets:        map[string]*ipamTypes.Subnet{},
 		vpcs:           map[string]*ipamTypes.VirtualNetwork{},
 		securityGroups: map[string]*types.SecurityGroup{},
+		instanceTypes:  []ec2_types.InstanceTypeInfo{},
 		allocator:      podCidrRange,
 		pdAllocator:    pdCidrRange,
 		errors:         map[Operation]error{},
@@ -132,6 +132,12 @@ func (e *API) UpdateENIs(enis map[string]ENIMap) {
 			e.enis[instanceID][eniID] = eni.DeepCopy()
 		}
 	}
+	e.mutex.Unlock()
+}
+
+func (e *API) UpdateInstanceTypes(instanceTypes []ec2_types.InstanceTypeInfo) {
+	e.mutex.Lock()
+	e.instanceTypes = instanceTypes
 	e.mutex.Unlock()
 }
 
@@ -527,6 +533,39 @@ func (e *API) UnassignENIPrefixes(ctx context.Context, eniID string, prefixes []
 	return fmt.Errorf("Unable to find ENI with ID %s", eniID)
 }
 
+func (e *API) GetInstance(ctx context.Context, vpcs ipamTypes.VirtualNetworkMap, subnets ipamTypes.SubnetMap, instanceID string) (*ipamTypes.Instance, error) {
+	instance := ipamTypes.Instance{}
+	instance.Interfaces = map[string]ipamTypes.InterfaceRevision{}
+
+	e.mutex.RLock()
+	defer e.mutex.RUnlock()
+
+	for id, enis := range e.enis {
+		if id != instanceID {
+			continue
+		}
+		for ifaceID, eni := range enis {
+			if subnets != nil {
+				if subnet, ok := subnets[eni.Subnet.ID]; ok && subnet.CIDR != nil {
+					eni.Subnet.CIDR = subnet.CIDR.String()
+				}
+			}
+
+			if vpcs != nil {
+				if vpc, ok := vpcs[eni.VPC.ID]; ok {
+					eni.VPC.PrimaryCIDR = vpc.PrimaryCIDR
+					eni.VPC.CIDRs = vpc.CIDRs
+				}
+			}
+
+			eniRevision := ipamTypes.InterfaceRevision{Resource: eni.DeepCopy()}
+			instance.Interfaces[ifaceID] = eniRevision
+		}
+	}
+
+	return &instance, nil
+}
+
 func (e *API) GetInstances(ctx context.Context, vpcs ipamTypes.VirtualNetworkMap, subnets ipamTypes.SubnetMap) (*ipamTypes.InstanceMap, error) {
 	instances := ipamTypes.NewInstanceMap()
 
@@ -615,4 +654,8 @@ func (e *API) GetSecurityGroups(ctx context.Context) (types.SecurityGroupMap, er
 		securityGroups[sg.ID] = sg.DeepCopy()
 	}
 	return securityGroups, nil
+}
+
+func (e *API) GetInstanceTypes(ctx context.Context) ([]ec2_types.InstanceTypeInfo, error) {
+	return e.instanceTypes, nil
 }

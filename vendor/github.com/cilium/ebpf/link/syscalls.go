@@ -24,6 +24,9 @@ const (
 	XDPType           = sys.BPF_LINK_TYPE_XDP
 	PerfEventType     = sys.BPF_LINK_TYPE_PERF_EVENT
 	KprobeMultiType   = sys.BPF_LINK_TYPE_KPROBE_MULTI
+	TCXType           = sys.BPF_LINK_TYPE_TCX
+	UprobeMultiType   = sys.BPF_LINK_TYPE_UPROBE_MULTI
+	NetfilterType     = sys.BPF_LINK_TYPE_NETFILTER
 )
 
 var haveProgAttach = internal.NewFeatureTest("BPF_PROG_ATTACH", "4.10", func() error {
@@ -46,7 +49,7 @@ var haveProgAttach = internal.NewFeatureTest("BPF_PROG_ATTACH", "4.10", func() e
 	return nil
 })
 
-var haveProgAttachReplace = internal.NewFeatureTest("BPF_PROG_ATTACH atomic replacement", "5.5", func() error {
+var haveProgAttachReplace = internal.NewFeatureTest("BPF_PROG_ATTACH atomic replacement of MULTI progs", "5.5", func() error {
 	if err := haveProgAttach(); err != nil {
 		return err
 	}
@@ -60,9 +63,11 @@ var haveProgAttachReplace = internal.NewFeatureTest("BPF_PROG_ATTACH atomic repl
 			asm.Return(),
 		},
 	})
+
 	if err != nil {
 		return internal.ErrNotSupported
 	}
+
 	defer prog.Close()
 
 	// We know that we have BPF_PROG_ATTACH since we can load CGroupSKB programs.
@@ -70,10 +75,10 @@ var haveProgAttachReplace = internal.NewFeatureTest("BPF_PROG_ATTACH atomic repl
 	// present.
 	attr := sys.ProgAttachAttr{
 		// We rely on this being checked after attachFlags.
-		TargetFd:    ^uint32(0),
-		AttachBpfFd: uint32(prog.FD()),
-		AttachType:  uint32(ebpf.AttachCGroupInetIngress),
-		AttachFlags: uint32(flagReplace),
+		TargetFdOrIfindex: ^uint32(0),
+		AttachBpfFd:       uint32(prog.FD()),
+		AttachType:        uint32(ebpf.AttachCGroupInetIngress),
+		AttachFlags:       uint32(flagReplace),
 	}
 
 	err = sys.ProgAttach(&attr)
@@ -108,16 +113,52 @@ var haveProgQuery = internal.NewFeatureTest("BPF_PROG_QUERY", "4.15", func() err
 		// We rely on this being checked during the syscall.
 		// With an otherwise correct payload we expect EBADF here
 		// as an indication that the feature is present.
-		TargetFd:   ^uint32(0),
-		AttachType: sys.AttachType(ebpf.AttachCGroupInetIngress),
+		TargetFdOrIfindex: ^uint32(0),
+		AttachType:        sys.AttachType(ebpf.AttachCGroupInetIngress),
 	}
 
 	err := sys.ProgQuery(&attr)
-	if errors.Is(err, unix.EINVAL) {
-		return internal.ErrNotSupported
-	}
+
 	if errors.Is(err, unix.EBADF) {
 		return nil
 	}
-	return err
+	if err != nil {
+		return ErrNotSupported
+	}
+	return errors.New("syscall succeeded unexpectedly")
+})
+
+var haveTCX = internal.NewFeatureTest("tcx", "6.6", func() error {
+	prog, err := ebpf.NewProgram(&ebpf.ProgramSpec{
+		Type:    ebpf.SchedCLS,
+		License: "MIT",
+		Instructions: asm.Instructions{
+			asm.Mov.Imm(asm.R0, 0),
+			asm.Return(),
+		},
+	})
+
+	if err != nil {
+		return internal.ErrNotSupported
+	}
+
+	defer prog.Close()
+	attr := sys.LinkCreateTcxAttr{
+		// We rely on this being checked during the syscall.
+		// With an otherwise correct payload we expect ENODEV here
+		// as an indication that the feature is present.
+		TargetIfindex: ^uint32(0),
+		ProgFd:        uint32(prog.FD()),
+		AttachType:    sys.AttachType(ebpf.AttachTCXIngress),
+	}
+
+	_, err = sys.LinkCreateTcx(&attr)
+
+	if errors.Is(err, unix.ENODEV) {
+		return nil
+	}
+	if err != nil {
+		return ErrNotSupported
+	}
+	return errors.New("syscall succeeded unexpectedly")
 })

@@ -5,9 +5,9 @@ package metrics
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
-	"time"
 
 	grpc_prometheus "github.com/grpc-ecosystem/go-grpc-prometheus"
 	"github.com/prometheus/client_golang/prometheus"
@@ -28,6 +28,7 @@ import (
 	_ "github.com/cilium/cilium/pkg/hubble/metrics/port-distribution" // invoke init
 	_ "github.com/cilium/cilium/pkg/hubble/metrics/tcp"               // invoke init
 	slim_corev1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/core/v1"
+	"github.com/cilium/cilium/pkg/time"
 )
 
 type PodDeletionHandler struct {
@@ -131,9 +132,14 @@ func EnableMetrics(log logrus.FieldLogger, metricsServer string, m []string, grp
 	}
 	go func() {
 		err := <-errChan
-		if err != nil {
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.WithError(err).Error("Unable to initialize metrics server")
 		}
 	}()
 	return nil
+}
+
+// Register registers additional metrics collectors within hubble metrics registry.
+func Register(cs ...prometheus.Collector) {
+	registry.MustRegister(cs...)
 }

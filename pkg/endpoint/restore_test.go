@@ -12,10 +12,11 @@ import (
 	"path/filepath"
 	"sort"
 
-	. "gopkg.in/check.v1"
+	. "github.com/cilium/checkmate"
 
 	"github.com/cilium/cilium/pkg/checker"
 	linuxDatapath "github.com/cilium/cilium/pkg/datapath/linux"
+	"github.com/cilium/cilium/pkg/datapath/linux/config"
 	"github.com/cilium/cilium/pkg/identity"
 	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/mac"
@@ -59,7 +60,7 @@ func (ds *EndpointSuite) endpointCreator(id uint16, secID identity.NumericIdenti
 	repo := ds.GetPolicyRepository()
 	repo.GetPolicyCache().LocalEndpointIdentityAdded(identity)
 
-	ep := NewEndpointWithState(ds, ds, testipcache.NewMockIPCache(), &FakeEndpointProxy{}, testidentity.NewMockIdentityAllocator(nil), id, StateReady)
+	ep := NewTestEndpointWithState(nil, ds, ds, testipcache.NewMockIPCache(), &FakeEndpointProxy{}, testidentity.NewMockIdentityAllocator(nil), id, StateReady)
 	// Random network ID and docker endpoint ID with 59 hex chars + 5 strID = 64 hex chars
 	ep.dockerNetworkID = "603e047d2268a57f5a5f93f7f9e1263e9207e348a06654bf64948def001" + strID
 	ep.dockerEndpointID = "93529fda8c401a071d21d6bd46fdf5499b9014dcb5a35f2e3efaa8d8002" + strID
@@ -81,7 +82,15 @@ func (ds *EndpointSuite) TestReadEPsFromDirNames(c *C) {
 	defer func() {
 		ds.datapath = oldDatapath
 	}()
-	ds.datapath = linuxDatapath.NewDatapath(linuxDatapath.DatapathConfiguration{}, nil, nil)
+	ds.datapath = linuxDatapath.NewDatapath(
+		linuxDatapath.DatapathParams{
+			RuleManager:    nil,
+			NodeAddressing: nil,
+			NodeMap:        nil,
+			ConfigWriter:   &config.HeaderfileWriter{},
+		},
+		linuxDatapath.DatapathConfiguration{},
+	)
 
 	epsWanted, _ := ds.createEndpoints()
 	tmpDir, err := os.MkdirTemp("", "cilium-tests")
@@ -151,7 +160,16 @@ func (ds *EndpointSuite) TestReadEPsFromDirNamesWithRestoreFailure(c *C) {
 	defer func() {
 		ds.datapath = oldDatapath
 	}()
-	ds.datapath = linuxDatapath.NewDatapath(linuxDatapath.DatapathConfiguration{}, nil, nil)
+
+	ds.datapath = linuxDatapath.NewDatapath(
+		linuxDatapath.DatapathParams{
+			RuleManager:    nil,
+			NodeAddressing: nil,
+			NodeMap:        nil,
+			ConfigWriter:   &config.HeaderfileWriter{},
+		},
+		linuxDatapath.DatapathConfiguration{},
+	)
 
 	eps, _ := ds.createEndpoints()
 	ep := eps[0]
@@ -217,7 +235,15 @@ func (ds *EndpointSuite) BenchmarkReadEPsFromDirNames(c *C) {
 	defer func() {
 		ds.datapath = oldDatapath
 	}()
-	ds.datapath = linuxDatapath.NewDatapath(linuxDatapath.DatapathConfiguration{}, nil, nil)
+	ds.datapath = linuxDatapath.NewDatapath(
+		linuxDatapath.DatapathParams{
+			RuleManager:    nil,
+			NodeAddressing: nil,
+			NodeMap:        nil,
+			ConfigWriter:   &config.HeaderfileWriter{},
+		},
+		linuxDatapath.DatapathConfiguration{},
+	)
 
 	epsWanted, _ := ds.createEndpoints()
 	tmpDir, err := os.MkdirTemp("", "cilium-tests")

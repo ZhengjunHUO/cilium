@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/cilium/cilium/pkg/byteorder"
 	"github.com/cilium/cilium/pkg/identity"
 	"github.com/cilium/cilium/pkg/monitor/api"
 )
@@ -47,6 +48,8 @@ func (n *DropNotify) dumpIdentity(buf *bufio.Writer, numeric DisplayFormat) {
 }
 
 var sourceFileNames = map[int]string{
+	// @@ source files list begin
+
 	// source files from bpf/
 	1: "bpf_host.c",
 	2: "bpf_lxc.c",
@@ -56,11 +59,40 @@ var sourceFileNames = map[int]string{
 	// header files from bpf/lib/
 	101: "arp.h",
 	102: "drop.h",
-	103: "egress_policies.h",
+	103: "srv6.h",
 	104: "icmp6.h",
 	105: "nodeport.h",
-	106: "encap.h",
-	//end
+	106: "lb.h",
+	107: "mcast.h",
+
+	// @@ source files list end
+}
+
+// DecodeDropNotify will decode 'data' into the provided DropNotify structure
+func DecodeDropNotify(data []byte, dn *DropNotify) error {
+	return dn.decodeDropNotify(data)
+}
+
+func (n *DropNotify) decodeDropNotify(data []byte) error {
+	if l := len(data); l < DropNotifyLen {
+		return fmt.Errorf("unexpected DropNotify data length, expected %d but got %d", DropNotifyLen, l)
+	}
+
+	n.Type = data[0]
+	n.SubType = data[1]
+	n.Source = byteorder.Native.Uint16(data[2:4])
+	n.Hash = byteorder.Native.Uint32(data[4:8])
+	n.OrigLen = byteorder.Native.Uint32(data[8:12])
+	n.CapLen = byteorder.Native.Uint32(data[12:16])
+	n.SrcLabel = identity.NumericIdentity(byteorder.Native.Uint32(data[16:20]))
+	n.DstLabel = identity.NumericIdentity(byteorder.Native.Uint32(data[20:24]))
+	n.DstID = byteorder.Native.Uint32(data[24:28])
+	n.Line = byteorder.Native.Uint16(data[28:30])
+	n.File = data[30]
+	n.ExtError = int8(data[31])
+	n.Ifindex = byteorder.Native.Uint32(data[32:36])
+
+	return nil
 }
 
 func decodeBPFSourceFileName(fileId int) string {

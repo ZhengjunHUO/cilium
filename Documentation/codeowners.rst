@@ -40,6 +40,8 @@ repository in the Cilium project:
   Provide guidance around the best use of Cilium project continuous
   integration and testing infrastructure, including GitHub actions, VM
   helpers, testing frameworks, etc.
+- `@cilium/community <https://github.com/orgs/cilium/teams/community>`__:
+  Maintain files that refer to Cilium community users such as USERS.md.
 - `@cilium/contributing <https://github.com/orgs/cilium/teams/contributing>`__:
   Encourage practices that ensure an inclusive contributor community. Review
   tooling and scripts used by contributors.
@@ -49,6 +51,9 @@ repository in the Cilium project:
   code owner is not expected to validate the technical correctness of
   submissions. Correctness is typically handled by another code owner group
   which is also assigned to any given piece of documentation.
+- `@cilium/sig-foundations <https://github.com/orgs/cilium/teams/sig-foundations>`__:
+  Review changes to the core libraries and provide guidance to overall
+  software architecture.
 - `@cilium/github-sec <https://github.com/orgs/cilium/teams/github-sec>`__:
   Responsible for maintaining the security of repositories in the Cilium
   project by maintaining best practices for workflow usage, for instance
@@ -110,7 +115,6 @@ the CODEOWNERS file in the corresponding repository.
 - `@cilium/ebpf-lib-maintainers <https://github.com/orgs/cilium/teams/ebpf-lib-maintainers>`__
 - `@cilium/hubble-maintainers <https://github.com/orgs/cilium/teams/hubble-maintainers>`__
 - `@cilium/image-tools-maintainers <https://github.com/orgs/cilium/teams/image-tools-maintainers>`__
-- `@cilium/iproute2-maintainers <https://github.com/orgs/cilium/teams/iproute2-maintainers>`__
 - `@cilium/metallb-maintainers <https://github.com/orgs/cilium/teams/metallb-maintainers>`__
 - `@cilium/openshift-terraform-maintainers <https://github.com/orgs/cilium/teams/openshift-terraform-maintainers>`__
 - `@cilium/proxy-maintainers <https://github.com/orgs/cilium/teams/proxy-maintainers>`__
@@ -139,6 +143,14 @@ external software and protocols:
   Provide background on how the Cilium Endpoint package fits into the overall
   agent architecture, relationship with generation of policy / datapath
   constructs, serialization and restore from disk.
+- `@cilium/envoy <https://github.com/orgs/cilium/teams/envoy>`__:
+  Maintain the L7 proxy integration with Envoy. This includes the
+  configurations for Envoy via xDS protocols as well as the extensible
+  proxylib framework for Go-based layer 7 filters.
+- `@cilium/egress-gateway <https://github.com/orgs/cilium/teams/egress-gateway>`__:
+  Maintain the egress gateway control plane and datapath logic.
+- `@cilium/fqdn <https://github.com/orgs/cilium/teams/fqdn>`__:
+  Maintain the L7 DNS proxy integration.
 - `@cilium/ipcache <https://github.com/orgs/cilium/teams/ipcache>`__:
   Provide background on how the userspace IPCache structure fits into the
   overall agent architecture, ordering constraints with respect to network
@@ -160,10 +172,8 @@ external software and protocols:
   component. Take care of the corresponding garbage collection and leader
   election logic.
 - `@cilium/proxy <https://github.com/orgs/cilium/teams/proxy>`__:
-  Review low-level implementations used to redirect and process traffic at
-  Layer 7, including via the Cilium DNS proxy and Envoy. Maintain the
-  configurations for Envoy via xDS protocols as well as the extensible
-  proxylib framework for Go-based layer 7 filters.
+  Review low-level implementations used to redirect L7 traffic to the actual
+  proxy implementations (FQDN, Envoy, ...).
 - `@cilium/sig-agent <https://github.com/orgs/cilium/teams/sig-agent>`__:
   Provide Cilium (agent) general Go review. Internal architecture, core data
   structures and daemon startup.
@@ -200,6 +210,9 @@ external software and protocols:
   Responsible for all policy logic from Kubernetes down to eBPF policymap
   entries, including all intermediate layers such as the Policy Repository,
   SelectorCache, PolicyCache, CachedSelectorPolicy, EndpointPolicy, etc.
+- `@cilium/sig-scalability <https://github.com/orgs/cilium/teams/sig-scalability>`__:
+  Maintain scalability and performance tests. Provide input on scalability
+  and performance related changes.
 - `@cilium/sig-servicemesh <https://github.com/orgs/cilium/teams/sig-servicemesh>`__:
   Provide input on the way that Service Mesh constructs such as Gateway API
   are converted into lower-level constructs backed by eBPF or Envoy

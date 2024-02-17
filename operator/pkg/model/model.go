@@ -7,12 +7,35 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Model holds an abstracted data model representing the translation
 // of various types of Kubernetes config to Cilium config.
 type Model struct {
 	HTTP []HTTPListener `json:"http,omitempty"`
+	TLS  []TLSListener  `json:"tls,omitempty"`
+}
+
+func (m *Model) GetListeners() []Listener {
+	var listeners []Listener
+
+	for i := range m.HTTP {
+		listeners = append(listeners, &m.HTTP[i])
+	}
+
+	for i := range m.TLS {
+		listeners = append(listeners, &m.TLS[i])
+	}
+
+	return listeners
+}
+
+type Listener interface {
+	GetSources() []FullyQualifiedResource
+	GetPort() uint32
+	GetAnnotations() map[string]string
+	GetLabels() map[string]string
 }
 
 // HTTPListener holds configuration for any listener that terminates and proxies HTTP
@@ -44,6 +67,89 @@ type HTTPListener struct {
 	Routes []HTTPRoute `json:"routes,omitempty"`
 	// Service configuration
 	Service *Service `json:"service,omitempty"`
+	// Infrastructure configuration
+	Infrastructure *Infrastructure `json:"infrastructure,omitempty"`
+	// ForceHTTPtoHTTPSRedirect enforces that, for HTTPListeners that have a
+	// TLS field set and create a HTTPS listener, an equivalent plaintext HTTP
+	// listener will be created that redirects requests from HTTP to HTTPS.
+	//
+	// This plaintext listener will override any other plaintext HTTP config in
+	// the final rendered Envoy Config.
+	ForceHTTPtoHTTPSRedirect bool
+}
+
+func (l *HTTPListener) GetSources() []FullyQualifiedResource {
+	return l.Sources
+}
+
+func (l *HTTPListener) GetPort() uint32 {
+	return l.Port
+}
+
+func (l *HTTPListener) GetAnnotations() map[string]string {
+	if l.Infrastructure != nil {
+		return l.Infrastructure.Annotations
+	}
+	return nil
+}
+
+func (l *HTTPListener) GetLabels() map[string]string {
+	if l.Infrastructure != nil {
+		return l.Infrastructure.Labels
+	}
+	return nil
+}
+
+// TLSListener holds configuration for any listener that proxies TLS
+// based on the SNI value.
+// Each holds the configuration info for one distinct TLS listener, by
+//   - Hostname
+//   - Address
+//   - Port
+type TLSListener struct {
+	// Name of the TLSListener
+	Name string `json:"name,omitempty"`
+	// Sources is a slice of fully qualified resources this TLSListener is sourced
+	// from.
+	Sources []FullyQualifiedResource `json:"sources,omitempty"`
+	// IPAddress that the listener should listen on.
+	// The string must be parseable as an IP address.
+	Address string `json:"address,omitempty"`
+	// Port on which the service can be expected to be accessed by clients.
+	Port uint32 `json:"port,omitempty"`
+	// Hostname that the listener should match.
+	// Wildcards are supported in prefix or suffix forms, or the special wildcard `*`.
+	// An empty list means that the Listener should match all hostnames.
+	Hostname string `json:"hostname,omitempty"`
+	// Routes associated with traffic to the service.
+	// An empty list means that traffic will not be routed.
+	Routes []TLSRoute `json:"routes,omitempty"`
+	// Service configuration
+	Service *Service `json:"service,omitempty"`
+	// Infrastructure configuration
+	Infrastructure *Infrastructure `json:"infrastructure,omitempty"`
+}
+
+func (l *TLSListener) GetAnnotations() map[string]string {
+	if l.Infrastructure != nil {
+		return l.Infrastructure.Annotations
+	}
+	return nil
+}
+
+func (l *TLSListener) GetLabels() map[string]string {
+	if l.Infrastructure != nil {
+		return l.Infrastructure.Labels
+	}
+	return nil
+}
+
+func (l *TLSListener) GetSources() []FullyQualifiedResource {
+	return l.Sources
+}
+
+func (l *TLSListener) GetPort() uint32 {
+	return l.Port
 }
 
 // Service holds the configuration for desired Service details
@@ -129,6 +235,24 @@ type HTTPRequestRedirectFilter struct {
 	StatusCode *int `json:"statusCode,omitempty"`
 }
 
+// HTTPURLRewriteFilter defines a filter that modifies a request during
+// forwarding. At most one of these filters may be used on a Route rule. This
+// MUST NOT be used on the same Route rule as a HTTPRequestRedirect filter.
+type HTTPURLRewriteFilter struct {
+	// Hostname is the value to be used to replace the Host header value during
+	// forwarding.
+	HostName *string `json:"hostname,omitempty"`
+
+	// Path is the values to be used to replace the path
+	Path *StringMatch `json:"path,omitempty"`
+}
+
+// HTTPRequestMirror defines configuration for the RequestMirror filter.
+type HTTPRequestMirror struct {
+	// Backend is the backend handling the requests
+	Backend *Backend `json:"backend,omitempty"`
+}
+
 // HTTPRoute holds all the details needed to route HTTP traffic to a backend.
 type HTTPRoute struct {
 	Name string `json:"name,omitempty"`
@@ -143,6 +267,8 @@ type HTTPRoute struct {
 	Method           *string         `json:"method,omitempty"`
 	// Backend is the backend handling the requests
 	Backends []Backend `json:"backends,omitempty"`
+	// BackendHTTPFilters can be used to add or remove HTTP
+	BackendHTTPFilters []*BackendHTTPFilter `json:"backend_http_filters,omitempty"`
 	// DirectResponse instructs the proxy to respond directly to the client.
 	DirectResponse *DirectResponse `json:"direct_response,omitempty"`
 
@@ -157,6 +283,41 @@ type HTTPRoute struct {
 	// RequestRedirect defines a schema for a filter that responds to the
 	// request with an HTTP redirection.
 	RequestRedirect *HTTPRequestRedirectFilter `json:"requestRedirect,omitempty"`
+
+	// Rewrite defines a schema for a filter that modifies the URL of the request.
+	Rewrite *HTTPURLRewriteFilter `json:"rewrite,omitempty"`
+
+	// RequestMirrors defines a schema for a filter that mirrors HTTP requests
+	// Unlike other filter, multiple request mirrors are supported
+	RequestMirrors []*HTTPRequestMirror `json:"request_mirror,omitempty"`
+
+	// IsGRPC is an indicator if this route is related to GRPC
+	IsGRPC bool `json:"is_grpc,omitempty"`
+
+	// Timeout holds the timeout configuration for a route.
+	Timeout Timeout `json:"timeout,omitempty"`
+}
+
+type BackendHTTPFilter struct {
+	// Name is the name of the Backend, the name is having the format of "namespace:name:port"
+	Name string `json:"name"`
+	// RequestHeaderFilter can be used to add or remove an HTTP
+	//header from an HTTP request before it is sent to the upstream target.
+	RequestHeaderFilter *HTTPHeaderFilter `json:"request_header_filter,omitempty"`
+
+	// ResponseHeaderModifier can be used to add or remove an HTTP
+	//header from an HTTP response before it is sent to the client.
+	ResponseHeaderModifier *HTTPHeaderFilter `json:"response_header_modifier,omitempty"`
+}
+
+// Infrastructure holds the labels and annotations configuration,
+// which will be propagated to LB service.
+type Infrastructure struct {
+	// Labels is a map of labels to be propagated to LB service.
+	Labels map[string]string `json:"labels,omitempty"`
+
+	// Annotations is a map of annotations to be propagated to LB service.
+	Annotations map[string]string `json:"annotations,omitempty"`
 }
 
 // GetMatchKey returns the key to be used for matching the backend.
@@ -192,6 +353,15 @@ func (r *HTTPRoute) GetMatchKey() string {
 	}
 
 	return sb.String()
+}
+
+// TLSRoute holds all the details needed to route TLS traffic to a backend.
+type TLSRoute struct {
+	Name string `json:"name,omitempty"`
+	// Hostnames that the route should match
+	Hostnames []string `json:"hostnames,omitempty"`
+	// Backend is the backend handling the requests
+	Backends []Backend `json:"backends,omitempty"`
 }
 
 // StringMatch describes various types of string matching.
@@ -264,4 +434,12 @@ func (be *BackendPort) GetPort() string {
 		return strconv.Itoa(int(be.Port))
 	}
 	return be.Name
+}
+
+// Timeout holds the timeout configuration for a route.
+type Timeout struct {
+	// Request is the timeout for the request.
+	Request *time.Duration
+	// Backend is the timeout for the backend.
+	Backend *time.Duration
 }

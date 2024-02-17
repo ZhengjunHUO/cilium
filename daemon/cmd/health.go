@@ -7,23 +7,26 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
-	"time"
 
 	healthApi "github.com/cilium/cilium/api/v1/health/server"
 	health "github.com/cilium/cilium/cilium-health/launch"
 	"github.com/cilium/cilium/pkg/controller"
+	"github.com/cilium/cilium/pkg/datapath/linux/sysctl"
 	"github.com/cilium/cilium/pkg/endpoint"
 	"github.com/cilium/cilium/pkg/health/defaults"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/node"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/pidfile"
+	"github.com/cilium/cilium/pkg/time"
 )
 
-func (d *Daemon) initHealth(spec *healthApi.Spec, cleaner *daemonCleanup) {
+var healthControllerGroup = controller.NewGroup("cilium-health")
+
+func (d *Daemon) initHealth(spec *healthApi.Spec, cleaner *daemonCleanup, sysctl sysctl.Sysctl) {
 	// Launch cilium-health in the same process (and namespace) as cilium.
 	log.Info("Launching Cilium health daemon")
-	if ch, err := health.Launch(spec); err != nil {
+	if ch, err := health.Launch(spec, d.datapath.Loader().HostDatapathInitialized()); err != nil {
 		log.WithError(err).Fatal("Failed to launch cilium-health")
 	} else {
 		d.ciliumHealth = ch
@@ -51,8 +54,10 @@ func (d *Daemon) initHealth(spec *healthApi.Spec, cleaner *daemonCleanup) {
 	// Wait for the API, then launch the controller
 	var client *health.Client
 
-	controller.NewManager().UpdateController(defaults.HealthEPName,
+	controller.NewManager().UpdateController(
+		defaults.HealthEPName,
 		controller.ControllerParams{
+			Group: healthControllerGroup,
 			DoFunc: func(ctx context.Context) error {
 				var err error
 
@@ -76,6 +81,7 @@ func (d *Daemon) initHealth(spec *healthApi.Spec, cleaner *daemonCleanup) {
 						d.l7Proxy,
 						d.identityAllocator,
 						d.healthEndpointRouting,
+						sysctl,
 					)
 					if launchErr != nil {
 						if err != nil {
